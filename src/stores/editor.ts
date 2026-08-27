@@ -3,7 +3,8 @@ import { defineStore } from 'pinia'
 import type {
   AnimatableProperty, Aurora3DScene, AuroraCamera, AuroraInfluenceType, AuroraLight,
   AuroraPathOrientation, AuroraPathPointMode,
-  EditorLayer, EditorProject, MediaAsset, SerializedEditorState, WorkspaceId,
+  AuroraCameraCut, EditorLayer, EditorNode, EditorNodeConnection, EditorNodeKind, EditorProject,
+  MediaAsset, SerializedEditorState, WorkspaceId,
 } from '@/models/editor'
 import { evaluateNumericProperty } from '@/engine/animation/evaluateProperty'
 import { ensureNumericKeyframe, setNumericPropertyAtTime, toggleNumericKeyframe } from '@/engine/animation/editNumericProperty'
@@ -15,6 +16,10 @@ import {
   type PathHandleKey, type PathVector,
 } from '@/engine/scene3d/pathEditing'
 import { createInfluence, influenceParameters } from '@/engine/scene3d/influences'
+import { normalizeCameraCuts, sortedCameraCuts } from '@/engine/scene3d/cameraCuts'
+import {
+  canConnect, createDemoNodeGraph, createNode, NODE_DEFINITIONS, syncDynamicInputs, type ConnectionRequest,
+} from '@/engine/nodes/nodeGraph'
 
 const property = (id: string, value: number): AnimatableProperty<number> => ({
   id,
@@ -80,6 +85,11 @@ export const useEditorStore = defineStore('editor', () => {
     { id: 'layer-audio', name: 'Deep Signal', type: 'audio', start: 0, duration: 18, color: '#5c9b82', visible: true, locked: false, muted: false, expanded: false, transform: makeTransform('audio'), effects: ['Gain'] },
   ])
   const scenes3D = ref<Aurora3DScene[]>([createDemo3DScene()])
+  const demoGraph = createDemoNodeGraph(layers.value)
+  const nodes = ref<EditorNode[]>(demoGraph.nodes)
+  const nodeConnections = ref<EditorNodeConnection[]>(demoGraph.connections)
+  const selectedConnectionId = ref<string | null>(null)
+  const renderRootNodeId = ref<string | null>(null)
 
   const titleLayer = layers.value.find((layer) => layer.id === 'layer-title')
   if (titleLayer) {
@@ -98,12 +108,7 @@ export const useEditorStore = defineStore('editor', () => {
     ]
   }
 
-  const defaultState = deserializeEditorState(null, {
-    project: project.value,
-    layers: layers.value,
-    scenes3D: scenes3D.value,
-    assets: assets.value,
-  })
+  const defaultState = deserializeEditorState(null, currentState())
   let persistenceReady = false
   let saveTimer: number | null = null
   let changeRevision = 0
@@ -114,15 +119,23 @@ export const useEditorStore = defineStore('editor', () => {
     layers.value = state.layers
     scenes3D.value = state.scenes3D
     assets.value = state.assets
+    nodes.value = state.nodes
+    nodeConnections.value = state.nodeConnections
   }
 
-  function projectSnapshot(): SerializedEditorState {
-    return JSON.parse(serializeEditorState({
+  function currentState(): SerializedEditorState {
+    return {
       project: project.value,
       layers: layers.value,
       scenes3D: scenes3D.value,
       assets: assets.value,
-    })) as SerializedEditorState
+      nodes: nodes.value,
+      nodeConnections: nodeConnections.value,
+    }
+  }
+
+  function projectSnapshot(): SerializedEditorState {
+    return JSON.parse(serializeEditorState(currentState())) as SerializedEditorState
   }
 
   async function initializePersistence() {
@@ -930,6 +943,160 @@ export const useEditorStore = defineStore('editor', () => {
     markSceneChanged(scene)
   }
 
+  function add3DCameraCut(cameraId: string, time: number = currentTime.value) {
+    const scene = selectedScene.value
+    if (!scene || !scene.cameras.some((camera) => camera.id === cameraId)) return null
+    const frameTime = Math.round(Math.max(0, Math.min(project.value.duration, time)) * project.value.frameRate) / project.value.frameRate
+    const tolerance = .5 / project.value.frameRate
+    const existing = scene.cameraCuts.find((cut) => Math.abs(cut.time - frameTime) <= tolerance)
+    if (existing) {
+      existing.cameraId = cameraId
+      scene.cameraCuts = normalizeCameraCuts(scene)
+      markSceneChanged(scene)
+      return existing
+    }
+    const cut: AuroraCameraCut = { id: crypto.randomUUID(), cameraId, time: frameTime }
+    scene.cameraCuts.push(cut)
+    scene.cameraCuts = normalizeCameraCuts(scene)
+    markSceneChanged(scene)
+    return cut
+  }
+
+  function set3DCameraCutCamera(cutId: string, cameraId: string) {
+    const scene = selectedScene.value
+    const cut = scene?.cameraCuts.find((item) => item.id === cutId)
+    if (!scene || !cut || !scene.cameras.some((camera) => camera.id === cameraId)) return
+    cut.cameraId = cameraId
+    markSceneChanged(scene)
+  }
+
+  function move3DCameraCut(cutId: string, time: number) {
+    const scene = selectedScene.value
+    if (!scene) return
+    const cuts = sortedCameraCuts(scene)
+    const index = cuts.findIndex((cut) => cut.id === cutId)
+    if (index <= 0) return
+    const frame = 1 / project.value.frameRate
+    const previous = cuts[index - 1]!
+    const next = cuts[index + 1]
+    let frameTime = snap.value ? Math.round(time * project.value.frameRate) / project.value.frameRate : time
+    frameTime = Math.max(previous.time + frame, Math.min((next?.time ?? project.value.duration + frame) - frame, frameTime))
+    cuts[index]!.time = frameTime
+    scene.cameraCuts = normalizeCameraCuts(scene, cuts)
+    currentTime.value = frameTime
+    markSceneChanged(scene)
+  }
+
+  function delete3DCameraCut(cutId: string) {
+    const scene = selectedScene.value
+    if (!scene || scene.cameraCuts.length <= 1) return
+    const cuts = sortedCameraCuts(scene)
+    if (cuts[0]?.id === cutId) return
+    scene.cameraCuts = normalizeCameraCuts(scene, cuts.filter((cut) => cut.id !== cutId))
+    markSceneChanged(scene)
+  }
+
+  function selectNode(nodeId: string | null) {
+    selectedNodeId.value = nodeId ?? ''
+    if (nodeId) selectedConnectionId.value = null
+  }
+
+  function selectNodeConnection(connectionId: string | null) {
+    selectedConnectionId.value = connectionId
+    if (connectionId) selectedNodeId.value = ''
+  }
+
+  function addNode(kind: EditorNodeKind, x: number, y: number) {
+    const node = createNode(kind, x, y)
+    nodes.value.push(node)
+    selectNode(node.id)
+    markChanged()
+    return node
+  }
+
+  function moveNode(nodeId: string, x: number, y: number) {
+    const node = nodes.value.find((item) => item.id === nodeId)
+    if (!node || (node.x === Math.round(x) && node.y === Math.round(y))) return
+    node.x = Math.round(x)
+    node.y = Math.round(y)
+    markChanged()
+  }
+
+  function deleteNode(nodeId: string) {
+    if (!nodes.value.some((node) => node.id === nodeId)) return
+    nodes.value = nodes.value.filter((node) => node.id !== nodeId)
+    nodeConnections.value = nodeConnections.value.filter((connection) => connection.fromNodeId !== nodeId && connection.toNodeId !== nodeId)
+    if (selectedNodeId.value === nodeId) selectedNodeId.value = ''
+    if (renderRootNodeId.value === nodeId) renderRootNodeId.value = null
+    refreshDynamicInputs()
+    markChanged()
+  }
+
+  /** An input takes a single link, so connecting to a used one replaces what was there. */
+  function connectNodes(request: ConnectionRequest) {
+    if (!canConnect(nodes.value, nodeConnections.value, request)) return null
+    const connection: EditorNodeConnection = { id: crypto.randomUUID(), ...request }
+    nodeConnections.value = [
+      ...nodeConnections.value.filter((item) => !(item.toNodeId === request.toNodeId && item.toPortId === request.toPortId)),
+      connection,
+    ]
+    refreshDynamicInputs()
+    selectNodeConnection(connection.id)
+    markChanged()
+    return connection
+  }
+
+  function disconnectNodes(connectionId: string) {
+    if (!nodeConnections.value.some((connection) => connection.id === connectionId)) return
+    nodeConnections.value = nodeConnections.value.filter((connection) => connection.id !== connectionId)
+    refreshDynamicInputs()
+    if (selectedConnectionId.value === connectionId) selectedConnectionId.value = null
+    markChanged()
+  }
+
+  function refreshDynamicInputs() {
+    nodes.value.forEach((node) => syncDynamicInputs(node, nodeConnections.value))
+  }
+
+  function setNodeSource(nodeId: string, sourceId: string | null) {
+    const node = nodes.value.find((item) => item.id === nodeId)
+    if (!node) return
+    if (sourceId) node.sourceId = sourceId
+    else delete node.sourceId
+    const layer = sourceId ? layers.value.find((item) => item.id === sourceId) : undefined
+    node.title = layer?.name ?? NODE_DEFINITIONS[node.kind].label
+    markChanged()
+  }
+
+  /** Writes the inline default of an unlinked input socket. A linked socket takes its value upstream. */
+  function setNodeSocketValue(nodeId: string, socketId: string, value: number) {
+    const socket = nodes.value.find((item) => item.id === nodeId)?.inputs.find((item) => item.id === socketId)
+    if (!socket || !Number.isFinite(value) || socket.value === value) return
+    socket.value = value
+    markChanged()
+  }
+
+  function setNodeProperty(nodeId: string, key: string, value: string) {
+    const node = nodes.value.find((item) => item.id === nodeId)
+    if (!node || node.properties[key] === value) return
+    node.properties[key] = value
+    markChanged()
+  }
+
+  function toggleNodeMuted(nodeId: string) {
+    const node = nodes.value.find((item) => item.id === nodeId)
+    if (!node) return
+    node.muted = !node.muted
+    markChanged()
+  }
+
+  /** Activating a Viewer redirects the viewport to that branch; deactivating returns it to Composite. */
+  function setRenderRootNode(nodeId: string | null) {
+    const node = nodeId ? nodes.value.find((item) => item.id === nodeId) : null
+    renderRootNodeId.value = node?.kind === 'viewer' ? node.id : null
+    markChanged()
+  }
+
   function startExport() {
     exportProgress.value = 1
     const interval = window.setInterval(() => {
@@ -941,6 +1108,9 @@ export const useEditorStore = defineStore('editor', () => {
   return {
     project, workspace, currentTime, playing, loop, autoKey, snap, ripple, selectedLayerId, selectedKeyframeId,
     selectedNodeId, selectedSceneId, selectedSceneEntityId, zoom, saveStatus, exportProgress, assets, layers, scenes3D,
+    nodes, nodeConnections, selectedConnectionId, renderRootNodeId,
+    selectNode, selectNodeConnection, addNode, moveNode, deleteNode, connectNodes, disconnectNodes,
+    setNodeSource, setNodeSocketValue, setNodeProperty, toggleNodeMuted, setRenderRootNode,
     selectedLayer, selectedScene, selectedSceneEntity,
     togglePlayback, setTime, stepFrame, setProjectDuration, addKeyframe, setLayerValue, addFiles,
     addAssetToTimeline, addGeneratedLayer, reorderTrack, moveSegmentToTrack, moveSegmentToNewTrack, addEmptyTrack,
@@ -949,6 +1119,7 @@ export const useEditorStore = defineStore('editor', () => {
     selectSceneEntity, markSceneChanged, add3DPrimitive, add3DLight, add3DCamera, set3DEntityTransform,
     update3DEntityTransform, set3DObjectMaterial, set3DLightIntensity, set3DCameraFov,
     toggle3DKeyframe, keySelected3DTransform, move3DKeyframe, delete3DKeyframe, setActive3DCamera,
+    add3DCameraCut, set3DCameraCutCamera, move3DCameraCut, delete3DCameraCut,
     add3DPath, delete3DPath, findScenePath, move3DPathPoint, set3DPathPointAxis, set3DPathPointMode,
     add3DPathPoint, delete3DPathPoint, toggle3DPathClosed, set3DPathColor, set3DPathLocked,
     setCameraPathConstraint, setCameraPathOrientation, setCameraPathTarget, setCameraPathProgress, setCameraPathBank,

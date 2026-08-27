@@ -1,13 +1,56 @@
-import type { Aurora3DScene, EditorLayer, EditorProject, MediaAsset, SerializedEditorState } from '@/models/editor'
+import type {
+  Aurora3DScene, EditorLayer, EditorNode, EditorNodeConnection, EditorProject, MediaAsset, SerializedEditorState,
+} from '@/models/editor'
 import { makePathOffset, numericProperty } from '@/engine/scene3d/sceneFactory'
+import { createDemoNodeGraph, NODE_DEFINITIONS } from '@/engine/nodes/nodeGraph'
+import { normalizeCameraCuts } from '@/engine/scene3d/cameraCuts'
 
-export const CURRENT_PROJECT_VERSION = 4
+export const CURRENT_PROJECT_VERSION = 8
 
 export interface EditorStateFallback {
   project: EditorProject
   layers: EditorLayer[]
   scenes3D: Aurora3DScene[]
   assets: MediaAsset[]
+  nodes?: EditorNode[]
+  nodeConnections?: EditorNodeConnection[]
+}
+
+/**
+ * Projects saved before the node graph drove rendering get a fresh graph mirroring their layer
+ * stack. Anything referencing a node or port that no longer exists is dropped rather than left
+ * dangling, and missing parameter records are backfilled from the kind's defaults.
+ */
+function normalizeNodeGraph(nodes: unknown, connections: unknown, layers: EditorLayer[], version = CURRENT_PROJECT_VERSION) {
+  const demo = createDemoNodeGraph(layers)
+  const candidates = Array.isArray(nodes) ? nodes as EditorNode[] : []
+  // Graphs from before the effect chains existed described a composite the project no longer means.
+  if (version < 8) return demo
+  // Anything from before typed sockets cannot be repaired field by field, so rebuild it instead.
+  const usable = candidates.length > 0
+    && candidates.every((node) => node?.id && NODE_DEFINITIONS[node.kind] && Array.isArray(node.inputs) && Array.isArray(node.outputs))
+    && candidates.every((node) => [...node.inputs, ...node.outputs].every((socket) => socket?.id && socket.type))
+    && candidates.some((node) => Boolean(node.sourceId))
+  if (!usable) return demo
+  const restored = candidates
+  restored.forEach((node) => {
+    node.muted = Boolean(node.muted)
+    const definition = NODE_DEFINITIONS[node.kind]
+    node.properties = Object.fromEntries(definition.properties.map((property) => [
+      property.key,
+      definition.properties.find((item) => item.key === property.key)?.options.some((option) => option.value === node.properties?.[property.key])
+        ? node.properties[property.key]!
+        : property.value,
+    ]))
+  })
+  const byId = new Map(restored.map((node) => [node.id, node]))
+  const links = (Array.isArray(connections) ? connections as EditorNodeConnection[] : []).filter((connection) => {
+    const from = byId.get(connection?.fromNodeId)
+    const to = byId.get(connection?.toNodeId)
+    return Boolean(from?.outputs.some((port) => port.id === connection.fromPortId)
+      && to?.inputs.some((port) => port.id === connection.toPortId))
+  })
+  return { nodes: restored, connections: links }
 }
 
 function clone<T>(value: T): T {
@@ -16,6 +59,8 @@ function clone<T>(value: T): T {
 
 /** Projects saved before 3D paths existed have no `paths` array and no camera constraints to repair. */
 function normalizeScene(scene: Aurora3DScene): Aurora3DScene {
+  scene.cameraCuts = normalizeCameraCuts(scene, scene.cameraCuts)
+  if (!scene.cameras.some((camera) => camera.id === scene.activeCameraId)) scene.activeCameraId = scene.cameraCuts[0]?.cameraId ?? scene.cameras[0]?.id ?? null
   if (!Array.isArray(scene.paths)) scene.paths = []
   scene.objects.forEach((object) => {
     if (!Array.isArray(object.influences)) object.influences = []
@@ -46,8 +91,8 @@ function normalizeScene(scene: Aurora3DScene): Aurora3DScene {
 
 function cloneFallback(fallback: EditorStateFallback): SerializedEditorState {
   const state = clone(fallback)
-  state.scenes3D = state.scenes3D.map(normalizeScene)
-  return state
+  const graph = normalizeNodeGraph(state.nodes, state.nodeConnections, state.layers)
+  return { ...state, scenes3D: state.scenes3D.map(normalizeScene), nodes: graph.nodes, nodeConnections: graph.connections }
 }
 
 function sceneHasEntity(scene: Aurora3DScene, entityId: string) {
@@ -62,6 +107,8 @@ export function serializeEditorState(state: SerializedEditorState): string {
     layers: state.layers,
     scenes3D: state.scenes3D,
     assets: state.assets.map((asset) => ({ ...asset, thumbnail: asset.thumbnail?.startsWith('blob:') ? undefined : asset.thumbnail })),
+    nodes: state.nodes,
+    nodeConnections: state.nodeConnections,
   })
 }
 
@@ -111,6 +158,10 @@ export function deserializeEditorState(raw: string | null, fallback: EditorState
     }
     return {
       project: { ...clone(parsed.project), version: CURRENT_PROJECT_VERSION },
+      ...(() => {
+        const graph = normalizeNodeGraph(parsed.nodes, parsed.nodeConnections, layers, parsed.project.version ?? 1)
+        return { nodes: clone(graph.nodes), nodeConnections: clone(graph.connections) }
+      })(),
       layers,
       scenes3D: clone(scenes3D).map(normalizeScene),
       assets: Array.isArray(parsed.assets) ? clone(parsed.assets) : clone(fallback.assets),

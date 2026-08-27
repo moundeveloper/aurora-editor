@@ -124,6 +124,7 @@ export function createDemo3DScene(): Aurora3DScene {
     name: 'Aurora 3D Study',
     objects: [cube, floor],
     cameras: [camera],
+    cameraCuts: [{ id: 'camera-cut-main-0', cameraId: camera.id, time: 0 }],
     lights: [ambient, key, rim],
     paths: [],
     activeCameraId: camera.id,

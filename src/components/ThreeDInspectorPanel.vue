@@ -6,6 +6,7 @@ import { useEditorStore } from '@/stores/editor'
 import type { AnimatableProperty, Aurora3DPathPoint, AuroraPathPointMode } from '@/models/editor'
 import { evaluateNumericProperty } from '@/engine/animation/evaluateProperty'
 import { INFLUENCE_DEFINITIONS, INFLUENCE_TYPES, influenceParameters } from '@/engine/scene3d/influences'
+import { cameraIdAtTime } from '@/engine/scene3d/cameraCuts'
 import type { PathHandleKey } from '@/engine/scene3d/pathEditing'
 import KeyframeControl from './common/KeyframeControl.vue'
 import PanelHeader from './common/PanelHeader.vue'
@@ -17,6 +18,7 @@ const expandedPoints = ref<Record<string, boolean>>({})
 const entity = computed(() => selectedSceneEntity.value?.value)
 const transform = computed(() => entity.value?.transform)
 const scenePaths = computed(() => selectedScene.value?.paths ?? [])
+const programCameraId = computed(() => selectedScene.value ? cameraIdAtTime(selectedScene.value, currentTime.value) : null)
 const lookAtCandidates = computed(() => {
   const scene = selectedScene.value
   if (!scene) return []
@@ -122,7 +124,7 @@ function pointModeLabel(mode: AuroraPathPointMode) {
           </label>
           <label><span>Near</span><input v-model.number="selectedSceneEntity.value.near" type="number" min=".001" step=".1" @input="store.markSceneChanged()" /></label>
           <label><span>Far</span><input v-model.number="selectedSceneEntity.value.far" type="number" min="1" step="10" @input="store.markSceneChanged()" /></label>
-          <button class="active-camera" type="button" :disabled="selectedScene?.activeCameraId === selectedSceneEntity.value.id" @click="store.setActive3DCamera(selectedSceneEntity.value.id)">{{ selectedScene?.activeCameraId === selectedSceneEntity.value.id ? 'Active render camera' : 'Set as active camera' }}</button>
+          <button class="active-camera" type="button" :disabled="programCameraId === selectedSceneEntity.value.id" @click="store.add3DCameraCut(selectedSceneEntity.value.id)">{{ programCameraId === selectedSceneEntity.value.id ? 'Live program camera' : 'Cut to camera at playhead' }}</button>
         </div>
       </section>
 

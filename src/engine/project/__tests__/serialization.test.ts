@@ -7,6 +7,7 @@ import { createRenderPlan, HYBRID_ALPHA_CONTRACT, resolveRenderSize } from '@/en
 import { createDemo3DScene } from '@/engine/scene3d/sceneFactory'
 import { ThreeSceneRuntimeRegistry } from '@/engine/scene3d/ThreeSceneRuntime'
 import { CURRENT_PROJECT_VERSION, deserializeEditorState, serializeEditorState } from '@/engine/project/serialization'
+import { createDemoNodeGraph } from '@/engine/nodes/nodeGraph'
 import { AuroraProjectDatabase } from '@/engine/project/AuroraProjectDatabase'
 import type { EditorLayer, EditorProject, SerializedEditorState } from '@/models/editor'
 
@@ -23,6 +24,11 @@ function transform(prefix: string): EditorLayer['transform'] {
   }
 }
 
+const createDemoNodeGraph2 = () => {
+  const graph = createDemoNodeGraph()
+  return { nodes: graph.nodes, nodeConnections: graph.connections }
+}
+
 const layers: EditorLayer[] = [
   { id: 'title', name: 'Title', type: 'text', start: 0, duration: 18, color: '#fff', visible: true, locked: false, muted: false, expanded: false, transform: transform('title'), effects: [] },
   { id: 'scene-layer', name: 'Scene', type: '3d-scene', sceneId: 'scene-aurora-3d', start: 0, duration: 18, color: '#88f', visible: true, locked: false, muted: false, expanded: false, transform: transform('scene'), effects: [] },
@@ -30,7 +36,7 @@ const layers: EditorLayer[] = [
 
 describe('hybrid project architecture', () => {
   it('round-trips serialized 3D metadata without runtime Three objects', () => {
-    const state: SerializedEditorState = { project, layers, scenes3D: [createDemo3DScene()], assets: [] }
+    const state: SerializedEditorState = { project, layers, scenes3D: [createDemo3DScene()], assets: [], ...createDemoNodeGraph2() }
     const json = serializeEditorState(state)
     const restored = deserializeEditorState(json, state)
     expect(restored.project.version).toBe(CURRENT_PROJECT_VERSION)
@@ -40,7 +46,7 @@ describe('hybrid project architecture', () => {
   })
 
   it('migrates a version-one project with the demo 3D scene and layer', () => {
-    const fallback: SerializedEditorState = { project, layers, scenes3D: [createDemo3DScene()], assets: [] }
+    const fallback: SerializedEditorState = { project, layers, scenes3D: [createDemo3DScene()], assets: [], ...createDemoNodeGraph2() }
     const legacy = JSON.stringify({ project: { ...project, version: 1 }, layers: [layers[0]] })
     const restored = deserializeEditorState(legacy, fallback)
     expect(restored.project.version).toBe(CURRENT_PROJECT_VERSION)
@@ -49,7 +55,7 @@ describe('hybrid project architecture', () => {
   })
 
   it('centers the untouched legacy demo camera without overwriting a customized camera', () => {
-    const fallback: SerializedEditorState = { project, layers, scenes3D: [createDemo3DScene()], assets: [] }
+    const fallback: SerializedEditorState = { project, layers, scenes3D: [createDemo3DScene()], assets: [], ...createDemoNodeGraph2() }
     const legacyScene = createDemo3DScene()
     const legacyCamera = legacyScene.cameras[0]!
     legacyCamera.transform.position.x.value = 4.8
@@ -132,7 +138,7 @@ describe('hybrid project architecture', () => {
     const scene = createDemo3DScene()
     scene.objects[0]!.transform.position.x.value = 3.75
     scene.cameras[0]!.transform.rotation.y.value = 22
-    const state: SerializedEditorState = { project, layers, scenes3D: [scene], assets: [] }
+    const state: SerializedEditorState = { project, layers, scenes3D: [scene], assets: [], ...createDemoNodeGraph2() }
     await database.saveSnapshot(state)
     const restored = await database.loadActiveSnapshot()
     expect(restored?.layers.map((layer) => layer.id)).toEqual(layers.map((layer) => layer.id))

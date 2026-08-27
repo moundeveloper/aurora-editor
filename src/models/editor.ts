@@ -92,6 +92,13 @@ export interface AuroraCamera {
   pathConstraint?: AuroraCameraPathConstraint
 }
 
+/** A camera edit; it remains active until the next cut marker. */
+export interface AuroraCameraCut {
+  id: string
+  cameraId: string
+  time: number
+}
+
 export type AuroraPathPointMode = 'corner' | 'smooth'
 
 export interface Aurora3DPathPoint {
@@ -146,6 +153,7 @@ export interface Aurora3DScene {
   name: string
   objects: Aurora3DObject[]
   cameras: AuroraCamera[]
+  cameraCuts: AuroraCameraCut[]
   lights: AuroraLight[]
   paths: Aurora3DPath[]
   activeCameraId: string | null
@@ -187,6 +195,50 @@ export interface MediaAsset {
   sizeLabel?: string
 }
 
+export type EditorNodeKind =
+  | 'image' | 'text' | 'scene3d'
+  | 'translate' | 'rotate' | 'scale'
+  | 'blur' | 'glow' | 'vignette'
+  | 'invert' | 'brightnessContrast' | 'colorMatrix' | 'hueSaturation' | 'rgbToBw'
+  | 'mix' | 'stack' | 'math'
+  | 'output' | 'viewer'
+
+/** Sockets are typed like Blender's: an image stream, or a single number. */
+export type EditorNodeSocketType = 'image' | 'value'
+
+export interface EditorNodeSocket {
+  id: string
+  label: string
+  type: EditorNodeSocketType
+  /** Inline default used while nothing is linked. Image sockets carry no value of their own. */
+  value?: number
+}
+
+export interface EditorNode {
+  id: string
+  kind: EditorNodeKind
+  title: string
+  /** Graph-space position of the node's top-left corner, independent of pan and zoom. */
+  x: number
+  y: number
+  /** A muted node passes its first image input straight through. */
+  muted: boolean
+  /** Layer a source node reads from. Unbound source nodes contribute nothing to the render. */
+  sourceId?: string
+  /** Enum choices shown as dropdowns on the node body, such as a blend mode. */
+  properties: Record<string, string>
+  inputs: EditorNodeSocket[]
+  outputs: EditorNodeSocket[]
+}
+
+export interface EditorNodeConnection {
+  id: string
+  fromNodeId: string
+  fromPortId: string
+  toNodeId: string
+  toPortId: string
+}
+
 export interface EditorProject {
   id: string
   name: string
@@ -204,4 +256,6 @@ export interface SerializedEditorState {
   layers: EditorLayer[]
   scenes3D: Aurora3DScene[]
   assets: MediaAsset[]
+  nodes: EditorNode[]
+  nodeConnections: EditorNodeConnection[]
 }

@@ -5,6 +5,7 @@ import { evaluate3DPath, sampleLocalPath } from '@/engine/scene3d/pathEvaluation
 import { appendPathPoint, insertPathPoint, movePathHandle, movePathPoint, setPathPointMode } from '@/engine/scene3d/pathEditing'
 import { ThreeSceneRuntimeRegistry } from '@/engine/scene3d/ThreeSceneRuntime'
 import { CURRENT_PROJECT_VERSION, deserializeEditorState } from '@/engine/project/serialization'
+import { createDemoNodeGraph } from '@/engine/nodes/nodeGraph'
 import type { Aurora3DPathPoint, EditorLayer, EditorProject, SerializedEditorState } from '@/models/editor'
 
 const project: EditorProject = {
@@ -21,7 +22,10 @@ const layers: EditorLayer[] = [{
   },
 }]
 
-const fallbackState = (): SerializedEditorState => ({ project, layers, scenes3D: [createDemo3DScene()], assets: [] })
+const fallbackState = (): SerializedEditorState => {
+  const graph = createDemoNodeGraph()
+  return { project, layers, scenes3D: [createDemo3DScene()], assets: [], nodes: graph.nodes, nodeConnections: graph.connections }
+}
 
 const smoothPoint = (): Aurora3DPathPoint => ({
   id: 'point', position: [0, 0, 0], handleIn: [-1, 0, 0], handleOut: [1, 0, 0], mode: 'smooth',

@@ -1,4 +1,5 @@
-import type { Aurora3DScene, EditorLayer, EditorProject } from '@/models/editor'
+import type { Aurora3DScene, EditorLayer, EditorNode, EditorNodeConnection, EditorProject } from '@/models/editor'
+import { evaluateNodeGraph, NEUTRAL_EFFECTS, type GraphEffects, type NodeBlendMode } from '@/engine/nodes/evaluateGraph'
 
 export type RenderBackendId = 'pixi-webgl' | 'three-webgl' | 'canvas2d'
 export type RenderQuality = 'draft' | 'preview' | 'full'
@@ -17,6 +18,8 @@ export interface RenderPass {
   layerId: string
   backend: RenderBackendId
   sceneId?: string
+  effects: GraphEffects
+  blendMode: NodeBlendMode
 }
 
 export interface RenderPlan {
@@ -31,6 +34,10 @@ export interface RenderFrameRequest {
   project: EditorProject
   layers: EditorLayer[]
   scenes3D: Aurora3DScene[]
+  nodes?: EditorNode[]
+  nodeConnections?: EditorNodeConnection[]
+  /** A Viewer node takes over the frame when one is active; otherwise the Composite node is the root. */
+  renderRootNodeId?: string | null
   time: number
   width: number
   height: number
@@ -66,21 +73,50 @@ export function resolveRenderSize(width: number, height: number, quality: Render
   }
 }
 
+const isLayerLive = (layer: EditorLayer, time: number) =>
+  !layer.isPlaceholder && layer.visible && layer.type !== 'audio'
+  && time >= layer.start && time < layer.start + layer.duration
+
+const makePass = (id: string, layer: EditorLayer, effects: GraphEffects, blendMode: NodeBlendMode = 'normal'): RenderPass => ({
+  id,
+  layerId: layer.id,
+  backend: layer.type === '3d-scene' ? 'three-webgl' : 'pixi-webgl',
+  ...(layer.sceneId ? { sceneId: layer.sceneId } : {}),
+  effects,
+  blendMode,
+})
+
+/**
+ * The node graph decides what reaches the viewport: passes come from walking back through Media
+ * Output. A project without an output node — nothing has been authored yet — still renders its
+ * layer stack, so the graph is an upgrade rather than a prerequisite.
+ *
+ * A layer outside its time range is skipped either way; the graph controls composition, not timing.
+ */
 export function createRenderPlan(request: RenderFrameRequest): RenderPlan {
-  const activeLayers = request.layers
-    .filter((layer) => !layer.isPlaceholder && layer.visible && layer.type !== 'audio' && request.time >= layer.start && request.time < layer.start + layer.duration)
-    .reverse()
+  const layerMap = new Map(request.layers.map((layer) => [layer.id, layer]))
+  const graphPasses = request.nodes?.length
+    ? evaluateNodeGraph(request.nodes, request.nodeConnections ?? [], request.renderRootNodeId)
+    : null
+
+  const passes = graphPasses
+    ? graphPasses.flatMap((pass) => {
+      const layer = layerMap.get(pass.layerId)
+      return layer && isLayerLive(layer, request.time)
+        ? [makePass(`pass-${pass.nodeId}`, layer, pass.effects, pass.blendMode)]
+        : []
+    })
+    : request.layers
+      .filter((layer) => isLayerLive(layer, request.time))
+      .reverse()
+      .map((layer) => makePass(`pass-${layer.id}`, layer, NEUTRAL_EFFECTS))
+
   return {
     width: request.width,
     height: request.height,
     time: request.time,
     quality: request.quality,
-    passes: activeLayers.map((layer) => ({
-      id: `pass-${layer.id}`,
-      layerId: layer.id,
-      backend: layer.type === '3d-scene' ? 'three-webgl' : 'pixi-webgl',
-      ...(layer.sceneId ? { sceneId: layer.sceneId } : {}),
-    })),
+    passes,
   }
 }
 

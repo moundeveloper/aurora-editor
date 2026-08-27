@@ -9,10 +9,12 @@ import ViewerPanel from '@/components/ViewerPanel.vue'
 import InspectorPanel from '@/components/InspectorPanel.vue'
 import TimelinePanel from '@/components/TimelinePanel.vue'
 import NodeWorkspace from '@/components/NodeWorkspace.vue'
+import NodePreviewPanel from '@/components/NodePreviewPanel.vue'
 import AudioWorkspace from '@/components/AudioWorkspace.vue'
 import ExportWorkspace from '@/components/ExportWorkspace.vue'
 
 const ThreeDWorkspace = defineAsyncComponent(() => import('@/components/ThreeDWorkspace.vue'))
+const ThreeDPreviewPanel = defineAsyncComponent(() => import('@/components/ThreeDPreviewPanel.vue'))
 const SceneHierarchyPanel = defineAsyncComponent(() => import('@/components/SceneHierarchyPanel.vue'))
 const ThreeDInspectorPanel = defineAsyncComponent(() => import('@/components/ThreeDInspectorPanel.vue'))
 const ThreeDTimelinePanel = defineAsyncComponent(() => import('@/components/ThreeDTimelinePanel.vue'))
@@ -25,17 +27,20 @@ const bottomHeight = ref(258)
 const leftOpen = ref(true)
 const rightOpen = ref(true)
 const bottomOpen = ref(true)
+const nodePreviewHeight = computed(() => Math.round(Math.max(120, (rightWidth.value - 28) * 9 / 16 + 50)))
 const resizing = ref<'left' | 'right' | 'bottom' | null>(null)
 
 const layoutStyle = computed(() => ({
   '--left-width': leftOpen.value ? `${leftWidth.value}px` : '0px',
   '--right-width': rightOpen.value ? `${rightWidth.value}px` : '0px',
   '--bottom-height': bottomOpen.value ? `${bottomHeight.value}px` : '0px',
+  '--node-preview-height': `${nodePreviewHeight.value}px`,
 }))
 
 function startResize(type: 'left' | 'right' | 'bottom') {
   resizing.value = type
   document.body.classList.add('is-resizing')
+  document.body.dataset.resize = type
 }
 
 function resize(event: PointerEvent) {
@@ -48,6 +53,7 @@ function resize(event: PointerEvent) {
 function stopResize() {
   resizing.value = null
   document.body.classList.remove('is-resizing')
+  delete document.body.dataset.resize
 }
 
 function onKeydown(event: KeyboardEvent) {
@@ -87,7 +93,17 @@ onBeforeUnmount(() => {
         </div>
 
         <div v-show="rightOpen" class="pane-resizer vertical right" role="separator" aria-label="Resize inspector" @pointerdown="startResize('right')" />
-        <div v-show="rightOpen" class="right-pane"><ThreeDInspectorPanel v-if="workspace === '3D'" /><InspectorPanel v-else /></div>
+        <div v-show="rightOpen" class="right-pane" :class="{ 'preview-right-pane': workspace === 'Nodes' || workspace === '3D' }">
+          <template v-if="workspace === 'Nodes'">
+            <NodePreviewPanel />
+            <div class="node-inspector-pane"><InspectorPanel /></div>
+          </template>
+          <template v-else-if="workspace === '3D'">
+            <ThreeDPreviewPanel />
+            <div class="node-inspector-pane"><ThreeDInspectorPanel /></div>
+          </template>
+          <InspectorPanel v-else />
+        </div>
       </div>
 
       <div v-show="bottomOpen" class="pane-resizer horizontal" role="separator" aria-label="Resize timeline" @pointerdown="startResize('bottom')" />

@@ -1,12 +1,67 @@
-import { Container, Graphics, Sprite, Text, Texture, WebGLRenderer } from 'pixi.js'
+import { BlurFilter, ColorMatrixFilter, Container, FillGradient, Graphics, Sprite, Text, Texture, WebGLRenderer } from 'pixi.js'
 import * as THREE from 'three'
 import { evaluateNumericProperty } from '@/engine/animation/evaluateProperty'
 import { ThreeSceneRuntimeRegistry } from '@/engine/scene3d/ThreeSceneRuntime'
+import type { GraphEffects, NodeBlendMode } from '@/engine/nodes/evaluateGraph'
 import {
   createRenderPlan, HYBRID_ALPHA_CONTRACT, resolveRenderSize,
   type RenderBackend, type RenderFrameRequest, type RendererInitializationOptions, type RenderSurface,
 } from '@/engine/rendering/contracts'
 import type { EditorLayer } from '@/models/editor'
+import { cameraIdAtTime } from '@/engine/scene3d/cameraCuts'
+
+/** Colour nodes fold into one matrix so a chain of them still costs a single filter pass. */
+function colorFilterFor(effects: GraphEffects) {
+  const neutral = !effects.invert && !effects.brightness && !effects.contrast && !effects.temperature
+    && !effects.hue && effects.saturation === 1 && !effects.greyscale
+  if (neutral) return null
+  const filter = new ColorMatrixFilter()
+  if (effects.brightness) filter.brightness(1 + effects.brightness / 100, true)
+  if (effects.contrast) filter.contrast(effects.contrast / 100, true)
+  if (effects.temperature) {
+    // Warm pushes red and pulls blue; cool does the reverse.
+    const shift = effects.temperature / 100
+    filter.matrix = [
+      1 + shift * .25, 0, 0, 0, 0,
+      0, 1, 0, 0, 0,
+      0, 0, 1 - shift * .25, 0, 0,
+      0, 0, 0, 1, 0,
+    ]
+  }
+  if (effects.hue) filter.hue(effects.hue, true)
+  if (effects.saturation !== 1) filter.saturate(effects.saturation - 1, true)
+  if (effects.greyscale >= .5) filter.desaturate()
+  if (effects.invert >= .5) filter.negative(true)
+  return filter
+}
+
+/**
+ * A vignette needs a mask, and the renderer has no intermediate targets to build one in, so it is
+ * drawn as a radial gradient multiplied over the pass itself.
+ */
+function vignetteOverlay(effects: GraphEffects, width: number, height: number) {
+  if (effects.vignetteAmount <= 0) return null
+  const radius = Math.hypot(width, height) / 2
+  const inner = Math.max(.05, Math.min(.95, effects.vignetteSoftness / 100))
+  const gradient = new FillGradient({
+    type: 'radial',
+    center: { x: .5, y: .5 },
+    innerRadius: 0,
+    outerCenter: { x: .5, y: .5 },
+    outerRadius: .5,
+    colorStops: [
+      { offset: 0, color: '#ffffff' },
+      { offset: inner, color: '#ffffff' },
+      { offset: 1, color: '#000000' },
+    ],
+    textureSpace: 'local',
+  })
+  const overlay = new Graphics()
+  overlay.rect(-radius, -radius, radius * 2, radius * 2).fill(gradient)
+  overlay.blendMode = 'multiply'
+  overlay.alpha = Math.max(0, Math.min(1, effects.vignetteAmount / 100))
+  return overlay
+}
 
 export interface HybridRendererStats {
   backend: 'WebGL2'
@@ -124,10 +179,10 @@ export class HybridWebGLRenderBackend implements RenderBackend {
       if (pass.backend === 'three-webgl') {
         const scene = pass.sceneId ? sceneMap.get(pass.sceneId) : undefined
         if (!scene) return
-        this.renderThreeLayer(layer, scene, request.time, size.width, size.height)
+        this.renderThreeLayer(layer, scene, request.time, size.width, size.height, pass.effects)
         threePasses += 1
       } else {
-        this.renderPixiLayer(layer, request.time, size.width, size.height, request.project.width, request.project.height)
+        this.renderPixiLayer(layer, request.time, size.width, size.height, request.project.width, request.project.height, pass.effects, pass.blendMode)
         pixiPasses += 1
       }
     })
@@ -148,10 +203,27 @@ export class HybridWebGLRenderBackend implements RenderBackend {
     return { ...this.lastStats }
   }
 
-  private renderPixiLayer(layer: EditorLayer, time: number, width: number, height: number, projectWidth: number, projectHeight: number) {
+  private renderPixiLayer(layer: EditorLayer, time: number, width: number, height: number, projectWidth: number, projectHeight: number, effects: GraphEffects, blendMode: NodeBlendMode) {
     if (!this.pixiRenderer || !this.threeRenderer) return
     const container = this.createPixiLayer(layer, time, width, height, projectWidth, projectHeight)
     if (!container) return
+    // Node effects sit on top of the layer's own transform, so the graph shifts what the layer draws.
+    const scaleFactor = width / projectWidth
+    container.position.set(
+      container.position.x + effects.offsetX * scaleFactor,
+      container.position.y + effects.offsetY * scaleFactor,
+    )
+    container.rotation += THREE.MathUtils.degToRad(effects.rotation)
+    container.scale.set(container.scale.x * effects.scale, container.scale.y * effects.scale)
+    container.alpha *= effects.opacity
+    container.blendMode = blendMode
+    const filters = []
+    if (effects.blur > 0) filters.push(new BlurFilter({ strength: effects.blur * scaleFactor, quality: 4 }))
+    const colorMatrix = colorFilterFor(effects)
+    if (colorMatrix) filters.push(colorMatrix)
+    if (filters.length) container.filters = filters
+    const vignette = vignetteOverlay(effects, width, height)
+    if (vignette) container.addChild(vignette)
     this.pixiRenderer.resetState()
     this.pixiRenderer.render({ container, clear: false })
     container.destroy({ children: true })
@@ -237,12 +309,14 @@ export class HybridWebGLRenderBackend implements RenderBackend {
     return container
   }
 
-  private renderThreeLayer(layer: EditorLayer, sceneDefinition: RenderFrameRequest['scenes3D'][number], time: number, width: number, height: number) {
+  private renderThreeLayer(layer: EditorLayer, sceneDefinition: RenderFrameRequest['scenes3D'][number], time: number, width: number, height: number, effects: GraphEffects) {
     if (!this.threeRenderer) return
     const runtime = this.runtimeRegistry.get(sceneDefinition, width, height, time)
-    const camera = sceneDefinition.activeCameraId ? runtime.cameras.get(sceneDefinition.activeCameraId) : undefined
+    const cameraId = cameraIdAtTime(sceneDefinition, time)
+    const camera = cameraId ? runtime.cameras.get(cameraId) : undefined
     if (!camera) return
-    const layerOpacity = evaluateNumericProperty(layer.transform.opacity, time) / 100
+    // A 3D pass draws straight to the frame buffer, so only opacity carries over from the graph.
+    const layerOpacity = (evaluateNumericProperty(layer.transform.opacity, time) / 100) * effects.opacity
     runtime.root.traverse((object) => {
       if (!(object instanceof THREE.Mesh)) return
       const materials = Array.isArray(object.material) ? object.material : [object.material]

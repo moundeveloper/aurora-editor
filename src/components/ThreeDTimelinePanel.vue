@@ -1,21 +1,24 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { storeToRefs } from 'pinia'
-import { Box, Camera, Diamond, KeyRound, Magnet, Pause, Play, SkipBack, SkipForward, Spline, Sun, Trash2, ZoomIn, ZoomOut } from '@lucide/vue'
+import { Box, Camera, Diamond, KeyRound, Magnet, Pause, Play, Plus, SkipBack, SkipForward, Spline, Sun, Trash2, ZoomIn, ZoomOut } from '@lucide/vue'
 import { useEditorStore } from '@/stores/editor'
 import { evaluateNumericProperty } from '@/engine/animation/evaluateProperty'
 import { influenceParameters } from '@/engine/scene3d/influences'
+import { cameraIdAtTime, sortedCameraCuts } from '@/engine/scene3d/cameraCuts'
 import type { AnimatableProperty, Keyframe } from '@/models/editor'
 import IconButton from './common/IconButton.vue'
+import MSelect, { type MSelectOption } from './common/MSelect.vue'
 
 const LABEL_WIDTH = 220
 const store = useEditorStore()
-const { project, currentTime, playing, autoKey, snap, selectedSceneEntity, selectedSceneEntityId, selectedKeyframeId } = storeToRefs(store)
+const { project, currentTime, playing, autoKey, snap, selectedScene, selectedSceneEntity, selectedSceneEntityId, selectedKeyframeId } = storeToRefs(store)
 const timelineZoom = ref(100)
 const viewport = ref<HTMLElement>()
 const rulerLane = ref<HTMLElement>()
 const viewportWidth = ref(900)
 const selectedChannelId = ref<string | null>(null)
+const selectedCameraCutId = ref<string | null>(null)
 const isScrubbing = ref(false)
 const isPanning = ref(false)
 let resizeObserver: ResizeObserver | null = null
@@ -40,6 +43,8 @@ interface KeyframeDragState {
 }
 
 let keyframeDrag: KeyframeDragState | null = null
+let cameraCutDrag: { cutId: string; originalTime: number; startX: number; minTime: number; maxTime: number; moved: boolean } | null = null
+const cameraCutDragPreview = ref<{ cutId: string; time: number } | null>(null)
 
 const entity = computed(() => selectedSceneEntity.value?.value)
 const entityIcon = computed(() => {
@@ -101,6 +106,31 @@ const channels = computed<ChannelRow[]>(() => {
   }
   return rows
 })
+const cameraCuts = computed(() => {
+  const scene = selectedScene.value
+  if (!scene) return []
+  return sortedCameraCuts(scene).map((cut) => cut.id === cameraCutDragPreview.value?.cutId
+    ? { ...cut, time: cameraCutDragPreview.value.time }
+    : cut).sort((left, right) => left.time - right.time)
+})
+const cameraCutSegments = computed(() => cameraCuts.value.map((cut, index) => {
+  const end = cameraCuts.value[index + 1]?.time ?? project.value.duration
+  const camera = selectedScene.value?.cameras.find((item) => item.id === cut.cameraId)
+  return { cut, camera, index, end, duration: Math.max(0, end - cut.time) }
+}))
+const selectedCameraCut = computed(() => selectedScene.value?.cameraCuts.find((cut) => cut.id === selectedCameraCutId.value) ?? null)
+const canDeleteSelectedCameraCut = computed(() => {
+  if (!selectedCameraCut.value) return false
+  const cuts = cameraCuts.value
+  return cuts.length > 1 && cuts[0]?.id !== selectedCameraCut.value.id
+})
+const cameraOptions = computed<MSelectOption[]>(() => selectedScene.value?.cameras.map((camera) => ({ value: camera.id, label: camera.name })) ?? [])
+const selectedCutCamera = computed({
+  get: () => selectedCameraCut.value?.cameraId ?? '',
+  set: (cameraId: string) => {
+    if (selectedCameraCut.value) store.set3DCameraCutCamera(selectedCameraCut.value.id, cameraId)
+  },
+})
 const laneWidth = computed(() => {
   const fit = Math.max(360, viewportWidth.value - LABEL_WIDTH)
   return Math.max(fit, fit * timelineZoom.value / 100)
@@ -125,6 +155,17 @@ function channelValue(row: ChannelRow) {
 }
 
 function keyframeStyle(time: number) {
+  return { left: `${Math.max(0, Math.min(100, time / project.value.duration * 100))}%` }
+}
+
+function cameraSegmentStyle(start: number, end: number) {
+  return {
+    left: `${Math.max(0, start / project.value.duration * 100)}%`,
+    width: `${Math.max(0, (end - start) / project.value.duration * 100)}%`,
+  }
+}
+
+function cameraBoundaryStyle(time: number) {
   return { left: `${Math.max(0, Math.min(100, time / project.value.duration * 100))}%` }
 }
 
@@ -190,6 +231,7 @@ function selectKeyframe(row: ChannelRow, keyframe: Keyframe<number>) {
   store.setTime(keyframe.time)
   selectedChannelId.value = row.id
   selectedKeyframeId.value = keyframe.id
+  selectedCameraCutId.value = null
 }
 
 function beginKeyframeDrag(event: PointerEvent, row: ChannelRow, keyframe: Keyframe<number>) {
@@ -200,6 +242,42 @@ function beginKeyframeDrag(event: PointerEvent, row: ChannelRow, keyframe: Keyfr
   keyframeDrag = { row, keyframe, originalTime: keyframe.time, startX: event.clientX, moved: false }
 }
 
+function selectCameraCut(cutId: string) {
+  selectedCameraCutId.value = cutId
+  selectedKeyframeId.value = null
+}
+
+function beginCameraCutDrag(event: PointerEvent, cutId: string) {
+  if (event.button !== 0) return
+  const cuts = cameraCuts.value
+  const index = cuts.findIndex((cut) => cut.id === cutId)
+  if (index <= 0) return
+  event.preventDefault()
+  event.stopPropagation()
+  const frame = 1 / project.value.frameRate
+  const cut = cuts[index]!
+  cameraCutDrag = {
+    cutId,
+    originalTime: cut.time,
+    startX: event.clientX,
+    minTime: cuts[index - 1]!.time + frame,
+    maxTime: (cuts[index + 1]?.time ?? project.value.duration + frame) - frame,
+    moved: false,
+  }
+  cameraCutDragPreview.value = { cutId, time: cut.time }
+  selectCameraCut(cutId)
+}
+
+function addCameraCutAtPlayhead() {
+  const scene = selectedScene.value
+  if (!scene) return
+  const selectedCameraId = selectedSceneEntity.value?.kind === 'camera' ? selectedSceneEntity.value.value.id : null
+  const cameraId = selectedCameraId ?? cameraIdAtTime(scene, currentTime.value) ?? scene.cameras[0]?.id
+  if (!cameraId) return
+  const cut = store.add3DCameraCut(cameraId, currentTime.value)
+  if (cut) selectedCameraCutId.value = cut.id
+}
+
 function onPointerMove(event: PointerEvent) {
   if (panState && viewport.value) {
     viewport.value.scrollLeft = panState.scrollLeft - (event.clientX - panState.startX)
@@ -208,6 +286,15 @@ function onPointerMove(event: PointerEvent) {
   }
   if (isScrubbing.value) {
     store.setTime(timeAtClientX(event.clientX))
+    return
+  }
+  if (cameraCutDrag) {
+    let time = cameraCutDrag.originalTime + ((event.clientX - cameraCutDrag.startX) / laneWidth.value) * project.value.duration
+    if (snap.value) time = Math.round(time * project.value.frameRate) / project.value.frameRate
+    time = Math.max(cameraCutDrag.minTime, Math.min(cameraCutDrag.maxTime, time))
+    cameraCutDragPreview.value = { cutId: cameraCutDrag.cutId, time }
+    currentTime.value = time
+    cameraCutDrag.moved ||= Math.abs(event.clientX - cameraCutDrag.startX) > 2
     return
   }
   if (!keyframeDrag) return
@@ -223,11 +310,21 @@ function endPointerInteraction() {
   panState = null
   isPanning.value = false
   isScrubbing.value = false
+  if (cameraCutDrag?.moved && cameraCutDragPreview.value) store.move3DCameraCut(cameraCutDrag.cutId, cameraCutDragPreview.value.time)
+  cameraCutDrag = null
+  cameraCutDragPreview.value = null
   if (keyframeDrag?.moved) store.move3DKeyframe(keyframeDrag.row.id, keyframeDrag.keyframe.id, keyframeDrag.keyframe.time)
   keyframeDrag = null
 }
 
 function deleteSelectedKeyframe() {
+  if (selectedCameraCutId.value) {
+    if (canDeleteSelectedCameraCut.value) {
+      store.delete3DCameraCut(selectedCameraCutId.value)
+      selectedCameraCutId.value = null
+    }
+    return
+  }
   if (!selectedChannelId.value || !selectedKeyframeId.value) return
   store.delete3DKeyframe(selectedChannelId.value, selectedKeyframeId.value)
 }
@@ -264,6 +361,7 @@ watch(selectedSceneEntityId, () => {
   selectedChannelId.value = null
   selectedKeyframeId.value = null
 })
+watch(() => selectedScene.value?.id, () => { selectedCameraCutId.value = null })
 watch(selectedKeyframeId, (keyframeId) => {
   if (!keyframeId) return
   const row = channels.value.find((channel) => channel.property.keyframes.some((keyframe) => keyframe.id === keyframeId))
@@ -278,7 +376,9 @@ watch(selectedKeyframeId, (keyframeId) => {
       <span class="divider" />
       <button class="auto-key" type="button" :class="{ active: autoKey }" @click="autoKey = !autoKey"><span /> Auto Key</button>
       <button type="button" class="key-all" :disabled="!entity" title="Key all transform channels at the playhead" @click="store.keySelected3DTransform()"><KeyRound :size="11" /> Key transforms</button>
-      <button type="button" class="delete-key" :disabled="!selectedKeyframeId" title="Delete selected keyframe" @click="deleteSelectedKeyframe"><Trash2 :size="11" /></button>
+      <button type="button" class="camera-cut-add" :disabled="!selectedScene?.cameras.length" title="Add a camera cut at the playhead" @click="addCameraCutAtPlayhead"><Camera :size="11" /> Add camera cut</button>
+      <MSelect v-if="selectedCameraCut" v-model="selectedCutCamera" class="cut-camera-select" :options="cameraOptions" label="Camera for selected cut" />
+      <button type="button" class="delete-key" :disabled="!selectedKeyframeId && !canDeleteSelectedCameraCut" :title="selectedCameraCutId ? (canDeleteSelectedCameraCut ? 'Delete selected camera cut' : 'The first camera cut is fixed at 0') : 'Delete selected keyframe'" @click="deleteSelectedKeyframe"><Trash2 :size="11" /></button>
       <span class="toolbar-spacer" />
       <IconButton :icon="SkipBack" label="Previous frame" @click="store.stepFrame(-1)" />
       <IconButton :icon="playing ? Pause : Play" :label="playing ? 'Pause' : 'Play'" :active="playing" @click="store.togglePlayback()" />
@@ -297,6 +397,39 @@ watch(selectedKeyframeId, (keyframeId) => {
           <div class="ruler-label"><span>CHANNEL</span><span>VALUE</span></div>
           <div ref="rulerLane" class="ruler-lane" @pointerdown="beginScrub">
             <span v-for="tick in ticks" :key="tick.time" class="tick" :style="{ left: tick.left }"><i />{{ tick.label }}</span>
+          </div>
+        </div>
+
+        <div class="camera-cut-row">
+          <div class="camera-cut-label">
+            <Camera :size="10" />
+            <span>Camera Cuts</span>
+            <small>{{ cameraCutSegments.length }}</small>
+            <button type="button" :disabled="!selectedScene?.cameras.length" title="Add camera cut at playhead" @click="addCameraCutAtPlayhead"><Plus :size="10" /></button>
+          </div>
+          <div class="camera-cut-lane" @pointerdown="beginScrub">
+            <button
+              v-for="segment in cameraCutSegments"
+              :key="segment.cut.id"
+              type="button"
+              class="camera-segment"
+              :class="{ selected: selectedCameraCutId === segment.cut.id, active: currentTime >= segment.cut.time && currentTime < segment.end }"
+              :style="cameraSegmentStyle(segment.cut.time, segment.end)"
+              :title="`${segment.camera?.name ?? 'Missing camera'} · ${segment.cut.time.toFixed(2)}s–${segment.end.toFixed(2)}s`"
+              @pointerdown.stop="selectCameraCut(segment.cut.id)"
+            >
+              <Camera :size="9" />
+              <span>{{ segment.camera?.name ?? 'Missing camera' }}</span>
+              <small>{{ segment.duration.toFixed(1) }}s</small>
+            </button>
+            <i
+              v-for="segment in cameraCutSegments.filter((item) => item.index > 0)"
+              :key="`boundary-${segment.cut.id}`"
+              class="camera-boundary"
+              :style="cameraBoundaryStyle(segment.cut.time)"
+              title="Drag to change cut time"
+              @pointerdown="beginCameraCutDrag($event, segment.cut.id)"
+            />
           </div>
         </div>
 
@@ -332,4 +465,27 @@ watch(selectedKeyframeId, (keyframeId) => {
 <style scoped>
 .three-timeline { display: flex; height: 100%; min-height: 0; flex-direction: column; overflow: hidden; background: #101217; }.timeline-toolbar { display: flex; height: 31px; flex: 0 0 auto; align-items: center; gap: 3px; padding: 0 6px; color: var(--text-muted); background: #17191f; border-bottom: 1px solid var(--border-subtle); }.panel-title { display: flex; min-width: 170px; max-width: 280px; align-items: center; gap: 5px; color: var(--text-secondary); }.panel-title strong { font-size: 9px; white-space: nowrap; }.panel-title small { overflow: hidden; color: var(--text-muted); font-size: 8px; text-overflow: ellipsis; white-space: nowrap; }.divider { width: 1px; height: 18px; margin: 0 3px; background: var(--border-subtle); }.toolbar-spacer { flex: 1; }.timeline-toolbar button:not(.icon-button) { display: inline-flex; height: 22px; align-items: center; justify-content: center; gap: 4px; padding: 0 6px; color: var(--text-muted); background: transparent; border: 1px solid transparent; border-radius: 3px; font: inherit; font-size: 8px; cursor: pointer; white-space: nowrap; }.timeline-toolbar button:not(.icon-button):hover:not(:disabled) { color: var(--text-primary); background: var(--bg-hover); }.timeline-toolbar button.active { color: #dce2ff; background: var(--bg-selected); border-color: var(--accent-border); }.timeline-toolbar button:disabled { opacity: .4; cursor: default; }.auto-key > span { width: 6px; height: 6px; background: #50545e; border-radius: 50%; }.auto-key.active > span { background: #df7886; box-shadow: 0 0 0 2px rgb(223 120 134 / .16); }.key-all { color: #bcc6ff !important; }.delete-key { width: 23px; padding: 0 !important; }.timecode { min-width: 75px; color: #c9cedc; font-size: 8px; font-variant-numeric: tabular-nums; text-align: center; }.zoom-value { width: 30px; font-size: 7.5px; text-align: center; }.zoom-slider { width: 72px; height: 2px; accent-color: var(--button-accent); }
 .timeline-scroll { min-height: 0; flex: 1; overflow: auto; background: #0d0f14; }.timeline-scroll.panning { cursor: grabbing; user-select: none; }.timeline-content { position: relative; min-height: 100%; }.ruler-row, .channel-row { display: grid; grid-template-columns: 220px 1fr; }.ruler-row { position: sticky; z-index: 7; top: 0; height: 25px; background: #15171d; border-bottom: 1px solid var(--border-strong); }.ruler-label, .channel-label { position: sticky; z-index: 5; left: 0; display: flex; min-width: 0; align-items: center; background: #17191f; border-right: 1px solid var(--border-strong); }.ruler-label { justify-content: space-between; padding: 0 9px 0 28px; color: #707684; font-size: 6.5px; font-weight: 650; letter-spacing: .08em; }.ruler-lane { position: relative; overflow: hidden; cursor: ew-resize; background: #12141a; }.tick { position: absolute; top: 3px; color: #777d8a; font-size: 6.5px; font-variant-numeric: tabular-nums; transform: translateX(-1px); pointer-events: none; }.tick i { display: block; width: 1px; height: 8px; margin-bottom: 1px; background: #454a56; }.channel-row { height: 23px; border-bottom: 1px solid #20232a; }.channel-row.group-start:not(:first-child) { border-top: 1px solid #383d49; }.channel-row.animated .channel-label { background: #191c26; }.channel-label { gap: 5px; padding: 0 7px; }.channel-label > button { display: grid; width: 17px; height: 17px; flex: 0 0 auto; place-items: center; padding: 0; color: #555b68; background: transparent; border: 0; border-radius: 2px; cursor: pointer; }.channel-label > button:hover { color: #cbd3ff; background: var(--bg-hover); }.channel-label > button.animated { color: #8796dc; }.channel-label > button.keyed { color: #e1e6ff; background: var(--bg-selected); }.channel-label > i { width: 5px; height: 5px; flex: 0 0 auto; border-radius: 50%; }.channel-label > span { overflow: hidden; flex: 1; color: var(--text-secondary); font-size: 8px; text-overflow: ellipsis; white-space: nowrap; }.channel-label > strong { color: #9298a7; font-size: 7.5px; font-weight: 500; font-variant-numeric: tabular-nums; }.channel-lane { position: relative; overflow: hidden; cursor: ew-resize; background-color: #0f1116; background-image: linear-gradient(90deg, #20232a 1px, transparent 1px); background-size: calc(100% / 10) 100%; }.channel-row:nth-child(even) .channel-lane { background-color: #111319; }.keyframe { position: absolute; z-index: 4; top: 50%; display: grid; width: 16px; height: 16px; place-items: center; padding: 0; color: #9aa8ff; background: transparent; border: 0; transform: translate(-50%, -50%); cursor: ew-resize; }.keyframe:hover { color: #d7ddff; }.keyframe.selected { color: #f0d39b; filter: drop-shadow(0 0 3px rgb(226 187 113 / .45)); }.playhead { position: absolute; z-index: 6; top: 0; bottom: 0; width: 1px; background: #e3ae72; pointer-events: none; }.playhead span { position: absolute; top: 0; left: -4px; width: 9px; height: 7px; background: #e3ae72; clip-path: polygon(0 0, 100% 0, 50% 100%); }.playhead i { position: absolute; top: 7px; bottom: 0; width: 1px; background: rgb(227 174 114 / .7); }.empty-timeline { position: absolute; inset: 25px 0 0 220px; display: flex; align-items: center; justify-content: center; flex-direction: column; gap: 4px; color: var(--text-muted); }.empty-timeline strong { color: var(--text-secondary); font-size: 9px; }.empty-timeline span { font-size: 7.5px; }
+.panel-title { min-width: 145px; max-width: 220px; }
+.camera-cut-add { color: #bcc6ff !important; }
+.cut-camera-select { width: 112px; flex: 0 0 auto; }
+.camera-cut-row { display: grid; height: 30px; grid-template-columns: 220px 1fr; border-bottom: 1px solid #303440; }
+.camera-cut-label { position: sticky; z-index: 5; left: 0; display: flex; min-width: 0; align-items: center; gap: 6px; padding: 0 7px 0 9px; color: #c8cff9; background: #1a1d27; border-right: 1px solid var(--border-strong); font-size: 8px; font-weight: 620; }
+.camera-cut-label > svg { color: #8f9ee8; }
+.camera-cut-label > span { flex: 1; }
+.camera-cut-label > small { min-width: 15px; color: #737b91; font-size: 7px; font-weight: 500; text-align: center; }
+.camera-cut-label > button { display: grid; width: 18px; height: 18px; place-items: center; padding: 0; color: #aeb9f7; background: transparent; border: 1px solid transparent; border-radius: 3px; cursor: pointer; }
+.camera-cut-label > button:hover:not(:disabled) { color: #e4e8ff; background: #292e42; border-color: #3d4568; }
+.camera-cut-label > button:disabled { opacity: .35; cursor: default; }
+.camera-cut-lane { position: relative; overflow: hidden; cursor: ew-resize; background-color: #11141c; background-image: linear-gradient(90deg, #242834 1px, transparent 1px); background-size: calc(100% / 10) 100%; }
+.camera-segment { position: absolute; top: 4px; bottom: 4px; display: flex; min-width: 1px; align-items: center; gap: 4px; overflow: hidden; padding: 0 6px; color: #aeb8e8; background: #252b43; border: 1px solid #3c456a; border-radius: 2px; font: inherit; cursor: pointer; }
+.camera-segment:nth-of-type(even) { background: #21273b; }
+.camera-segment:hover { color: #e3e7ff; background: #303753; }
+.camera-segment.active { color: #eef0ff; background: #364069; border-color: #6979bf; }
+.camera-segment.selected { box-shadow: inset 0 0 0 1px #a7b2ee, 0 0 0 1px rgb(128 145 224 / .18); }
+.camera-segment > svg { flex: 0 0 auto; }
+.camera-segment > span { overflow: hidden; flex: 1; font-size: 7.5px; text-overflow: ellipsis; white-space: nowrap; }
+.camera-segment > small { flex: 0 0 auto; color: #858da9; font-size: 6.5px; font-variant-numeric: tabular-nums; }
+.camera-boundary { position: absolute; z-index: 5; top: 1px; bottom: 1px; width: 7px; border-left: 1px solid #c0c8fa; transform: translateX(-3px); cursor: col-resize; }
+.camera-boundary::after { position: absolute; top: 1px; left: -3px; width: 6px; height: 4px; background: #c0c8fa; clip-path: polygon(0 0, 100% 0, 50% 100%); content: ''; }
+.empty-timeline { inset: 55px 0 0 220px; }
 </style>
