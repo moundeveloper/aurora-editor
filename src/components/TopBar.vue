@@ -10,7 +10,7 @@ const store = useEditorStore()
 const { project, workspace, saveStatus } = storeToRefs(store)
 const workspaces: WorkspaceId[] = ['Motion', 'Nodes', '3D', 'Audio', 'Export']
 const menus = ['File', 'Edit', 'Clip', 'Composition', 'Layer', 'Effect', 'Animation', 'View', 'Window', 'Help']
-const statusLabel = computed(() => saveStatus.value === 'Saved' ? 'All changes saved' : 'Saving project')
+const statusLabel = computed(() => saveStatus.value === 'Saved' ? 'All changes saved' : saveStatus.value === 'Save failed' ? 'Project could not be saved' : 'Saving project')
 </script>
 
 <template>
@@ -34,7 +34,7 @@ const statusLabel = computed(() => saveStatus.value === 'Saved' ? 'All changes s
         :key="item"
         type="button"
         :class="{ active: workspace === item }"
-        @click="workspace = item"
+        @click="store.setWorkspace(item)"
       >{{ item }}</button>
     </div>
 
@@ -42,10 +42,10 @@ const statusLabel = computed(() => saveStatus.value === 'Saved' ? 'All changes s
       <IconButton :icon="Undo2" label="Undo (Ctrl+Z)" />
       <IconButton :icon="Redo2" label="Redo (Ctrl+Shift+Z)" />
       <span class="divider" />
-      <span class="save-state" :title="statusLabel"><Cloud :size="12" /> {{ saveStatus }}</span>
+      <span class="save-state" :class="{ error: saveStatus === 'Save failed' }" :title="statusLabel"><Cloud :size="12" /> {{ saveStatus }}</span>
       <span class="performance" title="Preview performance"><Activity :size="12" /> 60</span>
-      <button class="top-action" type="button" @click="store.markChanged()"><Save :size="13" /> Save</button>
-      <button class="top-action primary" type="button" @click="workspace = 'Export'"><Download :size="13" /> Export</button>
+      <button class="top-action" type="button" @click="store.saveProjectNow()"><Save :size="13" /> Save</button>
+      <button class="top-action primary" type="button" @click="store.setWorkspace('Export')"><Download :size="13" /> Export</button>
     </div>
   </header>
   <div class="menu-strip">
@@ -73,7 +73,7 @@ const statusLabel = computed(() => saveStatus.value === 'Saved' ? 'All changes s
 .workspace-switcher button.active { color: #dce2ff; background: #282e49; border-color: #59669b; }
 .topbar-actions { display: flex; align-items: center; gap: 3px; }
 .divider { width: 1px; height: 18px; margin: 0 3px; background: var(--border-subtle); }
-.save-state, .performance { display: inline-flex; align-items: center; gap: 5px; padding: 0 5px; color: var(--text-muted); font-size: 10px; white-space: nowrap; }
+.save-state, .performance { display: inline-flex; align-items: center; gap: 5px; padding: 0 5px; color: var(--text-muted); font-size: 10px; white-space: nowrap; }.save-state.error { color: #dc8f96; }
 .performance { color: #75b89c; }
 .top-action { display: inline-flex; height: 27px; align-items: center; gap: 5px; padding: 0 9px; color: var(--text-primary); background: #20232b; border: 1px solid var(--border-strong); border-radius: 4px; font: inherit; font-size: 10.5px; cursor: pointer; white-space: nowrap; }
 .top-action:hover { background: #282c36; }

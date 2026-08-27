@@ -26,6 +26,8 @@ let runtime: Scene3DRuntime | null = null
 let resizeObserver: ResizeObserver | null = null
 let pickStart: { x: number; y: number } | null = null
 let skipNextPick = false
+let navigationPointerId: number | null = null
+let transformDirty = false
 
 const activeSceneLabel = computed(() => selectedScene.value?.name ?? 'No 3D scene')
 
@@ -172,7 +174,18 @@ function setCameraView(view: 'Perspective' | 'Front' | 'Right' | 'Top') {
 }
 
 function rememberPickStart(event: PointerEvent) {
+  if (event.button !== 0) {
+    pickStart = null
+    finishTransformInteraction()
+    navigationPointerId = event.pointerId
+    if (transform) {
+      transform.axis = null
+      transform.enabled = false
+    }
+    return
+  }
   pickStart = { x: event.clientX, y: event.clientY }
+  if (transform && !transform.dragging) transform.axis = null
 }
 
 function pickObject(event: MouseEvent) {
@@ -211,6 +224,32 @@ function commitTransform() {
   })
 }
 
+function finishTransformInteraction() {
+  if (!transform) return
+  if (transform.dragging && transformDirty) commitTransform()
+  transformDirty = false
+  transform.dragging = false
+  transform.axis = null
+  if (orbit) orbit.enabled = true
+}
+
+function onGlobalPointerEnd(event: PointerEvent) {
+  if (navigationPointerId === event.pointerId) {
+    navigationPointerId = null
+    requestAnimationFrame(() => { if (transform) transform.enabled = true })
+    return
+  }
+  finishTransformInteraction()
+  requestAnimationFrame(() => { skipNextPick = false })
+}
+
+function onWindowBlur() {
+  navigationPointerId = null
+  if (transform) transform.enabled = true
+  finishTransformInteraction()
+  skipNextPick = false
+}
+
 function onKeydown(event: KeyboardEvent) {
   if ((event.target as HTMLElement)?.matches('input, textarea')) return
   if (event.key.toLowerCase() === 'g') setTransformMode('translate')
@@ -239,25 +278,33 @@ onMounted(async () => {
   transform.setMode(transformMode.value)
   transform.setSize(.82)
   transform.addEventListener('change', renderViewport)
+  transform.addEventListener('objectChange', () => { transformDirty = true })
   transform.addEventListener('dragging-changed', (event) => { if (orbit) orbit.enabled = !event.value })
-  transform.addEventListener('mouseDown', () => { skipNextPick = true })
-  transform.addEventListener('mouseUp', () => {
-    commitTransform()
-    requestAnimationFrame(() => { skipNextPick = false })
+  transform.addEventListener('mouseDown', () => {
+    transformDirty = false
+    skipNextPick = true
   })
   resizeObserver = new ResizeObserver(resizeViewport)
   resizeObserver.observe(viewport.value)
   window.addEventListener('keydown', onKeydown)
+  window.addEventListener('pointerup', onGlobalPointerEnd, true)
+  window.addEventListener('pointercancel', onGlobalPointerEnd, true)
+  window.addEventListener('blur', onWindowBlur)
   resizeViewport()
 })
 
 onBeforeUnmount(() => {
   resizeObserver?.disconnect()
   window.removeEventListener('keydown', onKeydown)
+  window.removeEventListener('pointerup', onGlobalPointerEnd, true)
+  window.removeEventListener('pointercancel', onGlobalPointerEnd, true)
+  window.removeEventListener('blur', onWindowBlur)
+  finishTransformInteraction()
   orbit?.dispose()
   disposeEditorHelpers(runtime)
   transform?.detach()
   transform?.dispose()
+  transform = null
   runtimeRegistry.dispose()
   renderer?.dispose()
   renderer = null

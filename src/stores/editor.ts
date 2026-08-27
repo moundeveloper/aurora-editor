@@ -2,10 +2,11 @@ import { computed, ref, toRaw } from 'vue'
 import { defineStore } from 'pinia'
 import type {
   AnimatableProperty, Aurora3DScene, AuroraCamera, AuroraLight,
-  EditorLayer, EditorProject, MediaAsset, WorkspaceId,
+  EditorLayer, EditorProject, MediaAsset, SerializedEditorState, WorkspaceId,
 } from '@/models/editor'
 import { evaluateNumericProperty } from '@/engine/animation/evaluateProperty'
 import { deserializeEditorState, serializeEditorState } from '@/engine/project/serialization'
+import { auroraProjectDatabase } from '@/engine/project/AuroraProjectDatabase'
 import { createDemo3DScene, createPrimitiveObject, makeTransform3D, numericProperty } from '@/engine/scene3d/sceneFactory'
 
 const property = (id: string, value: number): AnimatableProperty<number> => ({
@@ -50,7 +51,7 @@ export const useEditorStore = defineStore('editor', () => {
   const selectedSceneId = ref('scene-aurora-3d')
   const selectedSceneEntityId = ref('object-aurora-cube')
   const zoom = ref(100)
-  const saveStatus = ref<'Saved' | 'Saving…'>('Saved')
+  const saveStatus = ref<'Saved' | 'Saving…' | 'Save failed'>('Saved')
   const exportProgress = ref(0)
   let clusterCounter = 1
   let visualTrackCounter = 1
@@ -90,14 +91,52 @@ export const useEditorStore = defineStore('editor', () => {
     ]
   }
 
-  const loadedState = deserializeEditorState(
-    typeof window === 'undefined' ? null : window.localStorage.getItem('aurora-editor-project'),
-    { project: project.value, layers: layers.value, scenes3D: scenes3D.value, assets: assets.value },
-  )
-  project.value = loadedState.project
-  layers.value = loadedState.layers
-  scenes3D.value = loadedState.scenes3D
-  assets.value = loadedState.assets
+  const defaultState = deserializeEditorState(null, {
+    project: project.value,
+    layers: layers.value,
+    scenes3D: scenes3D.value,
+    assets: assets.value,
+  })
+  let persistenceReady = false
+  let saveTimer: number | null = null
+  let changeRevision = 0
+  let saveQueue: Promise<void> = Promise.resolve()
+
+  function applyLoadedState(state: SerializedEditorState) {
+    project.value = state.project
+    layers.value = state.layers
+    scenes3D.value = state.scenes3D
+    assets.value = state.assets
+  }
+
+  function projectSnapshot(): SerializedEditorState {
+    return JSON.parse(serializeEditorState({
+      project: project.value,
+      layers: layers.value,
+      scenes3D: scenes3D.value,
+      assets: assets.value,
+    })) as SerializedEditorState
+  }
+
+  async function initializePersistence() {
+    if (persistenceReady) return
+    const legacyRaw = typeof window === 'undefined' ? null : window.localStorage.getItem('aurora-editor-project')
+    try {
+      const databaseState = await auroraProjectDatabase.loadActiveSnapshot()
+      const loadedState = databaseState
+        ? deserializeEditorState(JSON.stringify(databaseState), defaultState)
+        : deserializeEditorState(legacyRaw, defaultState)
+      applyLoadedState(loadedState)
+      persistenceReady = true
+      if (!databaseState) await saveProjectNow()
+      if (legacyRaw && saveStatus.value === 'Saved') window.localStorage.removeItem('aurora-editor-project')
+    } catch (error) {
+      applyLoadedState(deserializeEditorState(legacyRaw, defaultState))
+      persistenceReady = true
+      saveStatus.value = 'Save failed'
+      console.error('Aurora project database initialization failed', error)
+    }
+  }
 
   const selectedLayer = computed(() => layers.value.find((layer) => layer.id === selectedLayerId.value) ?? layers.value[0])
   const selectedScene = computed(() => scenes3D.value.find((scene) => scene.id === selectedSceneId.value) ?? scenes3D.value[0])
@@ -431,17 +470,40 @@ export const useEditorStore = defineStore('editor', () => {
   }
 
   function markChanged() {
+    changeRevision += 1
     saveStatus.value = 'Saving…'
-    window.setTimeout(() => {
+    if (saveTimer !== null) window.clearTimeout(saveTimer)
+    saveTimer = window.setTimeout(() => { void saveProjectNow() }, 250)
+  }
+
+  function saveProjectNow() {
+    if (saveTimer !== null) window.clearTimeout(saveTimer)
+    saveTimer = null
+    if (!persistenceReady) return Promise.resolve()
+    saveStatus.value = 'Saving…'
+    const revisionToSave = changeRevision
+    const save = async () => {
       project.value.updatedAt = Date.now()
-      saveStatus.value = 'Saved'
-      localStorage.setItem('aurora-editor-project', serializeEditorState({
-        project: project.value,
-        layers: layers.value,
-        scenes3D: scenes3D.value,
-        assets: assets.value,
-      }))
-    }, 420)
+      try {
+        await auroraProjectDatabase.saveSnapshot(projectSnapshot())
+        if (revisionToSave === changeRevision) saveStatus.value = 'Saved'
+      } catch (error) {
+        saveStatus.value = 'Save failed'
+        console.error('Aurora project save failed', error)
+      }
+    }
+    saveQueue = saveQueue.then(save, save)
+    return saveQueue
+  }
+
+  function flushProjectSave() {
+    return saveTimer !== null || saveStatus.value !== 'Saved' ? saveProjectNow() : saveQueue
+  }
+
+  function setWorkspace(nextWorkspace: WorkspaceId) {
+    if (workspace.value === nextWorkspace) return
+    void flushProjectSave()
+    workspace.value = nextWorkspace
   }
 
   function selectSceneEntity(sceneId: string, entityId: string) {
@@ -565,7 +627,7 @@ export const useEditorStore = defineStore('editor', () => {
     togglePlayback, setTime, stepFrame, setProjectDuration, addKeyframe, setLayerValue, addFiles,
     addAssetToTimeline, addGeneratedLayer, reorderTrack, moveSegmentToTrack, moveSegmentToNewTrack, addEmptyTrack,
     createCluster, releaseCluster,
-    splitLayerAt, splitSelectedLayer, markChanged, startExport,
+    splitLayerAt, splitSelectedLayer, markChanged, saveProjectNow, flushProjectSave, initializePersistence, setWorkspace, startExport,
     selectSceneEntity, markSceneChanged, add3DPrimitive, add3DLight, add3DCamera, set3DEntityTransform,
     update3DEntityTransform, set3DObjectMaterial, set3DLightIntensity, setActive3DCamera,
   }

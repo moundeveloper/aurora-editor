@@ -1,3 +1,4 @@
+import 'fake-indexeddb/auto'
 import { describe, expect, it } from 'vitest'
 import * as THREE from 'three'
 import { evaluateNumericProperty } from '@/engine/animation/evaluateProperty'
@@ -5,6 +6,7 @@ import { createRenderPlan, HYBRID_ALPHA_CONTRACT, resolveRenderSize } from '@/en
 import { createDemo3DScene } from '@/engine/scene3d/sceneFactory'
 import { ThreeSceneRuntimeRegistry } from '@/engine/scene3d/ThreeSceneRuntime'
 import { CURRENT_PROJECT_VERSION, deserializeEditorState, serializeEditorState } from '@/engine/project/serialization'
+import { AuroraProjectDatabase } from '@/engine/project/AuroraProjectDatabase'
 import type { EditorLayer, EditorProject, SerializedEditorState } from '@/models/editor'
 
 const project: EditorProject = {
@@ -99,5 +101,22 @@ describe('hybrid project architecture', () => {
     expect(HYBRID_ALPHA_CONTRACT).toMatchObject({ alpha: true, premultipliedAlpha: true, sceneClearAlpha: 0, colorSpace: 'srgb' })
     expect(resolveRenderSize(1920, 1080, 'draft')).toEqual({ width: 960, height: 540 })
     expect(resolveRenderSize(1920, 1080, 'full')).toEqual({ width: 1920, height: 1080 })
+  })
+
+  it('stores ordered project aggregates and 3D transforms in structured IndexedDB tables', async () => {
+    const database = new AuroraProjectDatabase(`aurora-test-${crypto.randomUUID()}`)
+    const scene = createDemo3DScene()
+    scene.objects[0]!.transform.position.x.value = 3.75
+    scene.cameras[0]!.transform.rotation.y.value = 22
+    const state: SerializedEditorState = { project, layers, scenes3D: [scene], assets: [] }
+    await database.saveSnapshot(state)
+    const restored = await database.loadActiveSnapshot()
+    expect(restored?.layers.map((layer) => layer.id)).toEqual(layers.map((layer) => layer.id))
+    expect(restored?.scenes3D[0]?.objects[0]?.transform.position.x.value).toBe(3.75)
+    expect(restored?.scenes3D[0]?.cameras[0]?.transform.rotation.y.value).toBe(22)
+    expect(await database.projects.count()).toBe(1)
+    expect(await database.layers.count()).toBe(layers.length)
+    expect(await database.scenes3D.count()).toBe(1)
+    await database.delete()
   })
 })
