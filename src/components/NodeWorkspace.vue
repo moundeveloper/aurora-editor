@@ -14,10 +14,11 @@ const nodes = [
   { id: 'node-transform', title: 'Transform', type: 'Transform', icon: Box, x: 28, y: 24, color: '#a17dba', value: '1920 × 1080' },
   { id: 'node-blur', title: 'Gaussian Blur', type: 'Blur', icon: Sparkles, x: 49, y: 42, color: '#8f88d8', value: 'Radius  18.0' },
   { id: 'node-text', title: 'Title', type: 'Text', icon: Type, x: 29, y: 68, color: '#c59062', value: 'Beyond the Horizon' },
+  { id: 'node-scene-3d', title: 'Aurora 3D Study', type: '3D Scene', icon: Box, x: 49, y: 68, color: '#7888db', value: 'Camera Main · Beauty' },
   { id: 'node-merge', title: 'Merge', type: 'Composite', icon: WandSparkles, x: 69, y: 32, color: '#609a86', value: 'Mode  Over' },
   { id: 'node-output', title: 'Media Output', type: 'Output', icon: Play, x: 87, y: 43, color: '#b36d6d', value: 'Main Composition' },
 ]
-const categories = ['Input', 'Transform', 'Composite', 'Color', 'Blur', 'Distortion', 'Stylize', 'Mask', 'Utility', 'Audio']
+const categories = ['Input', 'Transform', 'Composite', '3D', 'Color', 'Blur', 'Distortion', 'Stylize', 'Mask', 'Utility', 'Audio']
 </script>
 
 <template>

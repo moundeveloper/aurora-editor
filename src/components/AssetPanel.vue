@@ -24,6 +24,8 @@ const folders = [
   { name: 'Videos', icon: Film },
   { name: 'Images', icon: Image },
   { name: 'Audio', icon: AudioLines },
+  { name: '3D Models', icon: Box },
+  { name: 'Environments', icon: Sparkles },
   { name: 'Compositions', icon: Box },
   { name: 'Favorites', icon: Star },
 ]
@@ -35,11 +37,13 @@ const filteredAssets = computed(() => assets.value.filter((asset) => {
   const matchFolder = activeFolder.value === 'All Media'
     || activeFolder.value === `${asset.kind[0]?.toUpperCase()}${asset.kind.slice(1)}s`
     || (activeFolder.value === 'Compositions' && asset.kind === 'composition')
+    || (activeFolder.value === '3D Models' && asset.kind === 'model3d')
+    || (activeFolder.value === 'Environments' && asset.kind === 'hdr')
   return matchQuery && matchFolder
 }))
 
 function iconFor(kind: MediaAsset['kind']) {
-  return kind === 'audio' ? AudioLines : kind === 'image' ? Image : kind === 'composition' ? Box : Film
+  return kind === 'audio' ? AudioLines : kind === 'image' || kind === 'texture' ? Image : kind === 'model3d' || kind === 'composition' ? Box : kind === 'hdr' ? Sparkles : Film
 }
 
 function onFiles(files: FileList | null) {
@@ -122,7 +126,7 @@ function startDrag(event: DragEvent, id: string) {
     </div>
 
     <button class="import-dropzone" type="button" @click="fileInput?.click()"><Upload :size="13" /> Import media <span>or drop files</span></button>
-    <input ref="fileInput" class="hidden-input" type="file" multiple accept="video/*,image/*,audio/*,.json" @change="onFiles(($event.target as HTMLInputElement).files)" />
+    <input ref="fileInput" class="hidden-input" type="file" multiple accept="video/*,image/*,audio/*,.json,.glb,.gltf,.hdr,.exr" @change="onFiles(($event.target as HTMLInputElement).files)" />
     <div v-if="dragging" class="drop-overlay"><Upload :size="24" /><strong>Drop to import</strong><span>Media stays on this device</span></div>
   </aside>
 </template>

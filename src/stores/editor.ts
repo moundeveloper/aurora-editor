@@ -1,7 +1,12 @@
 import { computed, ref, toRaw } from 'vue'
 import { defineStore } from 'pinia'
-import type { AnimatableProperty, EditorLayer, EditorProject, MediaAsset, WorkspaceId } from '@/models/editor'
+import type {
+  AnimatableProperty, Aurora3DScene, AuroraCamera, AuroraLight,
+  EditorLayer, EditorProject, MediaAsset, WorkspaceId,
+} from '@/models/editor'
 import { evaluateNumericProperty } from '@/engine/animation/evaluateProperty'
+import { deserializeEditorState, serializeEditorState } from '@/engine/project/serialization'
+import { createDemo3DScene, createPrimitiveObject, makeTransform3D, numericProperty } from '@/engine/scene3d/sceneFactory'
 
 const property = (id: string, value: number): AnimatableProperty<number> => ({
   id,
@@ -29,7 +34,7 @@ export const useEditorStore = defineStore('editor', () => {
     duration: 18,
     backgroundColor: '#080b12',
     updatedAt: Date.now(),
-    version: 1,
+    version: 2,
   })
 
   const workspace = ref<WorkspaceId>('Motion')
@@ -42,6 +47,8 @@ export const useEditorStore = defineStore('editor', () => {
   const selectedLayerId = ref('layer-title')
   const selectedKeyframeId = ref<string | null>(null)
   const selectedNodeId = ref('node-blur')
+  const selectedSceneId = ref('scene-aurora-3d')
+  const selectedSceneEntityId = ref('object-aurora-cube')
   const zoom = ref(100)
   const saveStatus = ref<'Saved' | 'Saving…'>('Saved')
   const exportProgress = ref(0)
@@ -59,10 +66,12 @@ export const useEditorStore = defineStore('editor', () => {
   const layers = ref<EditorLayer[]>([
     { id: 'layer-adjust', name: 'Cinematic Grade', type: 'adjustment', start: 0, duration: 18, color: '#9b8fe8', visible: true, locked: false, muted: false, expanded: false, transform: makeTransform('grade'), effects: ['Color Matrix', 'Vignette'] },
     { id: 'layer-title', name: 'BEYOND THE HORIZON', type: 'text', start: 2.2, duration: 8.6, color: '#d49b65', visible: true, locked: false, muted: false, expanded: true, transform: makeTransform('title'), effects: ['Glow'] },
+    { id: 'layer-3d-scene', name: 'Aurora 3D Study', type: '3d-scene', sceneId: 'scene-aurora-3d', start: 0, duration: 18, color: '#7888db', visible: true, locked: false, muted: false, expanded: false, transform: makeTransform('scene-3d'), effects: [] },
     { id: 'layer-logo', name: 'Aurora Mark', type: 'image', start: 1, duration: 14, color: '#6b99d5', visible: true, locked: false, muted: false, expanded: false, transform: makeTransform('logo'), effects: [] },
     { id: 'layer-video', name: 'Ridge Expedition', type: 'video', start: 0, duration: 18, color: '#5477a8', visible: true, locked: false, muted: false, expanded: false, transform: makeTransform('video'), effects: ['Brightness / Contrast'] },
     { id: 'layer-audio', name: 'Deep Signal', type: 'audio', start: 0, duration: 18, color: '#5c9b82', visible: true, locked: false, muted: false, expanded: false, transform: makeTransform('audio'), effects: ['Gain'] },
   ])
+  const scenes3D = ref<Aurora3DScene[]>([createDemo3DScene()])
 
   const titleLayer = layers.value.find((layer) => layer.id === 'layer-title')
   if (titleLayer) {
@@ -81,7 +90,27 @@ export const useEditorStore = defineStore('editor', () => {
     ]
   }
 
+  const loadedState = deserializeEditorState(
+    typeof window === 'undefined' ? null : window.localStorage.getItem('aurora-editor-project'),
+    { project: project.value, layers: layers.value, scenes3D: scenes3D.value, assets: assets.value },
+  )
+  project.value = loadedState.project
+  layers.value = loadedState.layers
+  scenes3D.value = loadedState.scenes3D
+  assets.value = loadedState.assets
+
   const selectedLayer = computed(() => layers.value.find((layer) => layer.id === selectedLayerId.value) ?? layers.value[0])
+  const selectedScene = computed(() => scenes3D.value.find((scene) => scene.id === selectedSceneId.value) ?? scenes3D.value[0])
+  const selectedSceneEntity = computed(() => {
+    const scene = selectedScene.value
+    if (!scene) return null
+    const object = scene.objects.find((item) => item.id === selectedSceneEntityId.value)
+    if (object) return { kind: 'object' as const, value: object }
+    const camera = scene.cameras.find((item) => item.id === selectedSceneEntityId.value)
+    if (camera) return { kind: 'camera' as const, value: camera }
+    const light = scene.lights.find((item) => item.id === selectedSceneEntityId.value)
+    return light ? { kind: 'light' as const, value: light } : null
+  })
 
   let playbackFrame = 0
   let lastTick = 0
@@ -165,7 +194,12 @@ export const useEditorStore = defineStore('editor', () => {
   function addFiles(files: FileList | File[]) {
     Array.from(files).forEach((file) => {
       const major = file.type.split('/')[0]
-      const kind: MediaAsset['kind'] = major === 'audio' ? 'audio' : major === 'image' ? 'image' : 'video'
+      const extension = file.name.split('.').at(-1)?.toLowerCase()
+      const kind: MediaAsset['kind'] = extension === 'glb' || extension === 'gltf'
+        ? 'model3d'
+        : extension === 'hdr' || extension === 'exr'
+          ? 'hdr'
+          : major === 'audio' ? 'audio' : major === 'image' ? 'image' : 'video'
       assets.value.unshift({
         id: crypto.randomUUID(),
         name: file.name,
@@ -179,7 +213,7 @@ export const useEditorStore = defineStore('editor', () => {
 
   function addAssetToTimeline(assetId: string) {
     const asset = assets.value.find((item) => item.id === assetId)
-    if (!asset) return
+    if (!asset || asset.kind === 'model3d' || asset.kind === 'hdr' || asset.kind === 'texture') return
     const type = asset.kind === 'composition' ? 'image' : asset.kind
     const layer: EditorLayer = {
       id: crypto.randomUUID(), name: asset.name.replace(/\.[^.]+$/, ''), type,
@@ -401,8 +435,114 @@ export const useEditorStore = defineStore('editor', () => {
     window.setTimeout(() => {
       project.value.updatedAt = Date.now()
       saveStatus.value = 'Saved'
-      localStorage.setItem('aurora-editor-project', JSON.stringify({ project: project.value, layers: layers.value }))
+      localStorage.setItem('aurora-editor-project', serializeEditorState({
+        project: project.value,
+        layers: layers.value,
+        scenes3D: scenes3D.value,
+        assets: assets.value,
+      }))
     }, 420)
+  }
+
+  function selectSceneEntity(sceneId: string, entityId: string) {
+    selectedSceneId.value = sceneId
+    selectedSceneEntityId.value = entityId
+  }
+
+  function markSceneChanged(scene: Aurora3DScene = selectedScene.value!) {
+    if (!scene) return
+    scene.revision += 1
+    markChanged()
+  }
+
+  function add3DPrimitive(primitive: 'box' | 'sphere') {
+    const scene = selectedScene.value
+    if (!scene) return null
+    const object = createPrimitiveObject(primitive, scene.objects.length + 1)
+    object.transform.position.x.value = (scene.objects.length % 3) * 2 - 2
+    scene.objects.push(object)
+    selectedSceneEntityId.value = object.id
+    markSceneChanged(scene)
+    return object
+  }
+
+  function add3DLight(type: AuroraLight['type']) {
+    const scene = selectedScene.value
+    if (!scene) return null
+    const id = crypto.randomUUID()
+    const light: AuroraLight = {
+      id,
+      name: `${type[0]?.toUpperCase()}${type.slice(1)} Light`,
+      type,
+      color: type === 'ambient' ? '#c5ccff' : '#ffffff',
+      intensity: numericProperty(`${id}-intensity`, type === 'point' ? 18 : 1.5),
+      transform: makeTransform3D(id, type === 'ambient' ? [0, 0, 0] : [4, 5, 3]),
+      castShadow: type !== 'ambient',
+    }
+    scene.lights.push(light)
+    selectedSceneEntityId.value = light.id
+    markSceneChanged(scene)
+    return light
+  }
+
+  function add3DCamera() {
+    const scene = selectedScene.value
+    if (!scene) return null
+    const id = crypto.randomUUID()
+    const camera: AuroraCamera = {
+      id,
+      name: `Camera ${scene.cameras.length + 1}`,
+      projection: 'perspective',
+      transform: makeTransform3D(id, [5, 3, 7]),
+      fov: numericProperty(`${id}-fov`, 45),
+      near: .1,
+      far: 1000,
+    }
+    scene.cameras.push(camera)
+    selectedSceneEntityId.value = camera.id
+    markSceneChanged(scene)
+    return camera
+  }
+
+  function set3DEntityTransform(group: 'position' | 'rotation' | 'scale', axis: 'x' | 'y' | 'z', value: number) {
+    const entity = selectedSceneEntity.value
+    if (!entity) return
+    entity.value.transform[group][axis].value = value
+    markSceneChanged()
+  }
+
+  function update3DObjectTransform(objectId: string, values: { position: [number, number, number]; rotation: [number, number, number]; scale: [number, number, number] }) {
+    const scene = selectedScene.value
+    const object = scene?.objects.find((item) => item.id === objectId)
+    if (!scene || !object) return
+    ;(['x', 'y', 'z'] as const).forEach((axis, index) => {
+      object.transform.position[axis].value = values.position[index]!
+      object.transform.rotation[axis].value = values.rotation[index]!
+      object.transform.scale[axis].value = values.scale[index]!
+    })
+    markSceneChanged(scene)
+  }
+
+  function set3DObjectMaterial(key: 'metalness' | 'roughness' | 'opacity' | 'emissiveIntensity', value: number) {
+    const entity = selectedSceneEntity.value
+    if (entity?.kind !== 'object') return
+    entity.value.material[key].value = value
+    markSceneChanged()
+  }
+
+  function set3DLightIntensity(value: number) {
+    const entity = selectedSceneEntity.value
+    if (entity?.kind !== 'light') return
+    entity.value.intensity.value = value
+    markSceneChanged()
+  }
+
+  function setActive3DCamera(cameraId: string) {
+    const scene = selectedScene.value
+    if (!scene || !scene.cameras.some((camera) => camera.id === cameraId)) return
+    scene.activeCameraId = cameraId
+    selectedSceneEntityId.value = cameraId
+    markSceneChanged(scene)
   }
 
   function startExport() {
@@ -415,10 +555,13 @@ export const useEditorStore = defineStore('editor', () => {
 
   return {
     project, workspace, currentTime, playing, loop, autoKey, snap, ripple, selectedLayerId, selectedKeyframeId,
-    selectedNodeId, zoom, saveStatus, exportProgress, assets, layers, selectedLayer,
+    selectedNodeId, selectedSceneId, selectedSceneEntityId, zoom, saveStatus, exportProgress, assets, layers, scenes3D,
+    selectedLayer, selectedScene, selectedSceneEntity,
     togglePlayback, setTime, stepFrame, setProjectDuration, addKeyframe, setLayerValue, addFiles,
     addAssetToTimeline, addGeneratedLayer, reorderTrack, moveSegmentToTrack, moveSegmentToNewTrack, addEmptyTrack,
     createCluster, releaseCluster,
     splitLayerAt, splitSelectedLayer, markChanged, startExport,
+    selectSceneEntity, markSceneChanged, add3DPrimitive, add3DLight, add3DCamera, set3DEntityTransform,
+    update3DObjectTransform, set3DObjectMaterial, set3DLightIntensity, setActive3DCamera,
   }
 })

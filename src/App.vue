@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, defineAsyncComponent, onBeforeUnmount, onMounted, ref } from 'vue'
 import { storeToRefs } from 'pinia'
 import { Activity, CircleHelp, HardDrive, PanelBottomClose, PanelLeftClose, PanelRightClose, ShieldCheck } from '@lucide/vue'
 import { useEditorStore } from '@/stores/editor'
@@ -11,6 +11,10 @@ import TimelinePanel from '@/components/TimelinePanel.vue'
 import NodeWorkspace from '@/components/NodeWorkspace.vue'
 import AudioWorkspace from '@/components/AudioWorkspace.vue'
 import ExportWorkspace from '@/components/ExportWorkspace.vue'
+
+const ThreeDWorkspace = defineAsyncComponent(() => import('@/components/ThreeDWorkspace.vue'))
+const SceneHierarchyPanel = defineAsyncComponent(() => import('@/components/SceneHierarchyPanel.vue'))
+const ThreeDInspectorPanel = defineAsyncComponent(() => import('@/components/ThreeDInspectorPanel.vue'))
 
 const store = useEditorStore()
 const { workspace, currentTime, project, selectedLayer } = storeToRefs(store)
@@ -71,17 +75,18 @@ onBeforeUnmount(() => {
 
     <main v-if="workspace !== 'Export'" class="workspace-shell">
       <div class="upper-workspace">
-        <div v-show="leftOpen" class="left-pane"><AssetPanel /></div>
+        <div v-show="leftOpen" class="left-pane"><SceneHierarchyPanel v-if="workspace === '3D'" /><AssetPanel v-else /></div>
         <div v-show="leftOpen" class="pane-resizer vertical left" role="separator" aria-label="Resize asset browser" @pointerdown="startResize('left')" />
 
         <div class="center-pane">
           <ViewerPanel v-if="workspace === 'Motion' || workspace === 'Edit'" />
           <NodeWorkspace v-else-if="workspace === 'Nodes'" />
+          <ThreeDWorkspace v-else-if="workspace === '3D'" />
           <AudioWorkspace v-else />
         </div>
 
         <div v-show="rightOpen" class="pane-resizer vertical right" role="separator" aria-label="Resize inspector" @pointerdown="startResize('right')" />
-        <div v-show="rightOpen" class="right-pane"><InspectorPanel /></div>
+        <div v-show="rightOpen" class="right-pane"><ThreeDInspectorPanel v-if="workspace === '3D'" /><InspectorPanel v-else /></div>
       </div>
 
       <div v-show="bottomOpen" class="pane-resizer horizontal" role="separator" aria-label="Resize timeline" @pointerdown="startResize('bottom')" />

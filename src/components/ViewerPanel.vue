@@ -7,13 +7,13 @@ import {
   Type, Volume2, VolumeX, ZoomIn, ZoomOut,
 } from '@lucide/vue'
 import { useEditorStore } from '@/stores/editor'
-import { CanvasCompositionRenderer } from '@/engine/rendering/CanvasCompositionRenderer'
+import type { HybridWebGLRenderBackend } from '@/engine/rendering/HybridWebGLRenderBackend'
 import { evaluateNumericProperty } from '@/engine/animation/evaluateProperty'
 import type { EditorLayer } from '@/models/editor'
 import IconButton from './common/IconButton.vue'
 
 const store = useEditorStore()
-const { project, currentTime, playing, loop, snap, zoom, layers, selectedLayer, selectedLayerId, selectedKeyframeId } = storeToRefs(store)
+const { project, currentTime, playing, loop, snap, zoom, layers, scenes3D, selectedLayer, selectedLayerId, selectedKeyframeId } = storeToRefs(store)
 const canvas = ref<HTMLCanvasElement>()
 const canvasWrap = ref<HTMLElement>()
 const transformBox = ref<HTMLElement>()
@@ -25,7 +25,7 @@ const showGuides = ref(true)
 const viewportSize = ref({ width: 0, height: 0 })
 const viewportPan = ref({ x: 0, y: 0 })
 const isViewportPanning = ref(false)
-let renderer: CanvasCompositionRenderer | null = null
+let renderer: HybridWebGLRenderBackend | null = null
 let resizeObserver: ResizeObserver | null = null
 
 interface ViewportTransformState {
@@ -111,7 +111,16 @@ const stageStyle = computed(() => {
 })
 
 function draw() {
-  renderer?.render({ time: currentTime.value, layers: layers.value, selectedLayerId: selectedLayerId.value, width: project.value.width, height: project.value.height })
+  if (!renderer) return
+  void renderer.renderFrame({
+    project: project.value,
+    layers: layers.value,
+    scenes3D: scenes3D.value,
+    time: currentTime.value,
+    width: 1280,
+    height: 720,
+    quality: 'preview',
+  })
 }
 
 function setTransformValue(key: 'x' | 'y' | 'scaleX' | 'scaleY' | 'rotation', value: number, targetLayer?: EditorLayer) {
@@ -278,7 +287,9 @@ function endViewportTransform() {
 onMounted(async () => {
   await nextTick()
   if (!canvas.value) return
-  renderer = new CanvasCompositionRenderer(canvas.value, '/demo/aurora-ridge.png')
+  const { HybridWebGLRenderBackend } = await import('@/engine/rendering/HybridWebGLRenderBackend')
+  renderer = new HybridWebGLRenderBackend(canvas.value, '/demo/aurora-ridge.png')
+  await renderer.initialize({ width: 1280, height: 720, pixelRatio: 1 })
   if (canvasWrap.value) {
     resizeObserver = new ResizeObserver(([entry]) => {
       if (!entry) return
@@ -288,16 +299,18 @@ onMounted(async () => {
   }
   window.addEventListener('pointermove', onViewportPointerMove)
   window.addEventListener('pointerup', endViewportTransform)
-  window.setTimeout(draw, 80)
+  draw()
 })
 
 onBeforeUnmount(() => {
   resizeObserver?.disconnect()
   window.removeEventListener('pointermove', onViewportPointerMove)
   window.removeEventListener('pointerup', endViewportTransform)
+  void renderer?.dispose()
+  renderer = null
 })
 
-watch([currentTime, layers], draw, { deep: true })
+watch([currentTime, layers, scenes3D], draw, { deep: true })
 </script>
 
 <template>
