@@ -8,7 +8,7 @@ import IconButton from './common/IconButton.vue'
 
 const store = useEditorStore()
 const { project, workspace, saveStatus } = storeToRefs(store)
-const workspaces: WorkspaceId[] = ['Edit', 'Motion', 'Nodes', '3D', 'Audio', 'Export']
+const workspaces: WorkspaceId[] = ['Motion', 'Nodes', '3D', 'Audio', 'Export']
 const menus = ['File', 'Edit', 'Clip', 'Composition', 'Layer', 'Effect', 'Animation', 'View', 'Window', 'Help']
 const statusLabel = computed(() => saveStatus.value === 'Saved' ? 'All changes saved' : 'Saving project')
 </script>

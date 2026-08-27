@@ -79,7 +79,7 @@ onBeforeUnmount(() => {
         <div v-show="leftOpen" class="pane-resizer vertical left" role="separator" aria-label="Resize asset browser" @pointerdown="startResize('left')" />
 
         <div class="center-pane">
-          <ViewerPanel v-if="workspace === 'Motion' || workspace === 'Edit'" />
+          <ViewerPanel v-if="workspace === 'Motion'" />
           <NodeWorkspace v-else-if="workspace === 'Nodes'" />
           <ThreeDWorkspace v-else-if="workspace === '3D'" />
           <AudioWorkspace v-else />

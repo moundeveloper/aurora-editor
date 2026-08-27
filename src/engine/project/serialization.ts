@@ -1,6 +1,6 @@
 import type { Aurora3DScene, EditorLayer, EditorProject, MediaAsset, SerializedEditorState } from '@/models/editor'
 
-export const CURRENT_PROJECT_VERSION = 2
+export const CURRENT_PROJECT_VERSION = 3
 
 export interface EditorStateFallback {
   project: EditorProject
@@ -31,6 +31,36 @@ export function deserializeEditorState(raw: string | null, fallback: EditorState
     const scenes3D = Array.isArray(parsed.scenes3D) && parsed.scenes3D.length
       ? parsed.scenes3D
       : fallbackScene ? [clone(fallbackScene)] : []
+    if ((parsed.project.version ?? 1) < 3) {
+      const demoCamera = scenes3D.find((scene) => scene.id === 'scene-aurora-3d')?.cameras.find((camera) => camera.id === 'camera-main')
+      const untouchedOldPose = demoCamera
+        && demoCamera.transform.position.x.value === 4.8
+        && demoCamera.transform.position.y.value === 3.2
+        && demoCamera.transform.position.z.value === 6.2
+        && demoCamera.transform.rotation.x.value === -22.4
+        && demoCamera.transform.rotation.y.value === 37.8
+        && demoCamera.transform.rotation.z.value === 0
+      if (untouchedOldPose) {
+        demoCamera.transform.position.x.value = 0
+        demoCamera.transform.position.y.value = 2.4
+        demoCamera.transform.position.z.value = 7
+        demoCamera.transform.rotation.x.value = -18.924644416051237
+        demoCamera.transform.rotation.y.value = 0
+        demoCamera.transform.rotation.z.value = 0
+      }
+      const demoKeyLight = scenes3D.find((scene) => scene.id === 'scene-aurora-3d')?.lights.find((light) => light.id === 'light-key')
+      const untouchedOldLight = demoKeyLight
+        && demoKeyLight.transform.position.x.value === 4
+        && demoKeyLight.transform.position.y.value === 7
+        && demoKeyLight.transform.position.z.value === 5
+        && demoKeyLight.transform.rotation.x.value === 0
+        && demoKeyLight.transform.rotation.y.value === 0
+        && demoKeyLight.transform.rotation.z.value === 0
+      if (untouchedOldLight) {
+        demoKeyLight.transform.rotation.x.value = -54.46232220802562
+        demoKeyLight.transform.rotation.y.value = 24.937982703241797
+      }
+    }
     const layers = clone(parsed.layers)
     if (fallbackScene && !layers.some((layer) => layer.type === '3d-scene')) {
       const demoLayer = fallback.layers.find((layer) => layer.type === '3d-scene')
@@ -46,4 +76,3 @@ export function deserializeEditorState(raw: string | null, fallback: EditorState
     return clone(fallback)
   }
 }
-

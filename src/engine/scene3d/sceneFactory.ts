@@ -80,13 +80,12 @@ export function createDemo3DScene(): Aurora3DScene {
     id: 'camera-main',
     name: 'Camera Main',
     projection: 'perspective',
-    transform: makeTransform3D('camera-main', [4.8, 3.2, 6.2]),
+    transform: makeTransform3D('camera-main', [0, 2.4, 7]),
     fov: numericProperty('camera-main-fov', 42),
     near: .1,
     far: 1000,
   }
-  camera.transform.rotation.x.value = -22.4
-  camera.transform.rotation.y.value = 37.8
+  camera.transform.rotation.x.value = -18.924644416051237
 
   const ambient: AuroraLight = {
     id: 'light-ambient',
@@ -106,6 +105,8 @@ export function createDemo3DScene(): Aurora3DScene {
     transform: makeTransform3D('light-key', [4, 7, 5]),
     castShadow: true,
   }
+  key.transform.rotation.x.value = -54.46232220802562
+  key.transform.rotation.y.value = 24.937982703241797
   const rim: AuroraLight = {
     id: 'light-rim',
     name: 'Rim Light',

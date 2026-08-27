@@ -1,4 +1,4 @@
-export type WorkspaceId = 'Edit' | 'Motion' | 'Nodes' | '3D' | 'Audio' | 'Export'
+export type WorkspaceId = 'Motion' | 'Nodes' | '3D' | 'Audio' | 'Export'
 
 export type LayerType = 'video' | 'image' | 'text' | 'shape' | 'audio' | 'adjustment' | 'cluster' | '3d-scene'
 

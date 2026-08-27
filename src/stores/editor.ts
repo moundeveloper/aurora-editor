@@ -34,7 +34,7 @@ export const useEditorStore = defineStore('editor', () => {
     duration: 18,
     backgroundColor: '#080b12',
     updatedAt: Date.now(),
-    version: 2,
+    version: 3,
   })
 
   const workspace = ref<WorkspaceId>('Motion')
@@ -493,11 +493,12 @@ export const useEditorStore = defineStore('editor', () => {
       id,
       name: `Camera ${scene.cameras.length + 1}`,
       projection: 'perspective',
-      transform: makeTransform3D(id, [5, 3, 7]),
+      transform: makeTransform3D(id, [0, 2.4, 7]),
       fov: numericProperty(`${id}-fov`, 45),
       near: .1,
       far: 1000,
     }
+    camera.transform.rotation.x.value = -18.924644416051237
     scene.cameras.push(camera)
     selectedSceneEntityId.value = camera.id
     markSceneChanged(scene)
@@ -511,14 +512,18 @@ export const useEditorStore = defineStore('editor', () => {
     markSceneChanged()
   }
 
-  function update3DObjectTransform(objectId: string, values: { position: [number, number, number]; rotation: [number, number, number]; scale: [number, number, number] }) {
+  function update3DEntityTransform(entityId: string, values: { position: [number, number, number]; rotation: [number, number, number]; scale: [number, number, number] }) {
     const scene = selectedScene.value
-    const object = scene?.objects.find((item) => item.id === objectId)
-    if (!scene || !object) return
+    const entity = scene
+      ? scene.objects.find((item) => item.id === entityId)
+        ?? scene.cameras.find((item) => item.id === entityId)
+        ?? scene.lights.find((item) => item.id === entityId)
+      : undefined
+    if (!scene || !entity) return
     ;(['x', 'y', 'z'] as const).forEach((axis, index) => {
-      object.transform.position[axis].value = values.position[index]!
-      object.transform.rotation[axis].value = values.rotation[index]!
-      object.transform.scale[axis].value = values.scale[index]!
+      entity.transform.position[axis].value = values.position[index]!
+      entity.transform.rotation[axis].value = values.rotation[index]!
+      entity.transform.scale[axis].value = values.scale[index]!
     })
     markSceneChanged(scene)
   }
@@ -562,6 +567,6 @@ export const useEditorStore = defineStore('editor', () => {
     createCluster, releaseCluster,
     splitLayerAt, splitSelectedLayer, markChanged, startExport,
     selectSceneEntity, markSceneChanged, add3DPrimitive, add3DLight, add3DCamera, set3DEntityTransform,
-    update3DObjectTransform, set3DObjectMaterial, set3DLightIntensity, setActive3DCamera,
+    update3DEntityTransform, set3DObjectMaterial, set3DLightIntensity, setActive3DCamera,
   }
 })

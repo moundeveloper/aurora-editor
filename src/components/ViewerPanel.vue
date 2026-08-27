@@ -48,7 +48,7 @@ interface ViewportTransformState {
   moved: boolean
 }
 
-interface ViewportPanState { startX: number; startY: number; originX: number; originY: number }
+interface ViewportPanState { pointerId: number; startX: number; startY: number; originX: number; originY: number }
 
 let viewportTransformState: ViewportTransformState | null = null
 let viewportPanState: ViewportPanState | null = null
@@ -184,8 +184,9 @@ function beginLayerMove(event: PointerEvent, layer: EditorLayer) {
 function beginViewportPan(event: PointerEvent) {
   if (event.button !== 1 && !(event.button === 0 && activeTool.value === 'Hand')) return false
   event.preventDefault()
+  ;(event.currentTarget as HTMLElement).setPointerCapture?.(event.pointerId)
   isViewportPanning.value = true
-  viewportPanState = { startX: event.clientX, startY: event.clientY, originX: viewportPan.value.x, originY: viewportPan.value.y }
+  viewportPanState = { pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, originX: viewportPan.value.x, originY: viewportPan.value.y }
   return true
 }
 
@@ -278,6 +279,7 @@ function onViewportPointerMove(event: PointerEvent) {
 
 function endViewportTransform() {
   if (viewportTransformState?.moved) store.markChanged()
+  if (viewportPanState && canvasWrap.value?.hasPointerCapture?.(viewportPanState.pointerId)) canvasWrap.value.releasePointerCapture(viewportPanState.pointerId)
   viewportTransformState = null
   viewportPanState = null
   isViewportPanning.value = false
@@ -299,6 +301,7 @@ onMounted(async () => {
   }
   window.addEventListener('pointermove', onViewportPointerMove)
   window.addEventListener('pointerup', endViewportTransform)
+  window.addEventListener('pointercancel', endViewportTransform)
   draw()
 })
 
@@ -306,6 +309,7 @@ onBeforeUnmount(() => {
   resizeObserver?.disconnect()
   window.removeEventListener('pointermove', onViewportPointerMove)
   window.removeEventListener('pointerup', endViewportTransform)
+  window.removeEventListener('pointercancel', endViewportTransform)
   void renderer?.dispose()
   renderer = null
 })
@@ -396,7 +400,7 @@ watch([currentTime, layers, scenes3D], draw, { deep: true })
 .tool-group { display: flex; gap: 1px; }.toolbar-divider { width: 1px; height: 20px; margin: 0 4px; background: var(--border-subtle); }.toolbar-spacer { flex: 1; }.viewport-zoom-label { width: 32px; color: var(--text-muted); font-size: 8px; text-align: center; }
 .viewer-select { display: flex; height: 25px; align-items: center; gap: 6px; padding: 0 6px; color: var(--text-secondary); background: #171920; border: 1px solid var(--border-strong); border-radius: 4px; font: inherit; font-size: 9.5px; cursor: pointer; }
 .viewer-select:hover { color: var(--text-primary); background: var(--bg-hover); }
-.canvas-viewport { position: relative; display: flex; min-height: 0; flex: 1; align-items: center; justify-content: center; padding: 24px; overflow: hidden; background-color: #08090c; background-image: linear-gradient(45deg, #0c0e13 25%, transparent 25%), linear-gradient(-45deg, #0c0e13 25%, transparent 25%), linear-gradient(45deg, transparent 75%, #0c0e13 75%), linear-gradient(-45deg, transparent 75%, #0c0e13 75%); background-position: 0 0, 0 8px, 8px -8px, -8px 0; background-size: 16px 16px; }
+.canvas-viewport { position: relative; display: flex; min-height: 0; flex: 1; align-items: center; justify-content: center; padding: 24px; overflow: hidden; background-color: #08090c; background-image: linear-gradient(45deg, #0c0e13 25%, transparent 25%), linear-gradient(-45deg, #0c0e13 25%, transparent 25%), linear-gradient(45deg, transparent 75%, #0c0e13 75%), linear-gradient(-45deg, transparent 75%, #0c0e13 75%); background-position: 0 0, 0 8px, 8px -8px, -8px 0; background-size: 16px 16px; touch-action: none; }
 .canvas-viewport.show-grid::after { position: absolute; inset: 0; background-image: linear-gradient(rgb(142 154 225 / .08) 1px, transparent 1px), linear-gradient(90deg, rgb(142 154 225 / .08) 1px, transparent 1px); background-size: 36px 36px; content: ''; pointer-events: none; }
 .canvas-viewport.hand-tool { cursor: grab; }.canvas-viewport.zoom-tool { cursor: zoom-in; }.canvas-viewport.panning { cursor: grabbing; user-select: none; }.canvas-stage { position: relative; flex: 0 0 auto; aspect-ratio: 16 / 9; box-shadow: 0 15px 45px rgb(0 0 0 / .55), 0 0 0 1px #30333d; transform-origin: center; }
 .canvas-stage canvas { display: block; width: 100%; height: 100%; }

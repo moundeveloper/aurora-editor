@@ -115,6 +115,7 @@ export class ThreeSceneRuntimeRegistry {
       light.userData.auroraId = item.id
       runtime.lights.set(item.id, light)
       root.add(light)
+      if (light instanceof THREE.DirectionalLight) root.add(light.target)
     })
     return runtime
   }
@@ -165,7 +166,11 @@ export class ThreeSceneRuntimeRegistry {
       light.intensity = evaluateNumericProperty(item.intensity, time)
       applyTransform(light, item.transform, time)
       if ('castShadow' in light) light.castShadow = item.castShadow
-      if (light instanceof THREE.DirectionalLight) light.target.position.set(0, 0, 0)
+      if (light instanceof THREE.DirectionalLight) {
+        const direction = new THREE.Vector3(0, 0, -1).applyQuaternion(light.quaternion)
+        light.target.position.copy(light.position).add(direction)
+        light.target.updateMatrixWorld(true)
+      }
     })
   }
 
@@ -183,6 +188,11 @@ export class ThreeSceneRuntimeRegistry {
 
   private disposeRuntime(runtime: Scene3DRuntime) {
     runtime.scene.traverse((object) => {
+      let candidate: THREE.Object3D | null = object
+      while (candidate) {
+        if (candidate.userData.editorOnly) return
+        candidate = candidate.parent
+      }
       if (!(object instanceof THREE.Mesh)) return
       object.geometry.dispose()
       const materials = Array.isArray(object.material) ? object.material : [object.material]

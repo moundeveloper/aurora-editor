@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import * as THREE from 'three'
 import { evaluateNumericProperty } from '@/engine/animation/evaluateProperty'
 import { createRenderPlan, HYBRID_ALPHA_CONTRACT, resolveRenderSize } from '@/engine/rendering/contracts'
 import { createDemo3DScene } from '@/engine/scene3d/sceneFactory'
@@ -44,6 +45,26 @@ describe('hybrid project architecture', () => {
     expect(restored.layers.some((layer) => layer.type === '3d-scene')).toBe(true)
   })
 
+  it('centers the untouched legacy demo camera without overwriting a customized camera', () => {
+    const fallback: SerializedEditorState = { project, layers, scenes3D: [createDemo3DScene()], assets: [] }
+    const legacyScene = createDemo3DScene()
+    const legacyCamera = legacyScene.cameras[0]!
+    legacyCamera.transform.position.x.value = 4.8
+    legacyCamera.transform.position.y.value = 3.2
+    legacyCamera.transform.position.z.value = 6.2
+    legacyCamera.transform.rotation.x.value = -22.4
+    legacyCamera.transform.rotation.y.value = 37.8
+    const legacy = JSON.stringify({ project: { ...project, version: 2 }, layers, scenes3D: [legacyScene], assets: [] })
+    const restored = deserializeEditorState(legacy, fallback)
+    expect(restored.scenes3D[0]?.cameras[0]?.transform.position.x.value).toBe(0)
+    expect(restored.scenes3D[0]?.cameras[0]?.transform.position.z.value).toBe(7)
+    expect(restored.scenes3D[0]?.lights.find((light) => light.id === 'light-key')?.transform.rotation.x.value).toBeCloseTo(-54.4623)
+
+    legacyCamera.transform.position.x.value = 5
+    const customized = deserializeEditorState(JSON.stringify({ project: { ...project, version: 2 }, layers, scenes3D: [legacyScene], assets: [] }), fallback)
+    expect(customized.scenes3D[0]?.cameras[0]?.transform.position.x.value).toBe(5)
+  })
+
   it('evaluates the demo object from absolute Aurora time deterministically', () => {
     const channel = createDemo3DScene().objects[0]!.transform.rotation.y
     expect(evaluateNumericProperty(channel, 9)).toBe(180)
@@ -56,6 +77,13 @@ describe('hybrid project architecture', () => {
     const runtime = registry.get(scene, 1280, 720, 9)
     expect(runtime.objects.get('object-aurora-cube')?.rotation.y).toBeCloseTo(Math.PI)
     expect(runtime.cameras.get('camera-main')).toMatchObject({ aspect: 1280 / 720 })
+    const camera = runtime.cameras.get('camera-main')!
+    const direction = camera.getWorldDirection(new THREE.Vector3())
+    const directionToOrigin = camera.position.clone().negate().normalize()
+    expect(direction.angleTo(directionToOrigin)).toBeCloseTo(0)
+    const keyLight = runtime.lights.get('light-key') as THREE.DirectionalLight
+    const lightDirection = keyLight.target.position.clone().sub(keyLight.position).normalize()
+    expect(lightDirection.angleTo(keyLight.position.clone().negate().normalize())).toBeCloseTo(0)
     registry.dispose()
   })
 
