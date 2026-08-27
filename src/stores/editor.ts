@@ -5,6 +5,7 @@ import type {
   EditorLayer, EditorProject, MediaAsset, SerializedEditorState, WorkspaceId,
 } from '@/models/editor'
 import { evaluateNumericProperty } from '@/engine/animation/evaluateProperty'
+import { ensureNumericKeyframe, setNumericPropertyAtTime, toggleNumericKeyframe } from '@/engine/animation/editNumericProperty'
 import { deserializeEditorState, serializeEditorState } from '@/engine/project/serialization'
 import { auroraProjectDatabase } from '@/engine/project/AuroraProjectDatabase'
 import { createDemo3DScene, createPrimitiveObject, makeTransform3D, numericProperty } from '@/engine/scene3d/sceneFactory'
@@ -567,11 +568,34 @@ export const useEditorStore = defineStore('editor', () => {
     return camera
   }
 
+  function selected3DNumericProperties() {
+    const entity = selectedSceneEntity.value
+    if (!entity) return []
+    const transformProperties = (['position', 'rotation', 'scale'] as const).flatMap((group) =>
+      (['x', 'y', 'z'] as const).map((axis) => entity.value.transform[group][axis]),
+    )
+    if (entity.kind === 'object') return [...transformProperties, entity.value.material.metalness, entity.value.material.roughness, entity.value.material.opacity, entity.value.material.emissiveIntensity]
+    if (entity.kind === 'camera') return [...transformProperties, entity.value.fov]
+    return [...transformProperties, entity.value.intensity]
+  }
+
+  function findSelected3DProperty(propertyId: string) {
+    return selected3DNumericProperties().find((property) => property.id === propertyId)
+  }
+
+  function apply3DPropertyValue(property: AnimatableProperty<number>, value: number) {
+    const result = setNumericPropertyAtTime(property, value, currentTime.value, project.value.frameRate, {
+      autoKey: autoKey.value,
+      selectedKeyframeId: selectedKeyframeId.value,
+    })
+    if (result.keyframeId) selectedKeyframeId.value = result.keyframeId
+    return result.changed
+  }
+
   function set3DEntityTransform(group: 'position' | 'rotation' | 'scale', axis: 'x' | 'y' | 'z', value: number) {
     const entity = selectedSceneEntity.value
     if (!entity) return
-    entity.value.transform[group][axis].value = value
-    markSceneChanged()
+    if (apply3DPropertyValue(entity.value.transform[group][axis], value)) markSceneChanged()
   }
 
   function update3DEntityTransform(entityId: string, values: { position: [number, number, number]; rotation: [number, number, number]; scale: [number, number, number] }) {
@@ -582,25 +606,67 @@ export const useEditorStore = defineStore('editor', () => {
         ?? scene.lights.find((item) => item.id === entityId)
       : undefined
     if (!scene || !entity) return
+    let changed = false
     ;(['x', 'y', 'z'] as const).forEach((axis, index) => {
-      entity.transform.position[axis].value = values.position[index]!
-      entity.transform.rotation[axis].value = values.rotation[index]!
-      entity.transform.scale[axis].value = values.scale[index]!
+      changed = apply3DPropertyValue(entity.transform.position[axis], values.position[index]!) || changed
+      changed = apply3DPropertyValue(entity.transform.rotation[axis], values.rotation[index]!) || changed
+      changed = apply3DPropertyValue(entity.transform.scale[axis], values.scale[index]!) || changed
     })
-    markSceneChanged(scene)
+    if (changed) markSceneChanged(scene)
   }
 
   function set3DObjectMaterial(key: 'metalness' | 'roughness' | 'opacity' | 'emissiveIntensity', value: number) {
     const entity = selectedSceneEntity.value
     if (entity?.kind !== 'object') return
-    entity.value.material[key].value = value
-    markSceneChanged()
+    if (apply3DPropertyValue(entity.value.material[key], value)) markSceneChanged()
   }
 
   function set3DLightIntensity(value: number) {
     const entity = selectedSceneEntity.value
     if (entity?.kind !== 'light') return
-    entity.value.intensity.value = value
+    if (apply3DPropertyValue(entity.value.intensity, value)) markSceneChanged()
+  }
+
+  function set3DCameraFov(value: number) {
+    const entity = selectedSceneEntity.value
+    if (entity?.kind !== 'camera') return
+    if (apply3DPropertyValue(entity.value.fov, value)) markSceneChanged()
+  }
+
+  function toggle3DKeyframe(propertyId: string) {
+    const property = findSelected3DProperty(propertyId)
+    if (!property) return
+    selectedKeyframeId.value = toggleNumericKeyframe(property, currentTime.value, project.value.frameRate)
+    markSceneChanged()
+  }
+
+  function keySelected3DTransform() {
+    const entity = selectedSceneEntity.value
+    if (!entity) return
+    const properties = (['position', 'rotation', 'scale'] as const).flatMap((group) =>
+      (['x', 'y', 'z'] as const).map((axis) => entity.value.transform[group][axis]),
+    )
+    properties.forEach((property) => { selectedKeyframeId.value = ensureNumericKeyframe(property, currentTime.value, project.value.frameRate) })
+    markSceneChanged()
+  }
+
+  function move3DKeyframe(propertyId: string, keyframeId: string, time: number) {
+    const property = findSelected3DProperty(propertyId)
+    const keyframe = property?.keyframes.find((item) => item.id === keyframeId)
+    if (!property || !keyframe) return
+    const frameTime = snap.value ? Math.round(time * project.value.frameRate) / project.value.frameRate : time
+    keyframe.time = Math.max(0, Math.min(project.value.duration, frameTime))
+    property.keyframes.sort((left, right) => left.time - right.time)
+    selectedKeyframeId.value = keyframe.id
+    markSceneChanged()
+  }
+
+  function delete3DKeyframe(propertyId: string, keyframeId: string) {
+    const property = findSelected3DProperty(propertyId)
+    if (!property || !property.keyframes.some((keyframe) => keyframe.id === keyframeId)) return
+    property.keyframes = property.keyframes.filter((keyframe) => keyframe.id !== keyframeId)
+    property.animated = property.keyframes.length > 0
+    if (selectedKeyframeId.value === keyframeId) selectedKeyframeId.value = null
     markSceneChanged()
   }
 
@@ -629,6 +695,7 @@ export const useEditorStore = defineStore('editor', () => {
     createCluster, releaseCluster,
     splitLayerAt, splitSelectedLayer, markChanged, saveProjectNow, flushProjectSave, initializePersistence, setWorkspace, startExport,
     selectSceneEntity, markSceneChanged, add3DPrimitive, add3DLight, add3DCamera, set3DEntityTransform,
-    update3DEntityTransform, set3DObjectMaterial, set3DLightIntensity, setActive3DCamera,
+    update3DEntityTransform, set3DObjectMaterial, set3DLightIntensity, set3DCameraFov,
+    toggle3DKeyframe, keySelected3DTransform, move3DKeyframe, delete3DKeyframe, setActive3DCamera,
   }
 })

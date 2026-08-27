@@ -15,6 +15,7 @@ import ExportWorkspace from '@/components/ExportWorkspace.vue'
 const ThreeDWorkspace = defineAsyncComponent(() => import('@/components/ThreeDWorkspace.vue'))
 const SceneHierarchyPanel = defineAsyncComponent(() => import('@/components/SceneHierarchyPanel.vue'))
 const ThreeDInspectorPanel = defineAsyncComponent(() => import('@/components/ThreeDInspectorPanel.vue'))
+const ThreeDTimelinePanel = defineAsyncComponent(() => import('@/components/ThreeDTimelinePanel.vue'))
 
 const store = useEditorStore()
 const { workspace, currentTime, project, selectedLayer } = storeToRefs(store)
@@ -90,7 +91,7 @@ onBeforeUnmount(() => {
       </div>
 
       <div v-show="bottomOpen" class="pane-resizer horizontal" role="separator" aria-label="Resize timeline" @pointerdown="startResize('bottom')" />
-      <div v-show="bottomOpen" class="bottom-pane"><TimelinePanel /></div>
+      <div v-show="bottomOpen" class="bottom-pane"><ThreeDTimelinePanel v-if="workspace === '3D'" /><TimelinePanel v-else /></div>
     </main>
 
     <main v-else class="export-area"><ExportWorkspace /></main>

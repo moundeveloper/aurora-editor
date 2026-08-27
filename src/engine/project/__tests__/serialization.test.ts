@@ -2,6 +2,7 @@ import 'fake-indexeddb/auto'
 import { describe, expect, it } from 'vitest'
 import * as THREE from 'three'
 import { evaluateNumericProperty } from '@/engine/animation/evaluateProperty'
+import { setNumericPropertyAtTime, toggleNumericKeyframe } from '@/engine/animation/editNumericProperty'
 import { createRenderPlan, HYBRID_ALPHA_CONTRACT, resolveRenderSize } from '@/engine/rendering/contracts'
 import { createDemo3DScene } from '@/engine/scene3d/sceneFactory'
 import { ThreeSceneRuntimeRegistry } from '@/engine/scene3d/ThreeSceneRuntime'
@@ -71,6 +72,29 @@ describe('hybrid project architecture', () => {
     const channel = createDemo3DScene().objects[0]!.transform.rotation.y
     expect(evaluateNumericProperty(channel, 9)).toBe(180)
     expect(evaluateNumericProperty(channel, 9)).toBe(180)
+  })
+
+  it('keys changed 3D numeric channels without keying untouched animated values', () => {
+    const property = { id: 'rotation-y', value: 0, animated: true, keyframes: [
+      { id: 'start', time: 0, value: 0, interpolation: 'linear' as const },
+      { id: 'end', time: 10, value: 10, interpolation: 'linear' as const },
+    ] }
+    expect(setNumericPropertyAtTime(property, 5, 5, 30, { autoKey: false }).changed).toBe(false)
+    expect(property.keyframes).toHaveLength(2)
+    const result = setNumericPropertyAtTime(property, 7, 5, 30, { autoKey: false })
+    expect(result.changed).toBe(true)
+    expect(property.keyframes.find((keyframe) => keyframe.id === result.keyframeId)).toMatchObject({ time: 5, value: 7 })
+  })
+
+  it('toggles and auto-creates 3D numeric keyframes at the playhead', () => {
+    const property = { id: 'position-x', value: 2, animated: false, keyframes: [] as Array<{ id: string; time: number; value: number; interpolation: 'bezier' }> }
+    const toggledId = toggleNumericKeyframe(property, 3, 30)
+    expect(property).toMatchObject({ animated: true })
+    expect(property.keyframes[0]).toMatchObject({ id: toggledId, time: 3, value: 2 })
+    toggleNumericKeyframe(property, 3, 30)
+    expect(property).toMatchObject({ animated: false, keyframes: [] })
+    const result = setNumericPropertyAtTime(property, 8, 4, 30, { autoKey: true })
+    expect(property.keyframes.find((keyframe) => keyframe.id === result.keyframeId)).toMatchObject({ time: 4, value: 8 })
   })
 
   it('builds and updates disposable Three runtime objects from serialized state', () => {
