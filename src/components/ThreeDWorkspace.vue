@@ -10,12 +10,14 @@ import { ThreeSceneRuntimeRegistry, type Scene3DRuntime } from '@/engine/scene3d
 import IconButton from './common/IconButton.vue'
 
 const store = useEditorStore()
-const { selectedScene, selectedSceneEntityId, currentTime, playing } = storeToRefs(store)
+const { project, selectedScene, selectedSceneEntityId, currentTime, playing } = storeToRefs(store)
 const viewport = ref<HTMLElement>()
 const canvas = ref<HTMLCanvasElement>()
 const transformMode = ref<TransformControlsMode>('translate')
 const cameraView = ref('Perspective')
 const stats = ref({ calls: 0, triangles: 0 })
+const previewCameraId = ref<string | null>(null)
+const cameraPreviewSize = ref({ width: 0, height: 0 })
 
 const runtimeRegistry = new ThreeSceneRuntimeRegistry()
 let renderer: THREE.WebGLRenderer | null = null
@@ -30,6 +32,21 @@ let navigationPointerId: number | null = null
 let transformDirty = false
 
 const activeSceneLabel = computed(() => selectedScene.value?.name ?? 'No 3D scene')
+const previewCameraDefinition = computed(() => {
+  const scene = selectedScene.value
+  if (!scene) return null
+  return scene.cameras.find((camera) => camera.id === previewCameraId.value)
+    ?? scene.cameras.find((camera) => camera.id === scene.activeCameraId)
+    ?? scene.cameras[0]
+    ?? null
+})
+const cameraPreviewStyle = computed(() => ({
+  width: `${cameraPreviewSize.value.width}px`,
+  height: `${cameraPreviewSize.value.height}px`,
+}))
+const viewportAxisStyle = computed(() => ({
+  top: previewCameraDefinition.value ? `${cameraPreviewSize.value.height + 16}px` : '9px',
+}))
 
 function makeCameraOutline(id: string) {
   const corners = [[-.65, .4, -1], [.65, .4, -1], [.65, -.4, -1], [-.65, -.4, -1]] as const
@@ -125,6 +142,65 @@ function attachSelection() {
   else transform.detach()
 }
 
+function syncPreviewCamera() {
+  const scene = selectedScene.value
+  if (!scene) {
+    previewCameraId.value = null
+    return
+  }
+  const selectedCamera = scene.cameras.find((camera) => camera.id === selectedSceneEntityId.value)
+  if (selectedCamera) previewCameraId.value = selectedCamera.id
+  else if (!scene.cameras.some((camera) => camera.id === previewCameraId.value)) previewCameraId.value = scene.activeCameraId ?? scene.cameras[0]?.id ?? null
+}
+
+function renderCameraPreview(target: Scene3DRuntime, hostWidth: number, hostHeight: number) {
+  const cameraDefinition = previewCameraDefinition.value
+  const previewCamera = cameraDefinition ? target.cameras.get(cameraDefinition.id) : null
+  if (!renderer || !previewCamera || hostWidth < 80 || hostHeight < 80) {
+    cameraPreviewSize.value = { width: 0, height: 0 }
+    return
+  }
+  const aspect = Math.max(.1, project.value.width / Math.max(1, project.value.height))
+  let previewWidth = Math.min(320, hostWidth * .34)
+  let previewHeight = previewWidth / aspect
+  const maxHeight = hostHeight * .42
+  if (previewHeight > maxHeight) {
+    previewHeight = maxHeight
+    previewWidth = previewHeight * aspect
+  }
+  previewWidth = Math.max(80, Math.min(hostWidth - 20, Math.floor(previewWidth)))
+  previewHeight = Math.max(45, Math.min(hostHeight - 20, Math.floor(previewWidth / aspect)))
+  cameraPreviewSize.value = { width: previewWidth, height: previewHeight }
+
+  if (previewCamera instanceof THREE.PerspectiveCamera) {
+    previewCamera.aspect = aspect
+    previewCamera.updateProjectionMatrix()
+  } else if (previewCamera instanceof THREE.OrthographicCamera) {
+    const halfHeight = 6
+    previewCamera.left = -halfHeight * aspect
+    previewCamera.right = halfHeight * aspect
+    previewCamera.top = halfHeight
+    previewCamera.bottom = -halfHeight
+    previewCamera.updateProjectionMatrix()
+  }
+
+  const editorHelpers: Array<{ object: THREE.Object3D; visible: boolean }> = []
+  target.scene.traverse((object) => {
+    if (!object.userData.editorOnly || object.parent?.userData.editorOnly) return
+    editorHelpers.push({ object, visible: object.visible })
+    object.visible = false
+  })
+  const x = hostWidth - previewWidth - 10
+  const y = hostHeight - previewHeight - 10
+  renderer.setViewport(x, y, previewWidth, previewHeight)
+  renderer.setScissor(x, y, previewWidth, previewHeight)
+  renderer.setScissorTest(true)
+  renderer.render(target.scene, previewCamera)
+  renderer.setScissorTest(false)
+  renderer.setViewport(0, 0, hostWidth, hostHeight)
+  editorHelpers.forEach(({ object, visible }) => { object.visible = visible })
+}
+
 function renderViewport() {
   const sceneDefinition = selectedScene.value
   const host = viewport.value
@@ -140,7 +216,10 @@ function renderViewport() {
   if (syncScene) attachSelection()
   updateEditorHelpers(targetRuntime)
   renderer.shadowMap.enabled = sceneDefinition.settings.shadows
+  renderer.setScissorTest(false)
+  renderer.setViewport(0, 0, host.clientWidth, host.clientHeight)
   renderer.render(targetRuntime.scene, editorCamera)
+  renderCameraPreview(targetRuntime, host.clientWidth, host.clientHeight)
   stats.value = { calls: renderer.info.render.calls, triangles: renderer.info.render.triangles }
 }
 
@@ -310,7 +389,8 @@ onBeforeUnmount(() => {
   renderer = null
 })
 
-watch([selectedScene, currentTime, selectedSceneEntityId], renderViewport, { deep: true })
+watch([selectedScene, selectedSceneEntityId], syncPreviewCamera, { deep: true, immediate: true })
+watch([selectedScene, currentTime, selectedSceneEntityId, previewCameraId], renderViewport, { deep: true })
 </script>
 
 <template>
@@ -330,7 +410,10 @@ watch([selectedScene, currentTime, selectedSceneEntityId], renderViewport, { dee
     <div ref="viewport" class="three-viewport">
       <canvas ref="canvas" aria-label="3D scene editor viewport" @pointerdown="rememberPickStart" @click="pickObject" @contextmenu.prevent />
       <div class="viewport-badge"><View :size="10" /> {{ cameraView }}</div>
-      <div class="viewport-axis"><span class="x">X</span><span class="y">Y</span><span class="z">Z</span></div>
+      <div v-if="previewCameraDefinition" class="camera-preview-frame" :style="cameraPreviewStyle">
+        <div class="camera-preview-label" :title="previewCameraDefinition.name"><Camera :size="10" /><strong>{{ previewCameraDefinition.name }}</strong><span>LIVE</span></div>
+      </div>
+      <div class="viewport-axis" :style="viewportAxisStyle"><span class="x">X</span><span class="y">Y</span><span class="z">Z</span></div>
       <div class="viewport-help">Orbit: left-drag · Pan: middle-drag · Zoom: wheel · G/R/S: transform</div>
     </div>
 
@@ -349,6 +432,6 @@ watch([selectedScene, currentTime, selectedSceneEntityId], renderViewport, { dee
 <style scoped>
 .three-workspace { display: flex; height: 100%; min-height: 0; flex-direction: column; overflow: hidden; background: #090b10; }
 .three-toolbar { display: flex; height: 34px; flex: 0 0 auto; align-items: center; gap: 2px; padding: 0 7px; background: var(--bg-panel-alt); border-bottom: 1px solid var(--border-subtle); }.tool-group { display: flex; gap: 1px; }.toolbar-divider { width: 1px; height: 20px; margin: 0 4px; background: var(--border-subtle); }.toolbar-spacer { flex: 1; }.view-button { height: 24px; padding: 0 7px; color: var(--text-muted); background: transparent; border: 1px solid transparent; border-radius: 3px; font: inherit; font-size: 8.5px; cursor: pointer; white-space: nowrap; }.view-button:hover { color: var(--text-primary); background: var(--bg-hover); }.view-button.active { color: #dce2ff; background: var(--bg-selected); border-color: var(--accent-border); }.scene-label { display: flex; min-width: 0; align-items: center; gap: 5px; overflow: hidden; color: var(--text-secondary); font-size: 8.5px; text-overflow: ellipsis; white-space: nowrap; }
-.three-viewport { position: relative; min-height: 0; flex: 1; overflow: hidden; background: #090b10; }.three-viewport canvas { display: block; width: 100%; height: 100%; outline: none; touch-action: none; }.viewport-badge, .viewport-help { position: absolute; padding: 4px 6px; color: #858b99; background: rgb(12 14 20 / .78); border: 1px solid #292d37; border-radius: 3px; font-size: 7.5px; pointer-events: none; backdrop-filter: blur(4px); }.viewport-badge { top: 8px; left: 9px; display: flex; align-items: center; gap: 4px; }.viewport-help { right: 9px; bottom: 8px; }.viewport-axis { position: absolute; right: 10px; top: 9px; display: flex; gap: 3px; font-size: 7px; font-weight: 700; }.viewport-axis span { display: grid; width: 15px; height: 15px; place-items: center; color: #eef0f8; background: #252a35; border: 1px solid #3a404d; border-radius: 50%; }.viewport-axis .x { color: #ff9ca8; }.viewport-axis .y { color: #8bd5ad; }.viewport-axis .z { color: #91adff; }
+.three-viewport { position: relative; min-height: 0; flex: 1; overflow: hidden; background: #090b10; }.three-viewport canvas { display: block; width: 100%; height: 100%; outline: none; touch-action: none; }.viewport-badge, .viewport-help { position: absolute; padding: 4px 6px; color: #858b99; background: rgb(12 14 20 / .78); border: 1px solid #292d37; border-radius: 3px; font-size: 7.5px; pointer-events: none; backdrop-filter: blur(4px); }.viewport-badge { top: 8px; left: 9px; display: flex; align-items: center; gap: 4px; }.viewport-help { right: 9px; bottom: 8px; }.camera-preview-frame { position: absolute; top: 9px; right: 10px; box-sizing: border-box; overflow: hidden; border: 1px solid var(--accent-border); border-radius: 3px; box-shadow: 0 8px 24px rgb(0 0 0 / .42), 0 0 0 1px rgb(12 14 20 / .7); pointer-events: none; }.camera-preview-label { position: absolute; z-index: 1; top: 0; right: 0; left: 0; display: flex; height: 21px; min-width: 0; align-items: center; gap: 5px; padding: 0 6px; color: #dce2ff; background: rgb(13 16 24 / .82); border-bottom: 1px solid rgb(89 102 155 / .65); font-size: 7.5px; backdrop-filter: blur(4px); }.camera-preview-label strong { overflow: hidden; flex: 1; font-weight: 550; text-overflow: ellipsis; white-space: nowrap; }.camera-preview-label span { color: #7eb89f; font-size: 6.5px; font-weight: 700; letter-spacing: .08em; }.viewport-axis { position: absolute; right: 10px; display: flex; gap: 3px; font-size: 7px; font-weight: 700; transition: top 120ms ease; }.viewport-axis span { display: grid; width: 15px; height: 15px; place-items: center; color: #eef0f8; background: #252a35; border: 1px solid #3a404d; border-radius: 50%; }.viewport-axis .x { color: #ff9ca8; }.viewport-axis .y { color: #8bd5ad; }.viewport-axis .z { color: #91adff; }
 .three-status { display: flex; height: 27px; flex: 0 0 auto; align-items: center; gap: 10px; padding: 0 8px; color: var(--text-muted); background: #111319; border-top: 1px solid var(--border-subtle); font-size: 7.5px; }.three-status span { display: flex; align-items: center; gap: 4px; white-space: nowrap; }.three-status .status-spacer { flex: 1; }.three-status strong { color: #7eb89f; font-size: 7px; letter-spacing: .08em; }.three-status strong.playing { color: #c3cafd; }
 </style>
