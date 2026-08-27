@@ -10,7 +10,7 @@ import { evaluateNumericProperty } from '@/engine/animation/evaluateProperty'
 import { ensureNumericKeyframe, setNumericPropertyAtTime, toggleNumericKeyframe } from '@/engine/animation/editNumericProperty'
 import { deserializeEditorState, serializeEditorState } from '@/engine/project/serialization'
 import { auroraProjectDatabase } from '@/engine/project/AuroraProjectDatabase'
-import { create3DPath, createCameraPathConstraint, createDemo3DScene, createPrimitiveObject, makeTransform3D, numericProperty } from '@/engine/scene3d/sceneFactory'
+import { create3DPath, createCameraPathConstraint, createDemo3DScene, createEmpty3DScene, createPrimitiveObject, makeTransform3D, numericProperty } from '@/engine/scene3d/sceneFactory'
 import {
   appendPathPoint, insertPathPoint, movePathHandle, movePathPoint, setPathPointMode,
   type PathHandleKey, type PathVector,
@@ -36,6 +36,8 @@ const makeTransform = (prefix: string) => ({
   rotation: property(`${prefix}-rotation`, 0),
   opacity: property(`${prefix}-opacity`, 100),
 })
+
+export type TimelineLayerPreset = 'adjustment' | 'cinematic-grade' | '3d-scene' | 'text' | 'rectangle' | 'ellipse' | 'image' | 'video' | 'audio'
 
 export const useEditorStore = defineStore('editor', () => {
   const project = ref<EditorProject>({
@@ -121,6 +123,7 @@ export const useEditorStore = defineStore('editor', () => {
     assets.value = state.assets
     nodes.value = state.nodes
     nodeConnections.value = state.nodeConnections
+    ensureClusterAssets()
   }
 
   function currentState(): SerializedEditorState {
@@ -158,7 +161,40 @@ export const useEditorStore = defineStore('editor', () => {
     }
   }
 
-  const selectedLayer = computed(() => layers.value.find((layer) => layer.id === selectedLayerId.value) ?? layers.value[0])
+  /**
+   * Clusters are editable contexts, not just folded groups: entering one opens a timeline tab whose
+   * layer list is that cluster's children. Because a cluster can hold another cluster, tabs stack.
+   */
+  const openClusterTabs = ref<string[]>([])
+  const activeClusterId = ref<string | null>(null)
+
+  function findLayerDeep(list: EditorLayer[], id: string): EditorLayer | null {
+    for (const layer of list) {
+      if (layer.id === id) return layer
+      const nested = layer.children ? findLayerDeep(layer.children, id) : null
+      if (nested) return nested
+    }
+    return null
+  }
+
+  const activeCluster = computed(() => activeClusterId.value ? findLayerDeep(layers.value, activeClusterId.value) : null)
+  /** The layer list the timeline is editing: the project root, or the open cluster's children. */
+  const timelineLayers = computed(() => activeCluster.value?.children ?? layers.value)
+  const clusterTabs = computed(() => openClusterTabs.value
+    .map((id) => findLayerDeep(layers.value, id))
+    .filter((layer): layer is EditorLayer => Boolean(layer)))
+
+  function layerList() {
+    return activeCluster.value?.children ?? layers.value
+  }
+
+  function replaceLayerList(next: EditorLayer[]) {
+    const cluster = activeCluster.value
+    if (cluster) cluster.children = next
+    else layers.value = next
+  }
+
+  const selectedLayer = computed(() => findLayerDeep(layers.value, selectedLayerId.value) ?? timelineLayers.value[0] ?? layers.value[0])
   const selectedScene = computed(() => scenes3D.value.find((scene) => scene.id === selectedSceneId.value) ?? scenes3D.value[0])
   const selectedSceneEntity = computed(() => {
     const scene = selectedScene.value
@@ -272,20 +308,57 @@ export const useEditorStore = defineStore('editor', () => {
     markChanged()
   }
 
-  function addAssetToTimeline(assetId: string) {
+  /**
+   * `toRaw` only unwraps the object it is handed, so a cluster still holds reactive children and
+   * cannot be structurally cloned. Unwrap the whole tree before copying it.
+   */
+  function rawLayerTree(layer: EditorLayer): EditorLayer {
+    const raw = toRaw(layer)
+    return raw.children?.length ? { ...raw, children: raw.children.map(rawLayerTree) } : raw
+  }
+
+  /** `atTime` lands the layer where it was dropped on the timeline; without it, at the playhead. */
+  function addAssetToTimeline(assetId: string, atTime?: number) {
     const asset = assets.value.find((item) => item.id === assetId)
     if (!asset || asset.kind === 'model3d' || asset.kind === 'hdr' || asset.kind === 'texture') return
+    const dropTime = Math.max(0, Math.min(project.value.duration, atTime ?? currentTime.value))
+    if (asset.layerTemplate) {
+      const layer = structuredClone(rawLayerTree(asset.layerTemplate))
+      const delta = dropTime - layer.start
+      const renewLayer = (item: EditorLayer) => {
+        item.id = crypto.randomUUID()
+        delete item.trackId
+        item.start += delta
+        ;(Object.keys(item.transform) as Array<keyof EditorLayer['transform']>).forEach((key) => {
+          item.transform[key].id = `${item.id}-${key}`
+          item.transform[key].keyframes.forEach((keyframe) => {
+            keyframe.id = crypto.randomUUID()
+            keyframe.time += delta
+          })
+        })
+        item.children?.forEach(renewLayer)
+      }
+      renewLayer(layer)
+      layer.name = asset.name
+      layerList().splice(0, 0, layer)
+      project.value.duration = Math.max(project.value.duration, layer.start + layer.duration)
+      selectedLayerId.value = layer.id
+      selectedKeyframeId.value = null
+      markChanged()
+      return layer
+    }
     const type = asset.kind === 'composition' ? 'image' : asset.kind
     const layer: EditorLayer = {
       id: crypto.randomUUID(), name: asset.name.replace(/\.[^.]+$/, ''), type,
-      start: currentTime.value, duration: Math.min(asset.duration ?? 6, project.value.duration - currentTime.value),
+      start: dropTime, duration: Math.min(asset.duration ?? 6, Math.max(1 / project.value.frameRate, project.value.duration - dropTime)),
       color: type === 'audio' ? '#5c9b82' : type === 'image' ? '#6b99d5' : '#5477a8',
       visible: true, locked: false, muted: false, expanded: false,
       transform: makeTransform(crypto.randomUUID()), effects: [],
     }
-    layers.value.splice(type === 'audio' ? layers.value.length : 0, 0, layer)
+    layerList().splice(type === 'audio' ? layerList().length : 0, 0, layer)
     selectedLayerId.value = layer.id
     markChanged()
+    return layer
   }
 
   function addGeneratedLayer(type: 'text' | 'shape', x: number, y: number, shapeKind: 'rectangle' | 'ellipse' = 'rectangle') {
@@ -308,7 +381,75 @@ export const useEditorStore = defineStore('editor', () => {
     }
     layer.transform.x.value = Math.max(0, Math.min(project.value.width, x))
     layer.transform.y.value = Math.max(0, Math.min(project.value.height, y))
-    layers.value.splice(0, 0, layer)
+    layerList().splice(0, 0, layer)
+    selectedLayerId.value = layer.id
+    selectedKeyframeId.value = null
+    markChanged()
+    return layer
+  }
+
+  function addTimelineLayer(preset: TimelineLayerPreset) {
+    const id = crypto.randomUUID()
+    const isFullDuration = preset === 'adjustment' || preset === 'cinematic-grade'
+    const isAudio = preset === 'audio'
+    const shapeKind = preset === 'rectangle' || preset === 'ellipse' ? preset : undefined
+    const type: EditorLayer['type'] = preset === 'cinematic-grade'
+      ? 'adjustment'
+      : preset === 'rectangle' || preset === 'ellipse'
+        ? 'shape'
+        : preset
+    const labels: Record<TimelineLayerPreset, string> = {
+      adjustment: 'Adjustment Layer',
+      'cinematic-grade': 'Cinematic Grade',
+      '3d-scene': '3D Scene',
+      text: 'New Text',
+      rectangle: 'Rectangle',
+      ellipse: 'Ellipse',
+      image: 'Image Layer',
+      video: 'Video Layer',
+      audio: 'Audio Layer',
+    }
+    const colors: Record<TimelineLayerPreset, string> = {
+      adjustment: '#8e86d8',
+      'cinematic-grade': '#9b8fe8',
+      '3d-scene': '#7888db',
+      text: '#d49b65',
+      rectangle: '#8c9bff',
+      ellipse: '#7296d8',
+      image: '#6b99d5',
+      video: '#5477a8',
+      audio: '#5c9b82',
+    }
+    const frameDuration = 1 / project.value.frameRate
+    const start = isFullDuration ? 0 : Math.min(currentTime.value, Math.max(0, project.value.duration - frameDuration))
+    const layer: EditorLayer = {
+      id,
+      name: labels[preset],
+      type,
+      start,
+      duration: isFullDuration ? project.value.duration : Math.max(frameDuration, project.value.duration - start),
+      shapeKind,
+      textContent: preset === 'text' ? 'New Text' : undefined,
+      color: colors[preset],
+      visible: true,
+      locked: false,
+      muted: false,
+      expanded: false,
+      transform: makeTransform(id),
+      effects: preset === 'cinematic-grade' ? ['Color Matrix', 'Vignette'] : isAudio ? ['Gain'] : [],
+    }
+
+    if (preset === '3d-scene') {
+      const sceneNumber = scenes3D.value.length + 1
+      const scene = createEmpty3DScene(`3D Scene ${sceneNumber}`)
+      scenes3D.value.push(scene)
+      layer.name = scene.name
+      layer.sceneId = scene.id
+      selectedSceneId.value = scene.id
+      selectedSceneEntityId.value = scene.cameras[0]!.id
+    }
+
+    layerList().splice(isAudio ? layerList().length : 0, 0, layer)
     selectedLayerId.value = layer.id
     selectedKeyframeId.value = null
     markChanged()
@@ -318,51 +459,51 @@ export const useEditorStore = defineStore('editor', () => {
   function reorderTrack(sourceTrackId: string, targetTrackId: string, before: boolean) {
     if (sourceTrackId === targetTrackId) return
     const trackKey = (layer: EditorLayer) => layer.trackId ?? layer.id
-    const sourceSegments = layers.value.filter((layer) => trackKey(layer) === sourceTrackId)
-    const targetSegments = layers.value.filter((layer) => trackKey(layer) === targetTrackId)
+    const sourceSegments = layerList().filter((layer) => trackKey(layer) === sourceTrackId)
+    const targetSegments = layerList().filter((layer) => trackKey(layer) === targetTrackId)
     if (!sourceSegments.length || !targetSegments.length || (sourceSegments[0]!.type === 'audio') !== (targetSegments[0]!.type === 'audio')) return
-    const remaining = layers.value.filter((layer) => trackKey(layer) !== sourceTrackId)
+    const remaining = layerList().filter((layer) => trackKey(layer) !== sourceTrackId)
     const targetIndices = remaining.map((layer, index) => trackKey(layer) === targetTrackId ? index : -1).filter((index) => index >= 0)
     const insertionIndex = before ? Math.min(...targetIndices) : Math.max(...targetIndices) + 1
     remaining.splice(insertionIndex, 0, ...sourceSegments)
-    layers.value = remaining
+    replaceLayerList(remaining)
     markChanged()
   }
 
   function moveSegmentToTrack(layerId: string, targetTrackId: string) {
-    const segmentIndex = layers.value.findIndex((layer) => layer.id === layerId)
-    const segment = layers.value[segmentIndex]
-    const target = layers.value.find((layer) => (layer.trackId ?? layer.id) === targetTrackId)
+    const segmentIndex = layerList().findIndex((layer) => layer.id === layerId)
+    const segment = layerList()[segmentIndex]
+    const target = layerList().find((layer) => (layer.trackId ?? layer.id) === targetTrackId)
     if (!segment || !target || (segment.type === 'audio') !== (target.type === 'audio')) return false
     const sourceTrackId = segment.trackId ?? segment.id
     if (sourceTrackId === targetTrackId) return false
-    layers.value.splice(segmentIndex, 1)
-    if (!layers.value.some((layer) => (layer.trackId ?? layer.id) === sourceTrackId)) {
-      layers.value.splice(Math.min(segmentIndex, layers.value.length), 0, makeEmptyTrack(segment.type === 'audio' ? 'audio' : 'visual', sourceTrackId))
+    layerList().splice(segmentIndex, 1)
+    if (!layerList().some((layer) => (layer.trackId ?? layer.id) === sourceTrackId)) {
+      layerList().splice(Math.min(segmentIndex, layerList().length), 0, makeEmptyTrack(segment.type === 'audio' ? 'audio' : 'visual', sourceTrackId))
     }
-    const targetPlaceholderIndex = layers.value.findIndex((layer) => (layer.trackId ?? layer.id) === targetTrackId && layer.isPlaceholder)
-    if (targetPlaceholderIndex >= 0) layers.value.splice(targetPlaceholderIndex, 1)
+    const targetPlaceholderIndex = layerList().findIndex((layer) => (layer.trackId ?? layer.id) === targetTrackId && layer.isPlaceholder)
+    if (targetPlaceholderIndex >= 0) layerList().splice(targetPlaceholderIndex, 1)
     segment.trackId = targetTrackId
-    const lastTargetIndex = layers.value.reduce((last, layer, index) => (layer.trackId ?? layer.id) === targetTrackId ? index : last, -1)
+    const lastTargetIndex = layerList().reduce((last, layer, index) => (layer.trackId ?? layer.id) === targetTrackId ? index : last, -1)
     const insertionIndex = lastTargetIndex >= 0 ? lastTargetIndex + 1 : Math.max(0, targetPlaceholderIndex)
-    layers.value.splice(insertionIndex, 0, segment)
+    layerList().splice(insertionIndex, 0, segment)
     selectedLayerId.value = segment.id
     markChanged()
     return true
   }
 
   function moveSegmentToNewTrack(layerId: string, category: 'visual' | 'audio') {
-    const index = layers.value.findIndex((layer) => layer.id === layerId)
-    const segment = layers.value[index]
+    const index = layerList().findIndex((layer) => layer.id === layerId)
+    const segment = layerList()[index]
     if (!segment || (segment.type === 'audio') !== (category === 'audio')) return false
     const sourceTrackId = segment.trackId ?? segment.id
-    layers.value.splice(index, 1)
-    if (!layers.value.some((layer) => (layer.trackId ?? layer.id) === sourceTrackId)) {
-      layers.value.splice(Math.min(index, layers.value.length), 0, makeEmptyTrack(category, sourceTrackId))
+    layerList().splice(index, 1)
+    if (!layerList().some((layer) => (layer.trackId ?? layer.id) === sourceTrackId)) {
+      layerList().splice(Math.min(index, layerList().length), 0, makeEmptyTrack(category, sourceTrackId))
     }
     segment.trackId = crypto.randomUUID()
-    const insertionIndex = category === 'audio' ? layers.value.length : 0
-    layers.value.splice(insertionIndex, 0, segment)
+    const insertionIndex = category === 'audio' ? layerList().length : 0
+    layerList().splice(insertionIndex, 0, segment)
     selectedLayerId.value = segment.id
     markChanged()
     return true
@@ -392,19 +533,153 @@ export const useEditorStore = defineStore('editor', () => {
   function addEmptyTrack(category: 'visual' | 'audio') {
     const layer = makeEmptyTrack(category)
     const isAudio = category === 'audio'
-    const firstAudio = layers.value.findIndex((item) => item.type === 'audio')
-    layers.value.splice(isAudio ? layers.value.length : (firstAudio < 0 ? layers.value.length : firstAudio), 0, layer)
+    const firstAudio = layerList().findIndex((item) => item.type === 'audio')
+    layerList().splice(isAudio ? layerList().length : (firstAudio < 0 ? layerList().length : firstAudio), 0, layer)
     selectedLayerId.value = layer.id
     markChanged()
     return layer
   }
 
+  /**
+   * Every cluster owns a Library entry, so it can be reused straight away — including an empty one
+   * you are still building. The entry is a snapshot, so it is refreshed whenever the cluster changes
+   * rather than left describing whatever the cluster looked like the moment it was made.
+   */
+  function publishClusterAsset(cluster: EditorLayer) {
+    const snapshot = structuredClone(rawLayerTree(cluster))
+    const count = cluster.children?.length ?? 0
+    const existing = cluster.assetId ? assets.value.find((asset) => asset.id === cluster.assetId) : undefined
+    if (existing) {
+      existing.name = cluster.name
+      existing.duration = cluster.duration
+      existing.sizeLabel = `${count} reusable ${count === 1 ? 'layer' : 'layers'}`
+      existing.layerTemplate = snapshot
+      return existing
+    }
+    const asset: MediaAsset = {
+      id: crypto.randomUUID(),
+      name: cluster.name,
+      kind: 'composition',
+      duration: cluster.duration,
+      dimensions: `${project.value.width} × ${project.value.height}`,
+      sizeLabel: `${count} reusable ${count === 1 ? 'layer' : 'layers'}`,
+      layerTemplate: snapshot,
+    }
+    cluster.assetId = asset.id
+    assets.value.unshift(asset)
+    return asset
+  }
+
+  /** Keeps the Library entries of the clusters being edited in step with their contents. */
+  function syncOpenClusterAssets() {
+    openClusterTabs.value.forEach((id) => {
+      const cluster = findLayerDeep(layers.value, id)
+      if (cluster?.assetId) publishClusterAsset(cluster)
+    })
+  }
+
+  /**
+   * Clusters made before they published themselves — or loaded from an older project — would never
+   * appear in the Library. Give any cluster still missing an entry one, at whatever depth it sits.
+   */
+  function ensureClusterAssets(list: EditorLayer[] = layers.value) {
+    list.forEach((layer) => {
+      if (layer.type === 'cluster' && !assets.value.some((asset) => asset.id === layer.assetId)) publishClusterAsset(layer)
+      if (layer.children?.length) ensureClusterAssets(layer.children)
+    })
+  }
+
+  const contextKey = (clusterId: string | null) => clusterId ?? 'main'
+  const contextPlayheads = ref<Record<string, number>>({})
+
+  /**
+   * Each timeline tab keeps its own playhead. Moving the cursor inside a cluster must not drag the
+   * main timeline's cursor with it, so the outgoing tab's time is stashed and the incoming tab's
+   * restored — a cluster opened for the first time starts at its own first frame.
+   */
+  function switchPlayheadContext(nextClusterId: string | null) {
+    contextPlayheads.value[contextKey(activeClusterId.value)] = currentTime.value
+    const saved = contextPlayheads.value[contextKey(nextClusterId)]
+    if (saved !== undefined) {
+      currentTime.value = saved
+      return
+    }
+    const cluster = nextClusterId ? findLayerDeep(layers.value, nextClusterId) : null
+    if (cluster) currentTime.value = cluster.start
+  }
+
+  /** Grows a cluster so it still covers everything inside it after an edit. Never shrinks it. */
+  function fitClusterToChildren(clusterId: string | null) {
+    const cluster = clusterId ? findLayerDeep(layers.value, clusterId) : null
+    if (!cluster?.children?.length) return
+    const end = Math.max(...cluster.children.map((child) => child.start + child.duration))
+    const nextDuration = Math.max(cluster.duration, end - cluster.start)
+    if (nextDuration === cluster.duration) return
+    cluster.duration = nextDuration
+    markChanged()
+  }
+
+  /** Opens the cluster as a timeline tab and switches to it. Re-entering focuses the existing tab. */
+  function enterCluster(clusterId: string) {
+    const cluster = findLayerDeep(layers.value, clusterId)
+    if (cluster?.type !== 'cluster') return false
+    if (!openClusterTabs.value.includes(clusterId)) openClusterTabs.value = [...openClusterTabs.value, clusterId]
+    switchPlayheadContext(clusterId)
+    activeClusterId.value = clusterId
+    selectedLayerId.value = cluster.children?.[0]?.id ?? clusterId
+    selectedKeyframeId.value = null
+    return true
+  }
+
+  function activateTimelineTab(clusterId: string | null) {
+    if (clusterId && !openClusterTabs.value.includes(clusterId)) return
+    if (clusterId !== activeClusterId.value) switchPlayheadContext(clusterId)
+    activeClusterId.value = clusterId
+    const context = clusterId ? findLayerDeep(layers.value, clusterId)?.children ?? [] : layers.value
+    if (!context.some((layer) => layer.id === selectedLayerId.value)) {
+      selectedLayerId.value = context.find((layer) => !layer.isPlaceholder)?.id ?? selectedLayerId.value
+    }
+    selectedKeyframeId.value = null
+  }
+
+  function closeClusterTab(clusterId: string) {
+    openClusterTabs.value = openClusterTabs.value.filter((id) => id !== clusterId)
+    if (activeClusterId.value === clusterId) activateTimelineTab(openClusterTabs.value.at(-1) ?? null)
+  }
+
+  /** A cluster with nothing in it yet, opened straight away so it can be built from the inside. */
+  function createEmptyCluster() {
+    const id = crypto.randomUUID()
+    const frameDuration = 1 / project.value.frameRate
+    const start = Math.min(currentTime.value, Math.max(0, project.value.duration - frameDuration))
+    const cluster: EditorLayer = {
+      id,
+      name: `Cluster ${clusterCounter++}`,
+      type: 'cluster',
+      start,
+      duration: Math.max(frameDuration, Math.min(5, project.value.duration - start)),
+      color: '#7f8fe2',
+      visible: true,
+      locked: false,
+      muted: false,
+      expanded: false,
+      transform: makeTransform(id),
+      effects: [],
+      children: [],
+    }
+    layerList().splice(0, 0, cluster)
+    publishClusterAsset(cluster)
+    markChanged()
+    enterCluster(cluster.id)
+    return cluster
+  }
+
   function createCluster(layerIds: string[]) {
     const selectedIds = new Set(layerIds)
-    const children = layers.value.filter((layer) => selectedIds.has(layer.id) && layer.type !== 'audio' && !layer.isPlaceholder)
+    const children = layerList().filter((layer) => selectedIds.has(layer.id) && layer.type !== 'audio' && !layer.isPlaceholder)
     if (!children.length) return null
     const childIds = new Set(children.map((layer) => layer.id))
-    const firstIndex = layers.value.findIndex((layer) => childIds.has(layer.id))
+    const firstIndex = layerList().findIndex((layer) => childIds.has(layer.id))
     const start = Math.min(...children.map((layer) => layer.start))
     const end = Math.max(...children.map((layer) => layer.start + layer.duration))
     const id = crypto.randomUUID()
@@ -423,8 +698,9 @@ export const useEditorStore = defineStore('editor', () => {
       effects: [],
       children,
     }
-    layers.value = layers.value.filter((layer) => !childIds.has(layer.id))
-    layers.value.splice(Math.max(0, Math.min(firstIndex, layers.value.length)), 0, cluster)
+    publishClusterAsset(cluster)
+    replaceLayerList(layerList().filter((layer) => !childIds.has(layer.id)))
+    layerList().splice(Math.max(0, Math.min(firstIndex, layerList().length)), 0, cluster)
     selectedLayerId.value = cluster.id
     selectedKeyframeId.value = null
     markChanged()
@@ -432,10 +708,10 @@ export const useEditorStore = defineStore('editor', () => {
   }
 
   function releaseCluster(clusterId: string) {
-    const index = layers.value.findIndex((layer) => layer.id === clusterId && layer.type === 'cluster')
-    const cluster = layers.value[index]
+    const index = layerList().findIndex((layer) => layer.id === clusterId && layer.type === 'cluster')
+    const cluster = layerList()[index]
     if (!cluster?.children?.length) return false
-    layers.value.splice(index, 1, ...cluster.children)
+    layerList().splice(index, 1, ...cluster.children)
     selectedLayerId.value = cluster.children[0]!.id
     selectedKeyframeId.value = null
     markChanged()
@@ -443,8 +719,8 @@ export const useEditorStore = defineStore('editor', () => {
   }
 
   function splitLayerAt(layerId: string, requestedTime: number) {
-    const index = layers.value.findIndex((item) => item.id === layerId)
-    const layer = layers.value[index]
+    const index = layerList().findIndex((item) => item.id === layerId)
+    const layer = layerList()[index]
     if (!layer || layer.locked) return false
     const frameDuration = 1 / project.value.frameRate
     const splitTime = Math.round(requestedTime / frameDuration) * frameDuration
@@ -479,7 +755,7 @@ export const useEditorStore = defineStore('editor', () => {
       rightChannel.keyframes.sort((left, next) => left.time - next.time)
     })
 
-    layers.value.splice(index + 1, 0, right)
+    layerList().splice(index + 1, 0, right)
     selectedLayerId.value = layer.id
     selectedKeyframeId.value = null
     markChanged()
@@ -492,8 +768,11 @@ export const useEditorStore = defineStore('editor', () => {
   }
 
   function markChanged() {
+    ensureClusterAssets()
+    syncOpenClusterAssets()
     changeRevision += 1
     saveStatus.value = 'Saving…'
+    if (typeof window === 'undefined') return
     if (saveTimer !== null) window.clearTimeout(saveTimer)
     saveTimer = window.setTimeout(() => { void saveProjectNow() }, 250)
   }
@@ -526,6 +805,25 @@ export const useEditorStore = defineStore('editor', () => {
     if (workspace.value === nextWorkspace) return
     void flushProjectSave()
     workspace.value = nextWorkspace
+    if (nextWorkspace === '3D') {
+      const layer = layers.value.find((item) => item.id === selectedLayerId.value && item.type === '3d-scene')
+        ?? layers.value.find((item) => item.type === '3d-scene' && item.sceneId === selectedSceneId.value)
+        ?? layers.value.find((item) => item.type === '3d-scene')
+      if (layer) select3DLayer(layer.id)
+    }
+  }
+
+  function select3DLayer(layerId: string) {
+    const layer = layers.value.find((item) => item.id === layerId && item.type === '3d-scene')
+    const scene = layer?.sceneId ? scenes3D.value.find((item) => item.id === layer.sceneId) : undefined
+    if (!layer || !scene) return
+    selectedLayerId.value = layer.id
+    selectedSceneId.value = scene.id
+    const entityExists = scene.objects.some((item) => item.id === selectedSceneEntityId.value)
+      || scene.cameras.some((item) => item.id === selectedSceneEntityId.value)
+      || scene.lights.some((item) => item.id === selectedSceneEntityId.value)
+      || scene.paths.some((item) => item.id === selectedSceneEntityId.value)
+    if (!entityExists) selectedSceneEntityId.value = scene.objects[0]?.id ?? scene.cameras[0]?.id ?? scene.lights[0]?.id ?? scene.paths[0]?.id ?? ''
   }
 
   function selectSceneEntity(sceneId: string, entityId: string) {
@@ -1113,10 +1411,12 @@ export const useEditorStore = defineStore('editor', () => {
     setNodeSource, setNodeSocketValue, setNodeProperty, toggleNodeMuted, setRenderRootNode,
     selectedLayer, selectedScene, selectedSceneEntity,
     togglePlayback, setTime, stepFrame, setProjectDuration, addKeyframe, setLayerValue, addFiles,
-    addAssetToTimeline, addGeneratedLayer, reorderTrack, moveSegmentToTrack, moveSegmentToNewTrack, addEmptyTrack,
-    createCluster, releaseCluster,
+    addAssetToTimeline, addGeneratedLayer, addTimelineLayer, reorderTrack, moveSegmentToTrack, moveSegmentToNewTrack, addEmptyTrack,
+    createCluster, releaseCluster, createEmptyCluster,
+    openClusterTabs, activeClusterId, activeCluster, timelineLayers, clusterTabs,
+    enterCluster, activateTimelineTab, closeClusterTab, fitClusterToChildren, publishClusterAsset, ensureClusterAssets,
     splitLayerAt, splitSelectedLayer, markChanged, saveProjectNow, flushProjectSave, initializePersistence, setWorkspace, startExport,
-    selectSceneEntity, markSceneChanged, add3DPrimitive, add3DLight, add3DCamera, set3DEntityTransform,
+    selectSceneEntity, select3DLayer, markSceneChanged, add3DPrimitive, add3DLight, add3DCamera, set3DEntityTransform,
     update3DEntityTransform, set3DObjectMaterial, set3DLightIntensity, set3DCameraFov,
     toggle3DKeyframe, keySelected3DTransform, move3DKeyframe, delete3DKeyframe, setActive3DCamera,
     add3DCameraCut, set3DCameraCutCamera, move3DCameraCut, delete3DCameraCut,

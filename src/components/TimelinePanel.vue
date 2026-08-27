@@ -2,17 +2,20 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { storeToRefs } from 'pinia'
 import {
-  AudioLines, ChevronDown, ChevronRight, CircleDot, Eye, Film, Gauge, GripVertical, KeyRound,
+  AudioLines, Box, ChevronDown, ChevronRight, Circle, CircleDot, Eye, Film, FolderPlus, Gauge, GripVertical, Image as ImageIcon, KeyRound,
   Link2, Lock, Magnet, Minus, MousePointer2, Plus, Scissors, Search,
-  Sparkles, SquareStack, Unlock, Volume2, VolumeX,
+  SlidersHorizontal, Sparkles, SquareStack, Type as TypeIcon, Unlock, Video, Volume2, VolumeX, X,
 } from '@lucide/vue'
-import { useEditorStore } from '@/stores/editor'
+import { useEditorStore, type TimelineLayerPreset } from '@/stores/editor'
 import type { EditorLayer, Keyframe } from '@/models/editor'
 import IconButton from './common/IconButton.vue'
 import CurveEditor from './CurveEditor.vue'
 
 const store = useEditorStore()
-const { project, currentTime, layers, selectedLayer, selectedLayerId, selectedKeyframeId, autoKey, snap, ripple } = storeToRefs(store)
+const {
+  project, currentTime, layers, timelineLayers, clusterTabs, activeClusterId,
+  selectedLayer, selectedLayerId, selectedKeyframeId, autoKey, snap, ripple,
+} = storeToRefs(store)
 const activeBottomTab = ref('Timeline')
 const timelineZoom = ref(100)
 const timelineRef = ref<HTMLElement>()
@@ -29,7 +32,25 @@ const draggingClipId = ref<string | null>(null)
 const clipDragGhost = ref({ visible: false, x: 0, y: 0, width: 0, color: '', label: '', valid: false, invalid: false })
 const newTrackDropCategory = ref<'visual' | 'audio' | null>(null)
 const selectedTrackIds = ref<string[]>([])
+const selectedLayerIds = ref<string[]>([selectedLayerId.value])
+const selectionAnchorId = ref(selectedLayerId.value)
+const addLayerMenuOpen = ref(false)
+const addLayerTrigger = ref<HTMLElement>()
+const addLayerMenuStyle = ref<Record<string, string>>({ top: '29px' })
+const layerMarqueeRect = ref<{ left: number; top: number; width: number; height: number } | null>(null)
 const tabs = ['Timeline', 'Graph Editor', 'Audio Mixer', 'Scopes']
+
+const layerPresets = [
+  { kind: 'adjustment', label: 'Adjustment Layer', detail: 'Empty effects layer', icon: SlidersHorizontal, group: 'Effects' },
+  { kind: 'cinematic-grade', label: 'Cinematic Grade', detail: 'Color Matrix + Vignette', icon: Sparkles, group: 'Effects' },
+  { kind: '3d-scene', label: '3D Scene', detail: 'Scene, camera, and light', icon: Box, group: 'Generated' },
+  { kind: 'text', label: 'Text', detail: 'Editable text layer', icon: TypeIcon, group: 'Generated' },
+  { kind: 'rectangle', label: 'Rectangle', detail: 'Shape layer', icon: SquareStack, group: 'Generated' },
+  { kind: 'ellipse', label: 'Ellipse', detail: 'Shape layer', icon: Circle, group: 'Generated' },
+  { kind: 'image', label: 'Image Layer', detail: 'Empty media layer', icon: ImageIcon, group: 'Media' },
+  { kind: 'video', label: 'Video Layer', detail: 'Empty media layer', icon: Video, group: 'Media' },
+  { kind: 'audio', label: 'Audio Layer', detail: 'Empty audio layer', icon: AudioLines, group: 'Media' },
+] satisfies Array<{ kind: TimelineLayerPreset; label: string; detail: string; icon: typeof Box; group: 'Effects' | 'Generated' | 'Media' }>
 
 interface PanState {
   startX: number
@@ -46,6 +67,7 @@ interface ClipDragState {
   originalStart: number
   originalDuration: number
   originalProjectDuration: number
+  originalViewDuration: number
   originalTrackId: string
   targetTrackId: string | null
   newTrackCategory: 'visual' | 'audio' | null
@@ -82,6 +104,14 @@ interface TimelineTrack {
   segments: EditorLayer[]
 }
 
+interface LayerMarqueeState {
+  startX: number
+  startY: number
+  lastClientX: number
+  baseSelection: string[]
+  moved: boolean
+}
+
 const propertyTracks: { key: TransformKey; label: string; suffix: string }[] = [
   { key: 'x', label: 'Position X', suffix: ' px' },
   { key: 'y', label: 'Position Y', suffix: ' px' },
@@ -94,7 +124,19 @@ const propertyTracks: { key: TransformKey; label: string; suffix: string }[] = [
 let panState: PanState | null = null
 let clipDragState: ClipDragState | null = null
 let keyframeDragState: KeyframeDragState | null = null
+let layerMarqueeState: LayerMarqueeState | null = null
 let resizeObserver: ResizeObserver | null = null
+
+/**
+ * Inside a cluster the timeline reads relative to that cluster: its first frame is 0. Children keep
+ * absolute project times, so moving the cluster on the main timeline moves the cluster and its
+ * children together and the view inside is unchanged — which is the point.
+ */
+const viewOrigin = computed(() => store.activeCluster?.start ?? 0)
+const viewDuration = computed(() => Math.max(1 / project.value.frameRate, store.activeCluster?.duration ?? project.value.duration))
+const toFraction = (time: number) => (time - viewOrigin.value) / viewDuration.value
+const fromFraction = (fraction: number) => viewOrigin.value + fraction * viewDuration.value
+const clampToView = (time: number) => Math.max(viewOrigin.value, Math.min(viewOrigin.value + viewDuration.value, time))
 
 const timelineLaneWidth = computed(() => {
   const fitWidth = Math.max(240, timelineViewportWidth.value - 220)
@@ -104,7 +146,7 @@ const timelineContentWidth = computed(() => 220 + timelineLaneWidth.value)
 const timelineContentStyle = computed(() => ({ width: `${timelineContentWidth.value}px` }))
 const timelineTracks = computed<TimelineTrack[]>(() => {
   const tracks = new Map<string, TimelineTrack>()
-  layers.value.forEach((layer) => {
+  timelineLayers.value.forEach((layer) => {
     const trackId = layer.trackId ?? layer.id
     const track = tracks.get(trackId)
     if (track) track.segments.push(layer)
@@ -114,16 +156,26 @@ const timelineTracks = computed<TimelineTrack[]>(() => {
   return [...ordered.filter((track) => track.segments[0]?.type !== 'audio'), ...ordered.filter((track) => track.segments[0]?.type === 'audio')]
 })
 const visualTrackCount = computed(() => timelineTracks.value.filter((track) => track.segments[0]?.type !== 'audio').length)
+const clusterableSelectionCount = computed(() => selectedLayerIds.value.filter((id) => {
+  const layer = timelineLayers.value.find((item) => item.id === id)
+  return layer && layer.type !== 'audio' && !layer.isPlaceholder
+}).length)
 
 const ticks = computed(() => {
   const tickCount = Math.max(5, Math.min(40, Math.round(9 * timelineZoom.value / 100)))
-  return Array.from({ length: tickCount + 1 }, (_, index) => ({
-    time: index * (project.value.duration / tickCount),
-    label: `${String(Math.floor(index * project.value.duration / tickCount / 60)).padStart(2, '0')}:${String(Math.floor(index * project.value.duration / tickCount) % 60).padStart(2, '0')}`,
-  }))
+  return Array.from({ length: tickCount + 1 }, (_, index) => {
+    const relative = index * (viewDuration.value / tickCount)
+    return {
+      time: viewOrigin.value + relative,
+      fraction: index / tickCount,
+      label: `${String(Math.floor(relative / 60)).padStart(2, '0')}:${String(Math.floor(relative) % 60).padStart(2, '0')}`,
+    }
+  })
 })
 
-const playheadStyle = computed(() => ({ left: `${220 + timelineLaneWidth.value * (currentTime.value / project.value.duration)}px` }))
+const playheadStyle = computed(() => ({
+  left: `${220 + timelineLaneWidth.value * Math.max(0, Math.min(1, toFraction(currentTime.value)))}px`,
+}))
 const layerIcon = (type: EditorLayer['type']) => type === 'audio' ? AudioLines : type === 'video' ? Film : type === 'text' ? KeyRound : type === 'adjustment' ? Sparkles : SquareStack
 
 function trackDisplayLayer(track: TimelineTrack) {
@@ -138,29 +190,109 @@ function selectTrack(track: TimelineTrack, event?: MouseEvent) {
   } else {
     selectedTrackIds.value = [track.id]
   }
-  selectedLayerId.value = trackDisplayLayer(track).id
+  const primary = trackDisplayLayer(track)
+  const layerIds = timelineTracks.value
+    .filter((item) => selectedTrackIds.value.includes(item.id))
+    .flatMap((item) => item.segments.filter((segment) => !segment.isPlaceholder).map((segment) => segment.id))
+  if (layerIds.length) {
+    publishLayerSelection(layerIds, primary.isPlaceholder ? undefined : primary.id)
+    if (!primary.isPlaceholder) selectionAnchorId.value = primary.id
+  } else {
+    selectedLayerIds.value = []
+    selectedLayerId.value = primary.id
+  }
 }
 
-function selectSegment(event: MouseEvent, track: TimelineTrack, segment: EditorLayer) {
-  event.stopPropagation()
-  selectTrack(track, event)
-  selectedLayerId.value = segment.id
+function publishLayerSelection(ids: string[], primaryId?: string) {
+  const availableIds = new Set(timelineLayers.value.filter((layer) => !layer.isPlaceholder).map((layer) => layer.id))
+  selectedLayerIds.value = [...new Set(ids)].filter((id) => availableIds.has(id))
+  selectedTrackIds.value = [...new Set(selectedLayerIds.value.map((id) => {
+    const layer = timelineLayers.value.find((item) => item.id === id)!
+    return layer.trackId ?? layer.id
+  }))]
+  const primary = primaryId && selectedLayerIds.value.includes(primaryId)
+    ? primaryId
+    : selectedLayerIds.value.at(-1)
+  if (primary) selectedLayerId.value = primary
+}
+
+function selectLayerFromPointer(event: PointerEvent, layer: EditorLayer) {
+  const selectableLayers = timelineLayers.value.filter((item) => !item.isPlaceholder)
+  const orderedIds = selectableLayers.map((item) => item.id)
+  const toggle = event.ctrlKey || event.metaKey
+  if (event.shiftKey && selectionAnchorId.value) {
+    const anchorIndex = orderedIds.indexOf(selectionAnchorId.value)
+    const targetIndex = orderedIds.indexOf(layer.id)
+    if (anchorIndex >= 0 && targetIndex >= 0) {
+      const range = orderedIds.slice(Math.min(anchorIndex, targetIndex), Math.max(anchorIndex, targetIndex) + 1)
+      publishLayerSelection(toggle ? [...selectedLayerIds.value, ...range] : range, layer.id)
+      return
+    }
+  }
+  if (toggle) {
+    const alreadySelected = selectedLayerIds.value.includes(layer.id)
+    const next = alreadySelected
+      ? selectedLayerIds.value.filter((id) => id !== layer.id)
+      : [...selectedLayerIds.value, layer.id]
+    publishLayerSelection(next, alreadySelected ? undefined : layer.id)
+    if (!alreadySelected) selectionAnchorId.value = layer.id
+    return
+  }
+  if (!selectedLayerIds.value.includes(layer.id)) publishLayerSelection([layer.id], layer.id)
+  else selectedLayerId.value = layer.id
+  selectionAnchorId.value = layer.id
 }
 
 function toggleCluster() {
   if (selectedLayer.value?.type === 'cluster') {
     const children = selectedLayer.value.children ?? []
-    if (store.releaseCluster(selectedLayer.value.id)) selectedTrackIds.value = children.map((child) => child.trackId ?? child.id)
+    if (store.releaseCluster(selectedLayer.value.id)) {
+      selectedTrackIds.value = children.map((child) => child.trackId ?? child.id)
+      publishLayerSelection(children.map((child) => child.id), children[0]?.id)
+    }
     return
   }
-  const trackIds = selectedTrackIds.value.length
-    ? selectedTrackIds.value
-    : timelineTracks.value.filter((track) => track.segments.some((segment) => segment.id === selectedLayerId.value)).map((track) => track.id)
-  const layerIds = timelineTracks.value
-    .filter((track) => trackIds.includes(track.id) && track.segments[0]?.type !== 'audio')
-    .flatMap((track) => track.segments.map((segment) => segment.id))
+  const layerIds = selectedLayerIds.value.filter((id) => {
+    const layer = timelineLayers.value.find((item) => item.id === id)
+    return layer && layer.type !== 'audio' && !layer.isPlaceholder
+  })
   const cluster = store.createCluster(layerIds)
-  if (cluster) selectedTrackIds.value = [cluster.id]
+  if (cluster) {
+    selectedTrackIds.value = [cluster.id]
+    publishLayerSelection([cluster.id], cluster.id)
+  }
+}
+
+/**
+ * The timeline sits at the bottom of the window, so a menu that always drops downwards would be
+ * clipped. Measure the trigger and open towards whichever side has more room, capped to fit.
+ */
+function toggleAddLayerMenu() {
+  if (addLayerMenuOpen.value) {
+    addLayerMenuOpen.value = false
+    return
+  }
+  const bounds = addLayerTrigger.value?.getBoundingClientRect()
+  if (!bounds) return
+  const margin = 10
+  const below = window.innerHeight - bounds.bottom - margin
+  const above = bounds.top - margin
+  const dropUp = below < Math.min(320, above)
+  addLayerMenuStyle.value = {
+    left: `${Math.round(Math.max(margin, Math.min(bounds.left, window.innerWidth - 234)))}px`,
+    ...(dropUp
+      ? { bottom: `${Math.round(window.innerHeight - bounds.top + 4)}px`, maxHeight: `${Math.max(140, Math.floor(above))}px` }
+      : { top: `${Math.round(bounds.bottom + 4)}px`, maxHeight: `${Math.max(140, Math.floor(below))}px` }),
+  }
+  addLayerMenuOpen.value = true
+}
+
+function addLayer(preset: TimelineLayerPreset) {
+  const layer = store.addTimelineLayer(preset)
+  addLayerMenuOpen.value = false
+  selectedTrackIds.value = [layer.trackId ?? layer.id]
+  publishLayerSelection([layer.id], layer.id)
+  selectionAnchorId.value = layer.id
 }
 
 function toggleTrackExpanded(track: TimelineTrack) {
@@ -219,7 +351,7 @@ function endTrackDrag() {
 }
 
 function clipStyle(layer: EditorLayer) {
-  return { left: `${(layer.start / project.value.duration) * 100}%`, width: `${(layer.duration / project.value.duration) * 100}%`, backgroundColor: layer.color }
+  return { left: `${toFraction(layer.start) * 100}%`, width: `${(layer.duration / viewDuration.value) * 100}%`, backgroundColor: layer.color }
 }
 
 function layerKeyframes(layer: EditorLayer) {
@@ -257,16 +389,16 @@ function timeAtClientX(clientX: number, magnetic = false) {
   if (!element) return 0
   const rect = element.getBoundingClientRect()
   const x = Math.max(0, clientX - rect.left + element.scrollLeft - 220)
-  const rawTime = (x / timelineLaneWidth.value) * project.value.duration
+  const rawTime = fromFraction(x / timelineLaneWidth.value)
   const frameDuration = 1 / project.value.frameRate
   let nextTime = snap.value ? Math.round(rawTime / frameDuration) * frameDuration : rawTime
   if (snap.value && magnetic) {
-    const keyframeTimes = layers.value.flatMap((layer) => propertyTracks.flatMap(({ key }) => layer.transform[key].keyframes.map((keyframe) => keyframe.time)))
+    const keyframeTimes = timelineLayers.value.flatMap((layer) => propertyTracks.flatMap(({ key }) => layer.transform[key].keyframes.map((keyframe) => keyframe.time)))
     const nearestKeyframeTime = keyframeTimes.reduce<number | null>((nearest, time) => nearest === null || Math.abs(time - rawTime) < Math.abs(nearest - rawTime) ? time : nearest, null)
-    const magneticTolerance = (project.value.duration / timelineLaneWidth.value) * 6
+    const magneticTolerance = (viewDuration.value / timelineLaneWidth.value) * 6
     if (nearestKeyframeTime !== null && Math.abs(nearestKeyframeTime - rawTime) <= magneticTolerance) nextTime = nearestKeyframeTime
   }
-  return Math.max(0, Math.min(project.value.duration, nextTime))
+  return Math.max(0, clampToView(nextTime))
 }
 
 function isKeyframeAtPlayhead(time: number) {
@@ -278,6 +410,63 @@ function beginSeek(event: PointerEvent) {
   event.preventDefault()
   isScrubbing.value = true
   seekAtClientX(event.clientX)
+}
+
+function timelineContentPoint(clientX: number, clientY: number) {
+  const element = timelineRef.value
+  if (!element) return { x: 0, y: 0 }
+  const bounds = element.getBoundingClientRect()
+  return {
+    x: clientX - bounds.left + element.scrollLeft,
+    y: clientY - bounds.top + element.scrollTop,
+  }
+}
+
+function beginLayerMarquee(event: PointerEvent) {
+  if (event.button !== 0 || isCutMode.value || !timelineRef.value) return
+  event.preventDefault()
+  event.stopPropagation()
+  const point = timelineContentPoint(event.clientX, event.clientY)
+  const additive = event.ctrlKey || event.metaKey || event.shiftKey
+  layerMarqueeState = {
+    startX: point.x,
+    startY: point.y,
+    lastClientX: event.clientX,
+    baseSelection: additive ? [...selectedLayerIds.value] : [],
+    moved: false,
+  }
+  if (!additive) publishLayerSelection([])
+  layerMarqueeRect.value = { left: point.x, top: point.y, width: 0, height: 0 }
+}
+
+function updateLayerMarquee(event: PointerEvent) {
+  const element = timelineRef.value
+  if (!layerMarqueeState || !element) return
+  const point = timelineContentPoint(event.clientX, event.clientY)
+  layerMarqueeState.lastClientX = event.clientX
+  if (!layerMarqueeState.moved && Math.hypot(point.x - layerMarqueeState.startX, point.y - layerMarqueeState.startY) < 4) return
+  layerMarqueeState.moved = true
+  const rect = {
+    left: Math.min(layerMarqueeState.startX, point.x),
+    top: Math.min(layerMarqueeState.startY, point.y),
+    width: Math.abs(point.x - layerMarqueeState.startX),
+    height: Math.abs(point.y - layerMarqueeState.startY),
+  }
+  layerMarqueeRect.value = rect
+  const timelineBounds = element.getBoundingClientRect()
+  const hits = [...element.querySelectorAll<HTMLElement>('.timeline-clip[data-layer-id]')]
+    .filter((clip) => {
+      const bounds = clip.getBoundingClientRect()
+      const left = bounds.left - timelineBounds.left + element.scrollLeft
+      const top = bounds.top - timelineBounds.top + element.scrollTop
+      return left < rect.left + rect.width
+        && left + bounds.width > rect.left
+        && top < rect.top + rect.height
+        && top + bounds.height > rect.top
+    })
+    .map((clip) => clip.dataset.layerId)
+    .filter((id): id is string => Boolean(id))
+  publishLayerSelection([...layerMarqueeState.baseSelection, ...hits], hits.at(-1))
 }
 
 function toggleCutMode() {
@@ -322,7 +511,10 @@ function cutLayerAtPointer(event: PointerEvent, layer: EditorLayer) {
 
 function onClipPointerDown(event: PointerEvent, layer: EditorLayer) {
   if (isCutMode.value) cutLayerAtPointer(event, layer)
-  else beginClipDrag(event, layer)
+  else {
+    selectLayerFromPointer(event, layer)
+    if (!(event.ctrlKey || event.metaKey || event.shiftKey)) beginClipDrag(event, layer)
+  }
 }
 
 function onTimelinePointerDown(event: PointerEvent) {
@@ -351,6 +543,7 @@ function beginClipDrag(event: PointerEvent, layer: EditorLayer, mode: ClipDragSt
     originalStart: layer.start,
     originalDuration: layer.duration,
     originalProjectDuration: project.value.duration,
+    originalViewDuration: viewDuration.value,
     originalTrackId: layer.trackId ?? layer.id,
     targetTrackId: null,
     newTrackCategory: null,
@@ -369,14 +562,26 @@ function updateClipDragGhost(layer: EditorLayer, row: HTMLElement | null | undef
   const rowBounds = row.getBoundingClientRect()
   clipDragGhost.value = {
     visible: true,
-    x: 220 + (layer.start / project.value.duration) * timelineLaneWidth.value,
+    x: 220 + toFraction(layer.start) * timelineLaneWidth.value,
     y: rowBounds.top - timelineBounds.top + timeline.scrollTop + 3,
-    width: Math.max(10, (layer.duration / project.value.duration) * timelineLaneWidth.value),
+    width: Math.max(10, (layer.duration / viewDuration.value) * timelineLaneWidth.value),
     color: layer.color,
     label: layer.name,
     valid,
     invalid,
   }
+}
+
+/**
+ * The drop target for a brand-new track only exists once the pointer actually leaves the stack it
+ * would join — above the topmost visual track, or below the last track — so starting a drag no
+ * longer inserts a row and shoves the whole timeline down.
+ */
+function newTrackCategoryBeyondTracks(clientY: number, draggedCategory: 'visual' | 'audio') {
+  const rows = [...(timelineRef.value?.querySelectorAll<HTMLElement>('.track-row[data-track-id]') ?? [])]
+  if (!rows.length) return null
+  if (draggedCategory === 'visual') return clientY < rows[0]!.getBoundingClientRect().top ? 'visual' : null
+  return clientY > rows[rows.length - 1]!.getBoundingClientRect().bottom ? 'audio' : null
 }
 
 function commitNewTrackDrop(category: 'visual' | 'audio') {
@@ -415,6 +620,10 @@ async function onPointerMove(event: PointerEvent) {
     element.scrollTop = panState.scrollTop - (event.clientY - panState.startY)
     return
   }
+  if (layerMarqueeState) {
+    updateLayerMarquee(event)
+    return
+  }
   if (isScrubbing.value) {
     seekAtClientX(event.clientX)
     return
@@ -423,7 +632,7 @@ async function onPointerMove(event: PointerEvent) {
     const pointerDistance = Math.abs(event.clientX - keyframeDragState.startX)
     if (!keyframeDragState.moved && pointerDistance < 5) return
     keyframeDragState.moved = true
-    const rawDelta = ((event.clientX - keyframeDragState.startX) / timelineLaneWidth.value) * project.value.duration
+    const rawDelta = ((event.clientX - keyframeDragState.startX) / timelineLaneWidth.value) * viewDuration.value
     const frameDuration = 1 / project.value.frameRate
     const firstEntry = keyframeDragState.entries[0]
     if (!firstEntry) return
@@ -443,33 +652,36 @@ async function onPointerMove(event: PointerEvent) {
   if (!clipDragState.moved) {
     clipDragState.moved = true
     draggingClipId.value = clipDragState.layer.id
-    // The visual new-track target is inserted above the tracks when dragging
-    // starts. Wait for that layout change before measuring the target row so
-    // the drag preview stays aligned with the clip instead of jumping upward.
-    await nextTick()
-    if (!clipDragState) return
   }
   const hitElements = document.elementsFromPoint(event.clientX, event.clientY)
   const targetRow = hitElements
     .map((element) => element.closest<HTMLElement>('.track-row'))
     .find(Boolean)
-  const newTrackZone = hitElements
-    .map((element) => element.closest<HTMLElement>('.new-track-zone'))
-    .find(Boolean)
   const targetTrackId = targetRow?.dataset.trackId ?? null
   const targetTrack = timelineTracks.value.find((track) => track.id === targetTrackId)
   const draggedCategory: 'visual' | 'audio' = clipDragState.layer.type === 'audio' ? 'audio' : 'visual'
-  const zoneCategory = newTrackZone?.dataset.category as 'visual' | 'audio' | undefined
-  const compatibleNewTrack = clipDragState.mode === 'move' && zoneCategory === draggedCategory
+  const compatibleNewTrack = clipDragState.mode === 'move'
+    && newTrackCategoryBeyondTracks(event.clientY, draggedCategory) === draggedCategory
+
+  // Reveal the new-track target before measuring the ghost against it.
+  const nextNewTrackCategory = compatibleNewTrack ? draggedCategory : null
+  if (newTrackDropCategory.value !== nextNewTrackCategory) {
+    newTrackDropCategory.value = nextNewTrackCategory
+    await nextTick()
+    if (!clipDragState) return
+  }
+  const newTrackZone = compatibleNewTrack
+    ? timelineRef.value?.querySelector<HTMLElement>(`.new-track-zone[data-category="${draggedCategory}"]`) ?? undefined
+    : undefined
   const compatibleCategory = Boolean(targetTrack && (targetTrack.segments[0]?.type === 'audio') === (clipDragState.layer.type === 'audio'))
-  const deltaTime = ((event.clientX - clipDragState.startX) / timelineLaneWidth.value) * clipDragState.originalProjectDuration
+  const deltaTime = ((event.clientX - clipDragState.startX) / timelineLaneWidth.value) * clipDragState.originalViewDuration
   const frameDuration = 1 / project.value.frameRate
   const quantize = (value: number) => snap.value ? Math.round(value / frameDuration) * frameDuration : value
   if (clipDragState.mode === 'move') {
     const nextStart = quantize(Math.max(0, clipDragState.originalStart + deltaTime))
     const appliedDelta = nextStart - clipDragState.originalStart
     clipDragState.layer.start = nextStart
-    project.value.duration = Math.max(project.value.duration, nextStart + clipDragState.layer.duration)
+    if (!activeClusterId.value) project.value.duration = Math.max(project.value.duration, nextStart + clipDragState.layer.duration)
     propertyTracks.forEach(({ key }) => {
       clipDragState?.layer.transform[key].keyframes.forEach((keyframe) => {
         keyframe.time = (clipDragState?.keyframeTimes.get(keyframe.id) ?? keyframe.time) + appliedDelta
@@ -488,7 +700,7 @@ async function onPointerMove(event: PointerEvent) {
     clipDragState.layer.duration = clipDragState.originalDuration + clipDragState.originalStart - nextStart
   } else {
     clipDragState.layer.duration = quantize(Math.max(frameDuration, clipDragState.originalDuration + deltaTime))
-    project.value.duration = Math.max(project.value.duration, clipDragState.originalStart + clipDragState.layer.duration)
+    if (!activeClusterId.value) project.value.duration = Math.max(project.value.duration, clipDragState.originalStart + clipDragState.layer.duration)
   }
   const collision = Boolean(targetTrack && compatibleCategory && targetTrack.segments.some((segment) => {
     if (segment.id === clipDragState?.layer.id || segment.isPlaceholder) return false
@@ -503,13 +715,17 @@ async function onPointerMove(event: PointerEvent) {
   clipDragState.dropAllowed = compatibleNewTrack || (Boolean(targetTrack) && compatibleCategory && !collision && (clipDragState.mode === 'move' || sameTrack))
   clipDropTrackId.value = allowedTrackDrop && !sameTrack ? targetTrack!.id : null
   clipInvalidTrackId.value = targetTrack && (!compatibleCategory || collision) ? targetTrack.id : null
-  newTrackDropCategory.value = compatibleNewTrack ? draggedCategory : null
   const sourceRow = timelineRef.value?.querySelector<HTMLElement>(`.track-row[data-track-id="${clipDragState.originalTrackId}"]`)
   const ghostRow = newTrackZone ?? targetRow ?? sourceRow
   updateClipDragGhost(clipDragState.layer, ghostRow, clipDragState.dropAllowed, !clipDragState.dropAllowed)
 }
 
 function endPointerInteraction() {
+  if (layerMarqueeState) {
+    if (!layerMarqueeState.moved) seekAtClientX(layerMarqueeState.lastClientX)
+    layerMarqueeState = null
+    layerMarqueeRect.value = null
+  }
   if (clipDragState?.moved) {
     if (!clipDragState.dropAllowed) {
       clipDragState.layer.start = clipDragState.originalStart
@@ -525,6 +741,8 @@ function endPointerInteraction() {
         }))
       })
     } else {
+      // A child dragged past the end of the cluster grows the cluster, not the project.
+      store.fitClusterToChildren(activeClusterId.value)
       const movedToTrack = clipDragState.newTrackCategory
         ? store.moveSegmentToNewTrack(clipDragState.layer.id, clipDragState.newTrackCategory)
         : clipDragState.targetTrackId
@@ -551,10 +769,17 @@ function endPointerInteraction() {
 }
 
 function onKeyDown(event: KeyboardEvent) {
-  if (event.key === 'Escape' && isCutMode.value) {
-    isCutMode.value = false
-    cutGhost.value.visible = false
+  if (event.key === 'Escape') {
+    addLayerMenuOpen.value = false
+    if (isCutMode.value) {
+      isCutMode.value = false
+      cutGhost.value.visible = false
+    }
   }
+}
+
+function onWindowPointerDown(event: PointerEvent) {
+  if (!(event.target as Element | null)?.closest('.add-layer-control')) addLayerMenuOpen.value = false
 }
 
 async function setZoom(nextZoom: number, anchorClientX?: number) {
@@ -591,7 +816,10 @@ function onDurationChange(event: Event) {
 
 function dropAsset(event: DragEvent) {
   const assetId = event.dataTransfer?.getData('application/x-aurora-asset')
-  if (assetId) store.addAssetToTimeline(assetId)
+  if (!assetId) return
+  // Land the clip where it was released rather than at the playhead.
+  const overLane = event.clientX - (timelineRef.value?.getBoundingClientRect().left ?? 0) + (timelineRef.value?.scrollLeft ?? 0) > 220
+  store.addAssetToTimeline(assetId, overLane ? timeAtClientX(event.clientX) : undefined)
 }
 
 function observeTimeline() {
@@ -613,10 +841,23 @@ watch(activeBottomTab, async (tab) => {
   observeTimeline()
 })
 
+watch(selectedLayerId, (id) => {
+  if (id && !selectedLayerIds.value.includes(id)) {
+    selectedLayerIds.value = [id]
+    selectionAnchorId.value = id
+  }
+})
+
+watch(timelineLayers, (nextLayers) => {
+  const available = new Set(nextLayers.filter((layer) => !layer.isPlaceholder).map((layer) => layer.id))
+  selectedLayerIds.value = selectedLayerIds.value.filter((id) => available.has(id))
+}, { deep: false })
+
 onMounted(() => {
   observeTimeline()
   window.addEventListener('pointermove', onPointerMove)
   window.addEventListener('pointerup', endPointerInteraction)
+  window.addEventListener('pointerdown', onWindowPointerDown)
   window.addEventListener('keydown', onKeyDown)
 })
 
@@ -624,6 +865,7 @@ onBeforeUnmount(() => {
   resizeObserver?.disconnect()
   window.removeEventListener('pointermove', onPointerMove)
   window.removeEventListener('pointerup', endPointerInteraction)
+  window.removeEventListener('pointerdown', onWindowPointerDown)
   window.removeEventListener('keydown', onKeyDown)
 })
 </script>
@@ -638,10 +880,34 @@ onBeforeUnmount(() => {
     </div>
 
     <template v-if="activeBottomTab === 'Timeline'">
+      <div class="context-tabs" role="tablist" aria-label="Timeline contexts">
+        <button type="button" role="tab" :class="{ active: !activeClusterId }" :aria-selected="!activeClusterId" title="Project timeline" @click="store.activateTimelineTab(null)"><Film :size="10" /> Main</button>
+        <button v-for="tab in clusterTabs" :key="tab.id" type="button" role="tab" class="cluster-tab" :class="{ active: activeClusterId === tab.id }" :aria-selected="activeClusterId === tab.id" :title="`Editing inside ${tab.name}`" @click="store.activateTimelineTab(tab.id)">
+          <SquareStack :size="10" /> {{ tab.name }}
+          <span class="close-tab" role="button" :aria-label="`Close ${tab.name}`" @click.stop="store.closeClusterTab(tab.id)"><X :size="9" /></span>
+        </button>
+        <span class="context-hint">Double-click a cluster to edit inside it</span>
+      </div>
       <div class="timeline-toolbar">
         <IconButton :icon="MousePointer2" label="Selection tool (V)" active />
+        <div class="add-layer-control">
+          <button ref="addLayerTrigger" class="toggle-control add-layer-trigger" type="button" :class="{ active: addLayerMenuOpen }" aria-haspopup="menu" :aria-expanded="addLayerMenuOpen" @click.stop="toggleAddLayerMenu"><Plus :size="12" /> Add Layer <ChevronDown :size="10" /></button>
+          <Teleport to="body">
+          <div v-if="addLayerMenuOpen" class="add-layer-menu" role="menu" :style="addLayerMenuStyle">
+            <template v-for="group in ['Effects', 'Generated', 'Media'] as const" :key="group">
+              <div class="add-layer-group">{{ group }}</div>
+              <button v-for="preset in layerPresets.filter((item) => item.group === group)" :key="preset.kind" type="button" role="menuitem" @click="addLayer(preset.kind)">
+                <component :is="preset.icon" :size="14" />
+                <span><strong>{{ preset.label }}</strong><small>{{ preset.detail }}</small></span>
+              </button>
+            </template>
+          </div>
+          </Teleport>
+        </div>
         <IconButton class="razor-tool" :icon="Scissors" label="Razor tool — click clips to split (Esc to exit)" :active="isCutMode" @click="toggleCutMode" />
-        <IconButton :icon="SquareStack" :label="selectedLayer?.type === 'cluster' ? 'Release cluster' : 'Cluster selected visual layers (Ctrl-click to select multiple)'" :active="selectedLayer?.type === 'cluster'" @click="toggleCluster" />
+        <IconButton :icon="SquareStack" :label="selectedLayer?.type === 'cluster' ? 'Release cluster' : 'Cluster selected clips (Ctrl/Shift-click or drag a selection box)'" :active="selectedLayer?.type === 'cluster'" :disabled="selectedLayer?.type !== 'cluster' && clusterableSelectionCount < 2" @click="toggleCluster" />
+        <IconButton :icon="FolderPlus" label="New empty cluster — opens it as a tab to build inside" @click="store.createEmptyCluster()" />
+        <span v-if="selectedLayerIds.length > 1" class="selection-count">{{ selectedLayerIds.length }} selected</span>
         <span class="divider" />
         <button class="toggle-control" type="button" :class="{ active: autoKey }" @click="autoKey = !autoKey"><CircleDot :size="12" /> Auto Key</button>
         <button class="toggle-control" type="button" :class="{ active: snap }" @click="snap = !snap"><Magnet :size="12" /> Snap</button>
@@ -670,20 +936,20 @@ onBeforeUnmount(() => {
         <div class="timeline-content" :style="timelineContentStyle">
         <div class="ruler-row">
           <div class="track-column-heading">
-            <span>Layers</span><small>{{ timelineTracks.length }} tracks · {{ layers.filter((layer) => !layer.isPlaceholder).length }} clips</small>
+            <span>Layers</span><small>{{ timelineTracks.length }} tracks · {{ timelineLayers.filter((layer) => !layer.isPlaceholder).length }} clips</small>
             <div class="header-icons"><Eye :size="11" /><Lock :size="10" /><Volume2 :size="11" /></div>
           </div>
           <div class="time-ruler" @pointerdown="beginSeek">
-            <span v-for="tick in ticks" :key="tick.time" :style="{ left: `${(tick.time / project.duration) * 100}%` }"><i />{{ tick.label }}</span>
+            <span v-for="tick in ticks" :key="tick.time" :style="{ left: `${tick.fraction * 100}%` }"><i />{{ tick.label }}</span>
             <div class="work-area"><i /><i /></div>
           </div>
         </div>
 
         <div class="tracks-scroll">
           <template v-for="(track, index) in timelineTracks" :key="track.id">
-            <div v-if="index === 0" class="track-section-label"><span>Visual layers</span><button type="button" title="Add empty visual layer" aria-label="Add empty visual layer" @click.stop="store.addEmptyTrack('visual')"><Plus :size="10" /><span>Add layer</span></button><small>{{ visualTrackCount }}</small></div>
-            <div v-if="index === 0 && draggingClipId" class="new-track-zone" :class="{ active: newTrackDropCategory === 'visual', incompatible: layers.find((layer) => layer.id === draggingClipId)?.type === 'audio' }" data-category="visual" @pointerup.stop="commitNewTrackDrop('visual')"><Plus :size="10" /><span>Drop into new visual layer</span></div>
-            <div v-if="index === visualTrackCount" class="track-section-label audio"><span>Audio layers</span><button type="button" title="Add empty audio layer" aria-label="Add empty audio layer" @click.stop="store.addEmptyTrack('audio')"><Plus :size="10" /><span>Add layer</span></button><small>{{ timelineTracks.length - visualTrackCount }}</small></div>
+            <div v-if="index === 0" class="track-section-label"><span>Visual layers</span><button type="button" title="Add empty visual track" aria-label="Add empty visual track" @click.stop="store.addEmptyTrack('visual')"><Plus :size="10" /><span>Add track</span></button><small>{{ visualTrackCount }}</small></div>
+            <div v-if="index === 0 && newTrackDropCategory === 'visual'" class="new-track-zone active" data-category="visual" @pointerup.stop="commitNewTrackDrop('visual')"><Plus :size="10" /><span>Drop into new visual layer</span></div>
+            <div v-if="index === visualTrackCount" class="track-section-label audio"><span>Audio layers</span><button type="button" title="Add empty audio track" aria-label="Add empty audio track" @click.stop="store.addEmptyTrack('audio')"><Plus :size="10" /><span>Add track</span></button><small>{{ timelineTracks.length - visualTrackCount }}</small></div>
             <div
               class="track-row"
               :class="{
@@ -714,9 +980,9 @@ onBeforeUnmount(() => {
                 <button type="button" :class="{ active: trackDisplayLayer(track).locked }" title="Toggle track lock" @click="toggleTrackLock(track, $event)"><Lock v-if="trackDisplayLayer(track).locked" :size="10" /><Unlock v-else :size="10" /></button>
                 <button type="button" :class="{ active: trackDisplayLayer(track).muted }" title="Mute track" @click="toggleTrackMuted(track, $event)"><VolumeX :size="10" /></button>
               </div>
-              <div class="track-lane" @pointerdown="beginSeek">
+              <div class="track-lane" @pointerdown="beginLayerMarquee">
                 <template v-for="segment in track.segments" :key="segment.id">
-                <button v-if="!segment.isPlaceholder" class="timeline-clip" :class="[segment.type, { 'selected-clip': selectedLayerId === segment.id, 'clip-drag-source': draggingClipId === segment.id }]" type="button" :data-layer-id="segment.id" :style="clipStyle(segment)" @pointerdown="onClipPointerDown($event, segment)" @click="selectSegment($event, track, segment)">
+                <button v-if="!segment.isPlaceholder" class="timeline-clip" :class="[segment.type, { 'selected-clip': selectedLayerIds.includes(segment.id), 'clip-drag-source': draggingClipId === segment.id }]" type="button" :data-layer-id="segment.id" :aria-pressed="selectedLayerIds.includes(segment.id)" :style="clipStyle(segment)" @pointerdown="onClipPointerDown($event, segment)" @click.stop @dblclick.stop="store.enterCluster(segment.id)">
                   <span class="clip-grip left" @pointerdown="beginClipDrag($event, segment, 'trim-start')" />
                   <span v-if="segment.type === 'video'" class="filmstrip"><i v-for="n in 14" :key="n" :style="{ backgroundImage: 'url(/demo/aurora-ridge.png)' }" /></span>
                   <span v-if="segment.type === 'audio'" class="waveform"><i v-for="n in 72" :key="n" :style="{ height: `${6 + ((n * 13) % 18)}px` }" /></span>
@@ -747,16 +1013,17 @@ onBeforeUnmount(() => {
                   <small>{{ trackDisplayLayer(track).transform[property.key].value.toFixed(1) }}{{ property.suffix }}<b v-if="trackDisplayLayer(track).transform[property.key].keyframes.length">{{ trackDisplayLayer(track).transform[property.key].keyframes.length }} keys</b></small>
                 </div>
                 <div class="property-key-lane" @pointerdown="beginSeek">
-                  <button v-for="keyframe in trackDisplayLayer(track).transform[property.key].keyframes" :key="keyframe.id" type="button" :class="{ selected: selectedKeyframeId === keyframe.id, 'at-playhead': isKeyframeAtPlayhead(keyframe.time) }" :style="{ left: `${(keyframe.time / project.duration) * 100}%` }" :title="`${property.label}: ${keyframe.value}${property.suffix} at ${keyframe.time.toFixed(2)}s`" @pointerdown.stop.prevent="beginKeyframeDrag($event, trackDisplayLayer(track), [{ property: property.key, keyframe }])"><Diamond :size="10" fill="currentColor" /></button>
-                  <span v-if="trackDisplayLayer(track).transform[property.key].keyframes.length > 1" class="key-line" :style="{ left: `${(trackDisplayLayer(track).transform[property.key].keyframes[0]!.time / project.duration) * 100}%`, width: `${((trackDisplayLayer(track).transform[property.key].keyframes.at(-1)!.time - trackDisplayLayer(track).transform[property.key].keyframes[0]!.time) / project.duration) * 100}%` }" />
+                  <button v-for="keyframe in trackDisplayLayer(track).transform[property.key].keyframes" :key="keyframe.id" type="button" :class="{ selected: selectedKeyframeId === keyframe.id, 'at-playhead': isKeyframeAtPlayhead(keyframe.time) }" :style="{ left: `${toFraction(keyframe.time) * 100}%` }" :title="`${property.label}: ${keyframe.value}${property.suffix} at ${keyframe.time.toFixed(2)}s`" @pointerdown.stop.prevent="beginKeyframeDrag($event, trackDisplayLayer(track), [{ property: property.key, keyframe }])"><Diamond :size="10" fill="currentColor" /></button>
+                  <span v-if="trackDisplayLayer(track).transform[property.key].keyframes.length > 1" class="key-line" :style="{ left: `${toFraction(trackDisplayLayer(track).transform[property.key].keyframes[0]!.time) * 100}%`, width: `${((trackDisplayLayer(track).transform[property.key].keyframes.at(-1)!.time - trackDisplayLayer(track).transform[property.key].keyframes[0]!.time) / viewDuration) * 100}%` }" />
                   <span v-if="trackDisplayLayer(track).transform[property.key].animated && !trackDisplayLayer(track).transform[property.key].keyframes.length" class="no-keys">Animated · no keys</span>
                 </div>
               </div>
             </template>
-            <div v-if="index === timelineTracks.length - 1 && draggingClipId" class="new-track-zone audio" :class="{ active: newTrackDropCategory === 'audio', incompatible: layers.find((layer) => layer.id === draggingClipId)?.type !== 'audio' }" data-category="audio" @pointerup.stop="commitNewTrackDrop('audio')"><Plus :size="10" /><span>Drop into new audio layer</span></div>
+            <div v-if="index === timelineTracks.length - 1 && newTrackDropCategory === 'audio'" class="new-track-zone audio active" data-category="audio" @pointerup.stop="commitNewTrackDrop('audio')"><Plus :size="10" /><span>Drop into new audio layer</span></div>
           </template>
           <div class="drop-hint"><Plus :size="12" /> Drag media here to add a layer</div>
         </div>
+        <div v-if="layerMarqueeRect" class="layer-selection-marquee" :style="{ left: `${layerMarqueeRect.left}px`, top: `${layerMarqueeRect.top}px`, width: `${layerMarqueeRect.width}px`, height: `${layerMarqueeRect.height}px` }" />
         <div class="playhead" :class="{ muted: isCutMode }" :style="playheadStyle"><span title="Drag playhead" @pointerdown="beginSeek" /><i /></div>
         </div>
         <div v-if="clipDragGhost.visible" class="clip-drag-ghost" :class="{ valid: clipDragGhost.valid, invalid: clipDragGhost.invalid }" :style="{ left: `${clipDragGhost.x}px`, top: `${clipDragGhost.y}px`, width: `${clipDragGhost.width}px`, backgroundColor: clipDragGhost.color }"><Move :size="9" /><span>{{ clipDragGhost.label }}</span></div>
@@ -777,15 +1044,18 @@ onBeforeUnmount(() => {
 
 <style scoped>
 .timeline-panel { display: flex; height: 100%; min-height: 0; flex-direction: column; overflow: hidden; background: #101217; }.timeline-tabbar { display: flex; height: 29px; flex: 0 0 auto; align-items: flex-end; gap: 1px; padding: 0 5px; border-bottom: 1px solid var(--border-subtle); background: #13151b; }.timeline-tabbar > button { position: relative; height: 27px; padding: 0 10px; color: var(--text-muted); background: transparent; border: 0; font: inherit; font-size: 10px; cursor: pointer; }.timeline-tabbar > button:hover { color: var(--text-primary); }.timeline-tabbar > button.active { color: var(--text-primary); background: #191c23; }.timeline-tabbar > button.active::after { position: absolute; right: 5px; bottom: -1px; left: 5px; height: 2px; background: var(--accent); content: ''; }.tab-spacer { flex: 1; }.timeline-status { display: flex; height: 28px; align-items: center; gap: 5px; color: var(--text-muted); font-size: 8.5px; }.status-led { width: 5px; height: 5px; border-radius: 50%; background: var(--success); }
-.timeline-toolbar { display: flex; height: 34px; flex: 0 0 auto; align-items: center; gap: 2px; padding: 0 6px; border-bottom: 1px solid var(--border-subtle); }.divider { width: 1px; height: 20px; margin: 0 4px; background: var(--border-subtle); }.toolbar-spacer { flex: 1; }.toggle-control { display: flex; height: 25px; align-items: center; gap: 4px; padding: 0 6px; color: var(--text-muted); background: transparent; border: 1px solid transparent; border-radius: 4px; font: inherit; font-size: 9px; cursor: pointer; white-space: nowrap; }.toggle-control:hover { color: var(--text-primary); background: var(--bg-hover); }.toggle-control.active { color: #cdd5ff; background: var(--bg-selected); border-color: var(--accent-border); }.timecode-button { height: 24px; padding: 0 8px; color: var(--text-primary); background: #090b0f; border: 1px solid var(--border-strong); border-radius: 3px; font: inherit; font-size: 9.5px; font-variant-numeric: tabular-nums; }.zoom-slider { width: 72px; height: 2px; accent-color: var(--button-accent); }.zoom-value { width: 34px; color: var(--text-muted); font-size: 8px; text-align: right; }
+.timeline-toolbar { position: relative; z-index: 25; display: flex; height: 34px; flex: 0 0 auto; align-items: center; gap: 2px; padding: 0 6px; border-bottom: 1px solid var(--border-subtle); }.divider { width: 1px; height: 20px; margin: 0 4px; background: var(--border-subtle); }.toolbar-spacer { flex: 1; }.toggle-control { display: flex; height: 25px; align-items: center; gap: 4px; padding: 0 6px; color: var(--text-muted); background: transparent; border: 1px solid transparent; border-radius: 4px; font: inherit; font-size: 9px; cursor: pointer; white-space: nowrap; }.toggle-control:hover { color: var(--text-primary); background: var(--bg-hover); }.toggle-control.active { color: #cdd5ff; background: var(--bg-selected); border-color: var(--accent-border); }.timecode-button { height: 24px; padding: 0 8px; color: var(--text-primary); background: #090b0f; border: 1px solid var(--border-strong); border-radius: 3px; font: inherit; font-size: 9.5px; font-variant-numeric: tabular-nums; }.zoom-slider { width: 72px; height: 2px; accent-color: var(--button-accent); }.zoom-value { width: 34px; color: var(--text-muted); font-size: 8px; text-align: right; }
+.context-tabs { display: flex; height: 24px; flex: 0 0 auto; align-items: stretch; gap: 2px; padding: 0 6px; background: #0f1116; border-bottom: 1px solid var(--border-subtle); }.context-tabs > button { display: flex; align-items: center; gap: 4px; padding: 0 8px; color: var(--text-muted); background: transparent; border: 0; border-bottom: 2px solid transparent; font: inherit; font-size: 8.5px; cursor: pointer; white-space: nowrap; }.context-tabs > button:hover { color: var(--text-secondary); }.context-tabs > button.active { color: #dce1ff; border-bottom-color: var(--accent); }.context-tabs .cluster-tab { padding-right: 4px; }.close-tab { display: grid; width: 14px; height: 14px; place-items: center; color: inherit; border-radius: 2px; opacity: .55; }.close-tab:hover { background: rgb(255 255 255 / .1); opacity: 1; }.context-hint { display: flex; align-items: center; margin-left: auto; color: #5b6170; font-size: 7.5px; }
+.add-layer-control { position: relative; height: 25px; }.add-layer-trigger { color: #b8c1ee; background: rgb(140 155 255 / .06); border-color: rgb(140 155 255 / .2); }.add-layer-trigger:hover, .add-layer-trigger.active { color: #eef0ff; background: rgb(140 155 255 / .16); border-color: #6370ad; }.add-layer-menu { position: fixed; z-index: 400; width: 224px; overflow-y: auto; overscroll-behavior: contain; padding: 5px; background: #171920; border: 1px solid #3b3f4b; border-radius: 5px; box-shadow: 0 10px 26px rgb(0 0 0 / .48); }.add-layer-group { padding: 6px 7px 3px; color: #686f7e; font-size: 7px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }.add-layer-menu > button { display: grid; width: 100%; min-height: 34px; grid-template-columns: 22px 1fr; align-items: center; padding: 3px 6px; color: #9da5b7; background: transparent; border: 0; border-radius: 3px; font: inherit; text-align: left; cursor: pointer; }.add-layer-menu > button:hover, .add-layer-menu > button:focus-visible { color: #e8ebf6; background: var(--bg-hover); outline: 0; }.add-layer-menu > button svg { color: #8f9ee8; }.add-layer-menu > button span { display: flex; min-width: 0; flex-direction: column; gap: 1px; }.add-layer-menu > button strong { color: inherit; font-size: 9px; font-weight: 560; }.add-layer-menu > button small { color: #6f7685; font-size: 7.5px; }.selection-count { padding: 2px 5px; color: #cbd2ff; background: rgb(140 155 255 / .1); border: 1px solid rgb(165 180 252 / .25); border-radius: 3px; font-size: 7.5px; white-space: nowrap; }
 .duration-control { display: flex; height: 24px; align-items: center; gap: 4px; padding: 0 5px; color: var(--text-muted); background: #12141a; border: 1px solid var(--border-strong); border-radius: 3px; font-size: 8px; white-space: nowrap; }.duration-control input { width: 48px; padding: 0; color: #dce1ec; background: transparent; border: 0; outline: 0; font: inherit; font-size: 8.5px; font-variant-numeric: tabular-nums; text-align: right; }.duration-control small { color: #6f7580; font-size: 7.5px; }
 .timeline-toolbar .razor-tool.active { color: #ff8796; background: rgb(255 117 135 / .1); border-color: rgb(255 135 150 / .5); }
 .timeline-main { --track-header: 220px; position: relative; min-height: 0; flex: 1; overflow: auto; background: #101217; overscroll-behavior: contain; scrollbar-gutter: stable; }.timeline-main.panning { cursor: grabbing; user-select: none; }.timeline-main.scrubbing { cursor: col-resize; user-select: none; }.timeline-content { position: relative; min-height: 100%; background-image: linear-gradient(90deg, transparent calc(var(--track-header) - 1px), var(--border-strong) var(--track-header), transparent calc(var(--track-header) + 1px)); }.ruler-row { position: sticky; z-index: 12; top: 0; display: grid; width: 100%; height: 25px; grid-template-columns: var(--track-header) 1fr; border-bottom: 1px solid var(--border-subtle); }.track-column-heading { position: sticky; z-index: 14; left: 0; display: flex; align-items: center; gap: 6px; padding: 0 8px; color: var(--text-secondary); background: #15171d; border-right: 1px solid var(--border-strong); box-shadow: 2px 0 4px rgb(0 0 0 / .18); font-size: 9px; font-weight: 600; text-transform: uppercase; }.track-column-heading small { color: var(--text-muted); font-weight: 400; }.header-icons { display: flex; margin-left: auto; gap: 11px; color: var(--text-muted); }.time-ruler { position: relative; cursor: col-resize; background: #111319; }.time-ruler > span { position: absolute; bottom: 4px; color: #777c87; font-size: 7.5px; font-variant-numeric: tabular-nums; transform: translateX(-1px); }.time-ruler > span i { position: absolute; bottom: -4px; left: 0; width: 1px; height: 4px; background: #4b4f58; }.work-area { position: absolute; top: 1px; right: 1%; left: 1%; height: 3px; background: #676f9f; }.work-area i { position: absolute; top: -1px; width: 3px; height: 5px; background: #b1b8e4; }.work-area i:last-child { right: 0; }
 .timeline-main.razor-mode, .timeline-main.razor-mode * { cursor: none !important; }.timeline-main.razor-mode .timeline-clip > * { pointer-events: none; }.razor-ghost { --razor-color: #8993a5; position: absolute; z-index: 30; width: 1px; color: var(--razor-color); pointer-events: none; filter: drop-shadow(0 1px 2px #050609); }.razor-ghost.valid { --razor-color: #ff8796; }.razor-cursor-head { position: absolute; z-index: 2; top: 0; left: -7px; display: grid; width: 14px; height: 12px; place-items: center; color: #15171d; background: var(--razor-color); clip-path: polygon(0 0, 100% 0, 100% 62%, 50% 100%, 0 62%); }.razor-cursor-head svg { margin-top: -2px; }.razor-ghost small { position: absolute; z-index: 2; top: calc(var(--level-y) + 7px); left: 8px; padding: 2px 4px; color: #cbd0dc; background: rgb(12 14 19 / .92); border: 1px solid #353a45; border-radius: 3px; font-size: 7.5px; font-variant-numeric: tabular-nums; white-space: nowrap; }.razor-guide { position: absolute; inset: 0; width: 1px; background: var(--razor-color); box-shadow: 0 0 4px var(--razor-color); opacity: .45; }.razor-horizontal { position: absolute; top: var(--level-y); left: -200vw; width: 400vw; height: 1px; background: var(--razor-color); box-shadow: 0 0 3px var(--razor-color); opacity: .28; }.razor-crosshair { position: absolute; top: calc(var(--level-y) - 4px); left: -4px; width: 9px; height: 9px; background: #11141a; border: 1px solid var(--razor-color); box-shadow: 0 0 0 2px rgb(10 12 16 / .65); transform: rotate(45deg); }.razor-ghost.over-track .razor-horizontal { opacity: .72; }.razor-ghost.valid .razor-guide, .razor-ghost.valid .razor-horizontal { opacity: 1; }
-.tracks-scroll { min-height: calc(100% - 25px); overflow: visible; }.track-row, .property-track { display: grid; width: 100%; grid-template-columns: var(--track-header) 1fr; }.track-row { height: 31px; border-bottom: 1px solid #20232a; }.track-row.selected { background: rgb(52 60 91 / .22); }.track-header { position: sticky; z-index: 7; left: 0; display: flex; min-width: 0; align-items: center; gap: 5px; padding: 0 4px; background: #14161b; border-right: 1px solid var(--border-strong); box-shadow: 2px 0 4px rgb(0 0 0 / .14); }.track-row.selected .track-header { background: var(--bg-selected); box-shadow: inset 2px 0 var(--accent), 2px 0 4px rgb(0 0 0 / .14); }.track-header button { display: grid; width: 17px; height: 20px; flex: 0 0 auto; place-items: center; padding: 0; color: var(--text-muted); background: transparent; border: 0; border-radius: 2px; cursor: pointer; }.track-header button:hover { color: var(--text-primary); background: var(--bg-hover); }.track-header button.active { color: var(--keyframe); }.track-header button.off { opacity: .3; }.track-header .expand { width: 13px; }.track-index { width: 18px; color: #626773; font-size: 7.5px; }.track-header strong { min-width: 0; flex: 1; overflow: hidden; color: var(--text-secondary); font-size: 9px; font-weight: 520; text-overflow: ellipsis; white-space: nowrap; }.track-lane { position: relative; overflow: hidden; background-image: linear-gradient(90deg, rgb(255 255 255 / .022) 1px, transparent 1px); background-size: 10% 100%; cursor: col-resize; }
+.tracks-scroll { min-height: calc(100% - 25px); overflow: visible; }.track-row, .property-track { display: grid; width: 100%; grid-template-columns: var(--track-header) 1fr; }.track-row { height: 31px; border-bottom: 1px solid #20232a; }.track-row.selected { background: rgb(52 60 91 / .22); }.track-header { position: sticky; z-index: 7; left: 0; display: flex; min-width: 0; align-items: center; gap: 5px; padding: 0 4px; background: #14161b; border-right: 1px solid var(--border-strong); box-shadow: 2px 0 4px rgb(0 0 0 / .14); }.track-row.selected .track-header { background: var(--bg-selected); box-shadow: inset 2px 0 var(--accent), 2px 0 4px rgb(0 0 0 / .14); }.track-header button { display: grid; width: 17px; height: 20px; flex: 0 0 auto; place-items: center; padding: 0; color: var(--text-muted); background: transparent; border: 0; border-radius: 2px; cursor: pointer; }.track-header button:hover { color: var(--text-primary); background: var(--bg-hover); }.track-header button.active { color: var(--keyframe); }.track-header button.off { opacity: .3; }.track-header .expand { width: 13px; }.track-index { width: 18px; color: #626773; font-size: 7.5px; }.track-header strong { min-width: 0; flex: 1; overflow: hidden; color: var(--text-secondary); font-size: 9px; font-weight: 520; text-overflow: ellipsis; white-space: nowrap; }.track-lane { position: relative; overflow: hidden; background-image: linear-gradient(90deg, rgb(255 255 255 / .022) 1px, transparent 1px); background-size: 10% 100%; cursor: default; }
 .timeline-clip { position: absolute; top: 3px; height: 25px; min-width: 10px; overflow: hidden; color: #f1f3fa; text-align: left; border: 1px solid rgb(221 226 245 / .16); border-radius: 3px; box-shadow: inset 0 0 0 1px rgb(0 0 0 / .12); cursor: grab; }.timeline-clip:hover { border-color: rgb(226 230 255 / .5); }.track-row.selected .timeline-clip { outline: 1px solid #a5b4fc; outline-offset: 0; }.clip-grip { position: absolute; z-index: 5; top: 0; bottom: 0; width: 4px; background: rgb(245 247 255 / .18); opacity: 0; cursor: ew-resize; }.timeline-clip:hover .clip-grip { opacity: 1; }.clip-grip.left { left: 0; }.clip-grip.right { right: 0; }.clip-label { position: relative; z-index: 2; display: flex; height: 100%; align-items: center; gap: 4px; padding: 0 6px 6px; overflow: hidden; font-size: 8.5px; font-weight: 560; text-shadow: 0 1px 2px rgb(0 0 0 / .6); text-overflow: ellipsis; white-space: nowrap; }.filmstrip { position: absolute; inset: 0; display: flex; opacity: .32; }.filmstrip i { width: 44px; flex: 0 0 44px; background-position: center; background-size: cover; border-right: 1px solid rgb(0 0 0 / .4); }.waveform { position: absolute; inset: 0 4px; display: flex; align-items: center; gap: 1px; opacity: .48; }.waveform i { width: 2px; flex: 0 0 2px; background: #c2e9dc; }.fx-badge { position: absolute; z-index: 4; right: 4px; top: 3px; color: #f0e2c9; font-size: 7px; font-style: italic; }.clip-keyframes { position: absolute; z-index: 6; right: 5px; bottom: 2px; left: 5px; height: 7px; pointer-events: none; }.clip-keyframes i { position: absolute; bottom: 0; width: 7px; height: 7px; background: var(--keyframe); border: 1px solid rgb(46 36 24 / .75); box-shadow: 0 0 0 1px rgb(255 220 159 / .2); transform: translateX(-50%) rotate(45deg); pointer-events: auto; cursor: ew-resize; }.clip-keyframes i:hover { background: #ffd18b; box-shadow: 0 0 0 2px rgb(255 209 139 / .3); }.clip-keyframes i.selected { background: #fff0cf; border-color: #fff; box-shadow: 0 0 0 2px rgb(255 209 139 / .48); }.clip-keyframes i.stacked { width: 8px; height: 8px; background: #f0bd70; box-shadow: 0 0 0 1px #624c2d, 2px -2px 0 rgb(240 189 112 / .55); }.timeline-clip.text { background-image: linear-gradient(90deg, rgb(255 255 255 / .05) 50%, transparent 50%); background-size: 8px 8px; }
 .property-track { height: 24px; border-bottom: 1px solid #1d2026; }.property-track.animated { background: rgb(225 173 100 / .025); }.property-track-header { position: sticky; z-index: 7; left: 0; display: grid; grid-template-columns: 36px 15px 1fr auto; align-items: center; padding-right: 8px; color: var(--text-muted); background: #111318; border-right: 1px solid var(--border-strong); box-shadow: 2px 0 4px rgb(0 0 0 / .14); }.property-track.animated .property-track-header { color: #ba9766; }.property-track-header strong { font-size: 8.5px; font-weight: 450; }.property-track.animated .property-track-header strong { color: var(--text-secondary); }.property-track-header small { display: flex; align-items: center; gap: 6px; font-size: 7.5px; }.property-track-header small b { color: var(--keyframe); font-size: 7px; font-weight: 550; white-space: nowrap; }.property-track-header svg { color: #625943; }.property-track.animated .property-track-header svg { color: var(--keyframe); }.property-key-lane { position: relative; background: #0f1116; cursor: col-resize; }.property-key-lane button { position: absolute; z-index: 2; top: 5px; display: grid; width: 14px; height: 14px; place-items: center; padding: 0; color: var(--keyframe); background: rgb(28 23 18 / .72); border: 0; border-radius: 2px; filter: drop-shadow(0 0 2px rgb(225 173 100 / .38)); transform: translateX(-50%); cursor: ew-resize; }.property-key-lane button:hover { color: #ffd18b; background: #30271c; }.property-key-lane button.selected { color: #fff0cf; background: #59462b; outline: 1px solid #f0bd70; }.key-line { position: absolute; top: 12px; height: 1px; background: #9a7748; }.no-keys { position: absolute; top: 7px; left: 6px; color: #6f6251; font-size: 7.5px; }.drop-hint { display: flex; width: calc(100% - var(--track-header)); height: 31px; align-items: center; justify-content: center; gap: 5px; margin-left: var(--track-header); color: #555a65; border-bottom: 1px solid #1f2229; font-size: 8.5px; }
 .playhead { position: absolute; z-index: 13; top: 2px; bottom: 0; width: 1px; background: #e4b767; pointer-events: none; transition: background-color 120ms ease, opacity 120ms ease; }.playhead span { position: absolute; top: -2px; left: -6px; width: 13px; height: 11px; background: #e4b767; clip-path: polygon(0 0, 100% 0, 100% 60%, 50% 100%, 0 60%); pointer-events: auto; cursor: col-resize; transition: background-color 120ms ease; }.playhead i { position: absolute; top: 0; bottom: 0; left: -2px; width: 5px; background: rgb(228 183 103 / .06); }.playhead.muted { background: #686d77; opacity: .48; }.playhead.muted span { background: #858a94; }.playhead.muted i { background: rgb(133 138 148 / .05); }
+.layer-selection-marquee { position: absolute; z-index: 22; background: rgb(140 155 255 / .1); border: 1px solid #a5b4fc; box-shadow: 0 0 0 1px rgb(29 34 55 / .45); pointer-events: none; }
 .clip-keyframes i, .property-key-lane button { touch-action: none; user-select: none; }.clip-keyframes i.at-playhead { background: #fff7e8; border-color: #fff; box-shadow: 0 0 0 2px rgb(228 183 103 / .62); }.property-key-lane button.at-playhead { color: #fff7e8; background: #654d2d; outline: 1px solid #f4c778; }
 .curve-editor { position: relative; flex: 1; overflow: hidden; background: #0e1015; }.curve-grid { position: absolute; inset: 0 0 27px 0; background-image: linear-gradient(rgb(255 255 255 / .045) 1px, transparent 1px), linear-gradient(90deg, rgb(255 255 255 / .045) 1px, transparent 1px); background-size: 12.5% 20%; }.curve-grid > span, .curve-grid > i { position: absolute; background: #282c35; }.curve { position: absolute; height: 2px; border-radius: 50%; transform-origin: left; }.curve-a { top: 64%; left: 8%; width: 42%; background: #9caaff; transform: rotate(-17deg); box-shadow: 90px -24px 0 #9caaff; }.curve-b { top: 32%; left: 50%; width: 38%; background: #d5a66b; transform: rotate(12deg); }.curve-key { position: absolute; display: grid; padding: 0; color: var(--keyframe); background: transparent; border: 0; }.k1 { top: 62%; left: 8%; }.k2 { top: 27%; left: 50%; }.k3 { top: 44%; left: 88%; }.curve-toolbar { position: absolute; right: 0; bottom: 0; left: 0; display: flex; height: 27px; align-items: center; gap: 4px; padding: 0 7px; color: var(--text-muted); background: #15171d; border-top: 1px solid var(--border-subtle); font-size: 8.5px; }.curve-toolbar span { margin-right: auto; color: var(--text-secondary); }.curve-toolbar button { height: 20px; color: var(--text-secondary); background: var(--bg-input); border: 1px solid var(--border-strong); border-radius: 3px; font: inherit; font-size: 8px; }
 .panel-placeholder { display: flex; flex: 1; align-items: center; justify-content: center; flex-direction: column; gap: 7px; color: var(--text-muted); }.panel-placeholder svg { color: var(--accent); }.panel-placeholder strong { color: var(--text-primary); font-size: 11px; }.panel-placeholder span { font-size: 9px; }

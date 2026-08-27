@@ -41,8 +41,9 @@ function colorFilterFor(effects: GraphEffects) {
  */
 function vignetteOverlay(effects: GraphEffects, width: number, height: number) {
   if (effects.vignetteAmount <= 0) return null
-  const radius = Math.hypot(width, height) / 2
-  const inner = Math.max(.05, Math.min(.95, effects.vignetteSoftness / 100))
+  // Softness describes the width of the feather: 100% starts the fade near the centre, while 0%
+  // keeps the image untouched until the edge. The overlay lives in frame space, never layer space.
+  const inner = Math.max(.02, Math.min(.98, 1 - effects.vignetteSoftness / 100))
   const gradient = new FillGradient({
     type: 'radial',
     center: { x: .5, y: .5 },
@@ -57,7 +58,7 @@ function vignetteOverlay(effects: GraphEffects, width: number, height: number) {
     textureSpace: 'local',
   })
   const overlay = new Graphics()
-  overlay.rect(-radius, -radius, radius * 2, radius * 2).fill(gradient)
+  overlay.rect(0, 0, width, height).fill(gradient)
   overlay.blendMode = 'multiply'
   overlay.alpha = Math.max(0, Math.min(1, effects.vignetteAmount / 100))
   return overlay
@@ -222,11 +223,13 @@ export class HybridWebGLRenderBackend implements RenderBackend {
     const colorMatrix = colorFilterFor(effects)
     if (colorMatrix) filters.push(colorMatrix)
     if (filters.length) container.filters = filters
+    const stage = new Container()
+    stage.addChild(container)
     const vignette = vignetteOverlay(effects, width, height)
-    if (vignette) container.addChild(vignette)
+    if (vignette) stage.addChild(vignette)
     this.pixiRenderer.resetState()
-    this.pixiRenderer.render({ container, clear: false })
-    container.destroy({ children: true })
+    this.pixiRenderer.render({ container: stage, clear: false })
+    stage.destroy({ children: true })
     this.threeRenderer.resetState()
   }
 
@@ -315,7 +318,8 @@ export class HybridWebGLRenderBackend implements RenderBackend {
     const cameraId = cameraIdAtTime(sceneDefinition, time)
     const camera = cameraId ? runtime.cameras.get(cameraId) : undefined
     if (!camera) return
-    // A 3D pass draws straight to the frame buffer, so only opacity carries over from the graph.
+    // A 3D pass draws straight to the frame buffer. Opacity is applied to its materials, while
+    // frame-space effects such as vignette are composited immediately after the Three pass.
     const layerOpacity = (evaluateNumericProperty(layer.transform.opacity, time) / 100) * effects.opacity
     runtime.root.traverse((object) => {
       if (!(object instanceof THREE.Mesh)) return
@@ -331,6 +335,12 @@ export class HybridWebGLRenderBackend implements RenderBackend {
     this.threeRenderer.clearDepth()
     this.threeRenderer.render(runtime.scene, camera)
     this.pixiRenderer?.resetState()
+    const vignette = vignetteOverlay(effects, width, height)
+    if (vignette && this.pixiRenderer) {
+      this.pixiRenderer.render({ container: vignette, clear: false })
+      vignette.destroy()
+      this.threeRenderer.resetState()
+    }
   }
 
   private surface(width: number, height: number): RenderSurface {

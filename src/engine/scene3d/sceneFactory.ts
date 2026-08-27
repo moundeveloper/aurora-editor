@@ -139,6 +139,49 @@ export function createDemo3DScene(): Aurora3DScene {
   }
 }
 
+export function createEmpty3DScene(name = '3D Scene'): Aurora3DScene {
+  const sceneId = crypto.randomUUID()
+  const cameraId = crypto.randomUUID()
+  const lightId = crypto.randomUUID()
+  const camera: AuroraCamera = {
+    id: cameraId,
+    name: 'Camera 1',
+    projection: 'perspective',
+    transform: makeTransform3D(cameraId, [0, 2.4, 7]),
+    fov: numericProperty(`${cameraId}-fov`, 42),
+    near: .1,
+    far: 1000,
+  }
+  camera.transform.rotation.x.value = -18.924644416051237
+
+  return {
+    id: sceneId,
+    name,
+    objects: [],
+    cameras: [camera],
+    cameraCuts: [{ id: crypto.randomUUID(), cameraId, time: 0 }],
+    lights: [{
+      id: lightId,
+      name: 'Ambient Fill',
+      type: 'ambient',
+      color: '#b8c1ff',
+      intensity: numericProperty(`${lightId}-intensity`, .7),
+      transform: makeTransform3D(lightId),
+      castShadow: false,
+    }],
+    paths: [],
+    activeCameraId: cameraId,
+    environmentIntensity: 1,
+    settings: {
+      shadows: true,
+      shadowMapSize: 1024,
+      quality: 'preview',
+      backgroundColor: null,
+    },
+    revision: 1,
+  }
+}
+
 export function create3DPath(index: number): Aurora3DPath {
   const id = crypto.randomUUID()
   return {

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { storeToRefs } from 'pinia'
-import { Box, Camera, Diamond, KeyRound, Magnet, Pause, Play, Plus, SkipBack, SkipForward, Spline, Sun, Trash2, ZoomIn, ZoomOut } from '@lucide/vue'
+import { Box, Camera, Diamond, KeyRound, Magnet, Pause, Play, Scissors, SkipBack, SkipForward, Spline, Sun, Trash2, ZoomIn, ZoomOut } from '@lucide/vue'
 import { useEditorStore } from '@/stores/editor'
 import { evaluateNumericProperty } from '@/engine/animation/evaluateProperty'
 import { influenceParameters } from '@/engine/scene3d/influences'
@@ -9,6 +9,7 @@ import { cameraIdAtTime, sortedCameraCuts } from '@/engine/scene3d/cameraCuts'
 import type { AnimatableProperty, Keyframe } from '@/models/editor'
 import IconButton from './common/IconButton.vue'
 import MSelect, { type MSelectOption } from './common/MSelect.vue'
+import CurveEditor from './CurveEditor.vue'
 
 const LABEL_WIDTH = 220
 const store = useEditorStore()
@@ -19,6 +20,7 @@ const rulerLane = ref<HTMLElement>()
 const viewportWidth = ref(900)
 const selectedChannelId = ref<string | null>(null)
 const selectedCameraCutId = ref<string | null>(null)
+const activeBottomTab = ref<'Timeline' | 'Graph Editor'>('Timeline')
 const isScrubbing = ref(false)
 const isPanning = ref(false)
 let resizeObserver: ResizeObserver | null = null
@@ -362,6 +364,11 @@ watch(selectedSceneEntityId, () => {
   selectedKeyframeId.value = null
 })
 watch(() => selectedScene.value?.id, () => { selectedCameraCutId.value = null })
+watch(activeBottomTab, async (tab) => {
+  if (tab !== 'Timeline') return
+  await nextTick()
+  if (viewport.value?.clientWidth) viewportWidth.value = viewport.value.clientWidth
+})
 watch(selectedKeyframeId, (keyframeId) => {
   if (!keyframeId) return
   const row = channels.value.find((channel) => channel.property.keyframes.some((keyframe) => keyframe.id === keyframeId))
@@ -371,12 +378,19 @@ watch(selectedKeyframeId, (keyframeId) => {
 
 <template>
   <section class="three-timeline">
+    <nav class="three-timeline-tabbar" aria-label="3D timeline views">
+      <button type="button" :class="{ active: activeBottomTab === 'Timeline' }" @click="activeBottomTab = 'Timeline'">Timeline</button>
+      <button type="button" :class="{ active: activeBottomTab === 'Graph Editor' }" @click="activeBottomTab = 'Graph Editor'">Graph Editor</button>
+      <span />
+      <small>{{ entity?.name ?? 'No 3D entity selected' }}</small>
+    </nav>
+    <div v-show="activeBottomTab === 'Timeline'" class="timeline-view">
     <header class="timeline-toolbar">
       <span class="panel-title"><component :is="entityIcon" :size="12" /><strong>3D Timeline</strong><small v-if="entity" :title="entity.name">{{ entity.name }}</small></span>
       <span class="divider" />
       <button class="auto-key" type="button" :class="{ active: autoKey }" @click="autoKey = !autoKey"><span /> Auto Key</button>
       <button type="button" class="key-all" :disabled="!entity" title="Key all transform channels at the playhead" @click="store.keySelected3DTransform()"><KeyRound :size="11" /> Key transforms</button>
-      <button type="button" class="camera-cut-add" :disabled="!selectedScene?.cameras.length" title="Add a camera cut at the playhead" @click="addCameraCutAtPlayhead"><Camera :size="11" /> Add camera cut</button>
+      <button type="button" class="camera-cut-add" :disabled="!selectedScene?.cameras.length" title="Add a camera cut at the playhead" @click="addCameraCutAtPlayhead"><Scissors :size="11" /> Add camera cut</button>
       <MSelect v-if="selectedCameraCut" v-model="selectedCutCamera" class="cut-camera-select" :options="cameraOptions" label="Camera for selected cut" />
       <button type="button" class="delete-key" :disabled="!selectedKeyframeId && !canDeleteSelectedCameraCut" :title="selectedCameraCutId ? (canDeleteSelectedCameraCut ? 'Delete selected camera cut' : 'The first camera cut is fixed at 0') : 'Delete selected keyframe'" @click="deleteSelectedKeyframe"><Trash2 :size="11" /></button>
       <span class="toolbar-spacer" />
@@ -405,7 +419,7 @@ watch(selectedKeyframeId, (keyframeId) => {
             <Camera :size="10" />
             <span>Camera Cuts</span>
             <small>{{ cameraCutSegments.length }}</small>
-            <button type="button" :disabled="!selectedScene?.cameras.length" title="Add camera cut at playhead" @click="addCameraCutAtPlayhead"><Plus :size="10" /></button>
+            <button type="button" :disabled="!selectedScene?.cameras.length" title="Add camera cut at playhead" @click="addCameraCutAtPlayhead"><Scissors :size="10" /></button>
           </div>
           <div class="camera-cut-lane" @pointerdown="beginScrub">
             <button
@@ -459,11 +473,15 @@ watch(selectedKeyframeId, (keyframeId) => {
         <div class="playhead" :style="playheadStyle"><span /><i /></div>
       </div>
     </div>
+    </div>
+    <CurveEditor v-show="activeBottomTab === 'Graph Editor'" mode="3d" />
   </section>
 </template>
 
 <style scoped>
 .three-timeline { display: flex; height: 100%; min-height: 0; flex-direction: column; overflow: hidden; background: #101217; }.timeline-toolbar { display: flex; height: 31px; flex: 0 0 auto; align-items: center; gap: 3px; padding: 0 6px; color: var(--text-muted); background: #17191f; border-bottom: 1px solid var(--border-subtle); }.panel-title { display: flex; min-width: 170px; max-width: 280px; align-items: center; gap: 5px; color: var(--text-secondary); }.panel-title strong { font-size: 9px; white-space: nowrap; }.panel-title small { overflow: hidden; color: var(--text-muted); font-size: 8px; text-overflow: ellipsis; white-space: nowrap; }.divider { width: 1px; height: 18px; margin: 0 3px; background: var(--border-subtle); }.toolbar-spacer { flex: 1; }.timeline-toolbar button:not(.icon-button) { display: inline-flex; height: 22px; align-items: center; justify-content: center; gap: 4px; padding: 0 6px; color: var(--text-muted); background: transparent; border: 1px solid transparent; border-radius: 3px; font: inherit; font-size: 8px; cursor: pointer; white-space: nowrap; }.timeline-toolbar button:not(.icon-button):hover:not(:disabled) { color: var(--text-primary); background: var(--bg-hover); }.timeline-toolbar button.active { color: #dce2ff; background: var(--bg-selected); border-color: var(--accent-border); }.timeline-toolbar button:disabled { opacity: .4; cursor: default; }.auto-key > span { width: 6px; height: 6px; background: #50545e; border-radius: 50%; }.auto-key.active > span { background: #df7886; box-shadow: 0 0 0 2px rgb(223 120 134 / .16); }.key-all { color: #bcc6ff !important; }.delete-key { width: 23px; padding: 0 !important; }.timecode { min-width: 75px; color: #c9cedc; font-size: 8px; font-variant-numeric: tabular-nums; text-align: center; }.zoom-value { width: 30px; font-size: 7.5px; text-align: center; }.zoom-slider { width: 72px; height: 2px; accent-color: var(--button-accent); }
+.timeline-view { display: flex; min-height: 0; flex: 1; flex-direction: column; }
+.three-timeline-tabbar { display: flex; height: 28px; flex: 0 0 auto; align-items: flex-end; gap: 1px; padding: 0 5px; background: #13151b; border-bottom: 1px solid var(--border-subtle); }.three-timeline-tabbar > button { position: relative; height: 26px; padding: 0 10px; color: var(--text-muted); background: transparent; border: 0; font: inherit; font-size: 9px; cursor: pointer; }.three-timeline-tabbar > button:hover { color: var(--text-primary); }.three-timeline-tabbar > button.active { color: var(--text-primary); background: #191c23; }.three-timeline-tabbar > button.active::after { position: absolute; right: 5px; bottom: -1px; left: 5px; height: 2px; background: var(--accent); content: ''; }.three-timeline-tabbar > span { flex: 1; }.three-timeline-tabbar > small { align-self: center; max-width: 220px; overflow: hidden; color: var(--text-muted); font-size: 7.5px; text-overflow: ellipsis; white-space: nowrap; }
 .timeline-scroll { min-height: 0; flex: 1; overflow: auto; background: #0d0f14; }.timeline-scroll.panning { cursor: grabbing; user-select: none; }.timeline-content { position: relative; min-height: 100%; }.ruler-row, .channel-row { display: grid; grid-template-columns: 220px 1fr; }.ruler-row { position: sticky; z-index: 7; top: 0; height: 25px; background: #15171d; border-bottom: 1px solid var(--border-strong); }.ruler-label, .channel-label { position: sticky; z-index: 5; left: 0; display: flex; min-width: 0; align-items: center; background: #17191f; border-right: 1px solid var(--border-strong); }.ruler-label { justify-content: space-between; padding: 0 9px 0 28px; color: #707684; font-size: 6.5px; font-weight: 650; letter-spacing: .08em; }.ruler-lane { position: relative; overflow: hidden; cursor: ew-resize; background: #12141a; }.tick { position: absolute; top: 3px; color: #777d8a; font-size: 6.5px; font-variant-numeric: tabular-nums; transform: translateX(-1px); pointer-events: none; }.tick i { display: block; width: 1px; height: 8px; margin-bottom: 1px; background: #454a56; }.channel-row { height: 23px; border-bottom: 1px solid #20232a; }.channel-row.group-start:not(:first-child) { border-top: 1px solid #383d49; }.channel-row.animated .channel-label { background: #191c26; }.channel-label { gap: 5px; padding: 0 7px; }.channel-label > button { display: grid; width: 17px; height: 17px; flex: 0 0 auto; place-items: center; padding: 0; color: #555b68; background: transparent; border: 0; border-radius: 2px; cursor: pointer; }.channel-label > button:hover { color: #cbd3ff; background: var(--bg-hover); }.channel-label > button.animated { color: #8796dc; }.channel-label > button.keyed { color: #e1e6ff; background: var(--bg-selected); }.channel-label > i { width: 5px; height: 5px; flex: 0 0 auto; border-radius: 50%; }.channel-label > span { overflow: hidden; flex: 1; color: var(--text-secondary); font-size: 8px; text-overflow: ellipsis; white-space: nowrap; }.channel-label > strong { color: #9298a7; font-size: 7.5px; font-weight: 500; font-variant-numeric: tabular-nums; }.channel-lane { position: relative; overflow: hidden; cursor: ew-resize; background-color: #0f1116; background-image: linear-gradient(90deg, #20232a 1px, transparent 1px); background-size: calc(100% / 10) 100%; }.channel-row:nth-child(even) .channel-lane { background-color: #111319; }.keyframe { position: absolute; z-index: 4; top: 50%; display: grid; width: 16px; height: 16px; place-items: center; padding: 0; color: #9aa8ff; background: transparent; border: 0; transform: translate(-50%, -50%); cursor: ew-resize; }.keyframe:hover { color: #d7ddff; }.keyframe.selected { color: #f0d39b; filter: drop-shadow(0 0 3px rgb(226 187 113 / .45)); }.playhead { position: absolute; z-index: 6; top: 0; bottom: 0; width: 1px; background: #e3ae72; pointer-events: none; }.playhead span { position: absolute; top: 0; left: -4px; width: 9px; height: 7px; background: #e3ae72; clip-path: polygon(0 0, 100% 0, 50% 100%); }.playhead i { position: absolute; top: 7px; bottom: 0; width: 1px; background: rgb(227 174 114 / .7); }.empty-timeline { position: absolute; inset: 25px 0 0 220px; display: flex; align-items: center; justify-content: center; flex-direction: column; gap: 4px; color: var(--text-muted); }.empty-timeline strong { color: var(--text-secondary); font-size: 9px; }.empty-timeline span { font-size: 7.5px; }
 .panel-title { min-width: 145px; max-width: 220px; }
 .camera-cut-add { color: #bcc6ff !important; }

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { storeToRefs } from 'pinia'
-import { ImageOff, View } from '@lucide/vue'
+import { ImageOff, Radio, View } from '@lucide/vue'
 import * as THREE from 'three'
 import { useEditorStore } from '@/stores/editor'
 import { ThreeSceneRuntimeRegistry } from '@/engine/scene3d/ThreeSceneRuntime'
@@ -13,7 +13,8 @@ const { selectedScene, currentTime } = storeToRefs(store)
 const viewport = ref<HTMLElement>()
 const canvas = ref<HTMLCanvasElement>()
 const renderError = ref(false)
-const cameraChoice = ref('program')
+const cameraChoice = ref('')
+const followCuts = ref(true)
 const runtimeRegistry = new ThreeSceneRuntimeRegistry()
 let renderer: THREE.WebGLRenderer | null = null
 let resizeObserver: ResizeObserver | null = null
@@ -21,19 +22,26 @@ let resizeObserver: ResizeObserver | null = null
 const previewCamera = computed(() => {
   const scene = selectedScene.value
   if (!scene) return null
-  const cameraId = cameraChoice.value === 'program' ? cameraIdAtTime(scene, currentTime.value) : cameraChoice.value
-  return scene.cameras.find((camera) => camera.id === cameraId)
+  return scene.cameras.find((camera) => camera.id === cameraChoice.value)
     ?? scene.cameras[0]
     ?? null
 })
-const cameraOptions = computed<MSelectOption[]>(() => {
+const cameraOptions = computed<MSelectOption[]>(() => selectedScene.value?.cameras.map((camera) => ({ value: camera.id, label: camera.name })) ?? [])
+
+function syncProgramCamera() {
   const scene = selectedScene.value
-  const programmed = scene?.cameras.find((camera) => camera.id === cameraIdAtTime(scene, currentTime.value))
-  return [
-    { value: 'program', label: `Program · ${programmed?.name ?? 'No camera'}` },
-    ...(scene?.cameras.map((camera) => ({ value: camera.id, label: camera.name })) ?? []),
-  ]
-})
+  if (scene && followCuts.value) cameraChoice.value = cameraIdAtTime(scene, currentTime.value) ?? scene.cameras[0]?.id ?? ''
+}
+
+function selectPreviewCamera(cameraId: string) {
+  cameraChoice.value = cameraId
+  followCuts.value = false
+}
+
+function toggleFollowCuts() {
+  followCuts.value = !followCuts.value
+  syncProgramCamera()
+}
 
 function renderPreview() {
   const sceneDefinition = selectedScene.value
@@ -80,9 +88,16 @@ onBeforeUnmount(() => {
   renderer = null
 })
 
-watch([selectedScene, currentTime, cameraChoice], renderPreview, { deep: true })
+watch([selectedScene, currentTime], () => {
+  syncProgramCamera()
+  renderPreview()
+}, { deep: true, immediate: true })
+watch(cameraChoice, renderPreview)
 watch(() => selectedScene.value?.cameras.map((camera) => camera.id), (cameraIds) => {
-  if (cameraChoice.value !== 'program' && !cameraIds?.includes(cameraChoice.value)) cameraChoice.value = 'program'
+  if (!cameraIds?.includes(cameraChoice.value)) {
+    followCuts.value = true
+    syncProgramCamera()
+  }
 }, { deep: true })
 </script>
 
@@ -91,9 +106,10 @@ watch(() => selectedScene.value?.cameras.map((camera) => camera.id), (cameraIds)
     <header class="preview-header">
       <span class="preview-title"><View :size="11" /> 3D Viewport</span>
       <span class="preview-divider" />
-      <MSelect v-model="cameraChoice" class="camera-select" :options="cameraOptions" label="Preview camera" />
+      <MSelect :model-value="cameraChoice" class="camera-select" :options="cameraOptions" label="Preview camera" @update:model-value="selectPreviewCamera" />
+      <button type="button" class="follow-cuts" :class="{ active: followCuts }" :title="followCuts ? 'Following camera cuts' : 'Follow camera cuts'" @click="toggleFollowCuts"><Radio :size="10" /></button>
       <span class="preview-spacer" />
-      <span v-if="previewCamera" class="live-status"><i /> Live</span>
+      <span v-if="previewCamera" class="live-status" :class="{ preview: !followCuts }"><i /> {{ followCuts ? 'Cuts' : 'Preview' }}</span>
     </header>
 
     <div ref="viewport" class="preview-viewport">
@@ -107,7 +123,7 @@ watch(() => selectedScene.value?.cameras.map((camera) => camera.id), (cameraIds)
 .three-preview-panel { display: flex; min-height: 0; flex-direction: column; overflow: hidden; background: #090b10; }
 .preview-header { display: flex; height: 30px; min-width: 0; flex: 0 0 auto; align-items: center; gap: 7px; padding: 0 8px; color: var(--text-secondary); background: var(--bg-panel-alt); border-bottom: 1px solid var(--border-subtle); }
 .preview-title { display: flex; flex: 0 0 auto; align-items: center; gap: 5px; color: #dce2ff; font-size: 8.5px; font-weight: 620; letter-spacing: .035em; text-transform: uppercase; }.preview-title svg { color: var(--accent); }.preview-divider { width: 1px; height: 16px; flex: 0 0 auto; background: var(--border-subtle); }
-.camera-select { min-width: 88px; flex: 1; }.preview-spacer { flex: 0 0 0; }.live-status { display: flex; flex: 0 0 auto; align-items: center; gap: 4px; color: var(--success); font-size: 7px; letter-spacing: .05em; text-transform: uppercase; }.live-status i { width: 5px; height: 5px; border-radius: 50%; background: var(--success); }
+.camera-select { min-width: 88px; flex: 1; }.follow-cuts { display: grid; width: 22px; height: 22px; flex: 0 0 auto; place-items: center; padding: 0; color: var(--text-muted); background: transparent; border: 1px solid transparent; border-radius: 3px; cursor: pointer; }.follow-cuts:hover { color: var(--text-primary); background: var(--bg-hover); }.follow-cuts.active { color: #cdd5ff; background: var(--bg-selected); border-color: var(--accent-border); }.preview-spacer { flex: 0 0 0; }.live-status { display: flex; flex: 0 0 auto; align-items: center; gap: 4px; color: var(--success); font-size: 7px; letter-spacing: .05em; text-transform: uppercase; }.live-status.preview { color: #aeb8e8; }.live-status i { width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
 .preview-viewport { position: relative; display: flex; min-height: 0; flex: 1; align-items: center; justify-content: center; overflow: hidden; background: #080a0e; }.preview-viewport canvas { display: block; width: calc(100% - 28px); max-width: 960px; height: auto; max-height: calc(100% - 20px); aspect-ratio: 16 / 9; background: #090b10; box-shadow: 0 8px 28px rgb(0 0 0 / .48), 0 0 0 1px #30333d; }
 .preview-message { position: absolute; display: flex; align-items: center; gap: 6px; padding: 6px 9px; color: var(--text-muted); background: rgb(12 14 19 / .82); border: 1px solid var(--border-subtle); border-radius: 3px; font-size: 8px; }
 </style>

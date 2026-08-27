@@ -1,19 +1,30 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { storeToRefs } from 'pinia'
-import { Box, Camera, ChevronDown, Circle, Eye, EyeOff, Lightbulb, Lock, Plus, Spline, Square, Sun } from '@lucide/vue'
+import { Box, Camera, ChevronDown, Circle, Eye, EyeOff, Layers3, Lightbulb, Lock, Plus, Spline, Square, Sun } from '@lucide/vue'
 import { useEditorStore } from '@/stores/editor'
 import { cameraIdAtTime } from '@/engine/scene3d/cameraCuts'
 import PanelHeader from './common/PanelHeader.vue'
+import MSelect, { type MSelectOption } from './common/MSelect.vue'
 
 const store = useEditorStore()
-const { selectedScene, selectedSceneEntityId, currentTime } = storeToRefs(store)
+const { layers, selectedLayerId, selectedScene, selectedSceneEntityId, currentTime } = storeToRefs(store)
 /** The menu drops from whichever control opened it, so it is never detached from its trigger. */
 const addMenu = ref<'header' | 'footer' | null>(null)
 const sections = ref({ cameras: true, objects: true, lights: true, paths: true })
 const scenePaths = computed(() => selectedScene.value?.paths ?? [])
 const entityCount = computed(() => (selectedScene.value?.objects.length ?? 0) + (selectedScene.value?.cameras.length ?? 0) + (selectedScene.value?.lights.length ?? 0) + scenePaths.value.length)
 const programCameraId = computed(() => selectedScene.value ? cameraIdAtTime(selectedScene.value, currentTime.value) : null)
+const sceneLayerOptions = computed<MSelectOption[]>(() => layers.value
+  .filter((layer) => layer.type === '3d-scene' && layer.sceneId)
+  .map((layer) => ({ value: layer.id, label: layer.name })))
+const selected3DLayerId = computed({
+  get: () => {
+    const selected = layers.value.find((layer) => layer.id === selectedLayerId.value && layer.type === '3d-scene')
+    return selected?.id ?? layers.value.find((layer) => layer.type === '3d-scene' && layer.sceneId === selectedScene.value?.id)?.id ?? ''
+  },
+  set: (layerId: string) => store.select3DLayer(layerId),
+})
 
 function select(id: string) {
   if (selectedScene.value) store.selectSceneEntity(selectedScene.value.id, id)
@@ -57,6 +68,7 @@ function toggleVisible(id: string) {
       <template #icon><Box :size="13" /></template>
       <template #actions><button class="header-action add-menu-trigger" type="button" title="Add 3D entity" @click="toggleAddMenu('header')"><Plus :size="13" /></button></template>
     </PanelHeader>
+    <div class="scene-layer-picker"><Layers3 :size="11" /><MSelect v-model="selected3DLayerId" :options="sceneLayerOptions" label="3D layer to edit" /></div>
     <div class="scene-root"><ChevronDown :size="11" /><Box :size="12" /><strong :title="selectedScene?.name">{{ selectedScene?.name }}</strong></div>
 
     <div class="hierarchy-scroll">
@@ -105,4 +117,5 @@ function toggleVisible(id: string) {
 
 <style scoped>
 .hierarchy-panel { position: relative; display: flex; height: 100%; min-height: 0; flex-direction: column; overflow: hidden; background: var(--bg-panel); }.header-action { display: grid; width: 22px; height: 22px; place-items: center; padding: 0; color: var(--text-muted); background: transparent; border: 0; border-radius: 3px; cursor: pointer; }.header-action:hover { color: var(--text-primary); background: var(--bg-hover); }.scene-root { display: flex; height: 31px; flex: 0 0 auto; align-items: center; gap: 5px; padding: 0 7px; color: #cdd5ff; background: #171a24; border-bottom: 1px solid var(--border-subtle); }.scene-root strong { min-width: 0; overflow: hidden; font-size: 9.5px; font-weight: 570; text-overflow: ellipsis; white-space: nowrap; }.hierarchy-scroll { min-height: 0; flex: 1; padding: 4px; overflow: auto; }.hierarchy-scroll section { margin-bottom: 2px; }.section-row, .entity-row { display: flex; width: 100%; height: 25px; min-width: 0; align-items: center; gap: 5px; padding: 0 5px; color: var(--text-secondary); text-align: left; background: transparent; border: 1px solid transparent; border-radius: 3px; font: inherit; cursor: pointer; }.section-row { color: #9298a6; font-size: 8px; font-weight: 650; letter-spacing: .045em; text-transform: uppercase; }.section-row:hover, .entity-row:hover { background: var(--bg-hover); }.section-row svg.closed { transform: rotate(-90deg); }.section-row span, .entity-row span:nth-last-of-type(1) { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.section-row small, .entity-row small { margin-left: auto; color: var(--text-muted); font-size: 7px; font-weight: 500; letter-spacing: 0; text-transform: none; }.entity-row { height: 26px; padding-left: 6px; font-size: 9px; }.entity-row.active { color: #dce2ff; background: var(--bg-selected); border-color: var(--accent-border); }.entity-row.muted { opacity: .48; }.indent { width: 14px; flex: 0 0 14px !important; }.visibility { display: grid; width: 14px; height: 18px; flex: 0 0 14px; place-items: center; padding: 0; color: var(--text-muted); background: transparent; border: 0; cursor: pointer; }.add-menu { position: absolute; z-index: 8; display: grid; padding: 5px; background: #1a1d24; border: 1px solid #444a58; border-radius: 4px; box-shadow: 0 10px 24px rgb(0 0 0 / .48); }.add-menu.header { top: 33px; right: 6px; min-width: 168px; }.add-menu.footer { right: 6px; bottom: 35px; left: 6px; }.add-menu strong { padding: 4px 5px 6px; color: var(--text-muted); font-size: 7.5px; letter-spacing: .07em; text-transform: uppercase; }.add-menu button { display: flex; height: 26px; align-items: center; gap: 6px; padding: 0 6px; color: var(--text-secondary); background: transparent; border: 1px solid transparent; border-radius: 3px; font: inherit; font-size: 9px; cursor: pointer; }.add-menu button:hover { color: #dce2ff; background: var(--bg-selected); border-color: var(--accent-border); }.hierarchy-panel > footer { display: flex; height: 34px; flex: 0 0 auto; align-items: center; padding: 4px 6px; border-top: 1px solid var(--border-subtle); }.hierarchy-panel > footer button { display: flex; width: 100%; height: 25px; align-items: center; justify-content: center; gap: 4px; color: var(--text-secondary); background: #181a20; border: 1px dashed #3a3e49; border-radius: 3px; font: inherit; font-size: 9px; cursor: pointer; }.hierarchy-panel > footer button:hover { color: var(--text-primary); border-color: var(--accent-border); }
+.scene-layer-picker { display: grid; height: 34px; flex: 0 0 auto; grid-template-columns: 15px minmax(0, 1fr); align-items: center; gap: 4px; padding: 4px 6px; background: #12151c; border-bottom: 1px solid var(--border-subtle); }.scene-layer-picker > svg { color: #8c9bff; }
 </style>

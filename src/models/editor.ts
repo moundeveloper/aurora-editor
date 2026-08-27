@@ -174,6 +174,8 @@ export interface EditorLayer {
   shapeKind?: 'rectangle' | 'ellipse'
   textContent?: string
   sceneId?: string
+  /** Library entry this cluster publishes itself to, kept in step as the cluster is edited. */
+  assetId?: string
   children?: EditorLayer[]
   isPlaceholder?: boolean
   color: string
@@ -189,6 +191,8 @@ export interface MediaAsset {
   id: string
   name: string
   kind: 'video' | 'image' | 'audio' | 'composition' | 'model3d' | 'hdr' | 'texture'
+  /** Reusable timeline composition, captured when a cluster is created. */
+  layerTemplate?: EditorLayer
   duration?: number
   dimensions?: string
   thumbnail?: string

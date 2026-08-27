@@ -97,8 +97,9 @@ that ends at the root — but it is not per-branch isolation: a Mix cannot compo
 privately and hand the result on unchanged. Aurora-owned render targets are the prerequisite, and
 they are a separate piece of work.
 
-For the same reason a 3D pass takes only opacity from the graph: blur, offsets and colour operate on
-the Pixi container, and the 3D scene renders directly into the frame buffer.
+For the same reason a 3D pass takes opacity plus frame-space vignette from the graph: blur, offsets
+and colour still operate on Pixi containers, while the 3D scene renders directly into the frame
+buffer.
 
 Colour nodes fold into one `ColorMatrixFilter`, so a chain of them still costs a single filter pass.
 

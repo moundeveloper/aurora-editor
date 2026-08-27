@@ -1,0 +1,44 @@
+import { beforeEach, describe, expect, it } from 'vitest'
+import { createPinia, setActivePinia } from 'pinia'
+import { createDemo3DScene } from '@/engine/scene3d/sceneFactory'
+import { useEditorStore } from '../editor'
+
+describe('3D layer selection', () => {
+  beforeEach(() => setActivePinia(createPinia()))
+
+  it('opens the scene referenced by the selected 3D layer', () => {
+    const store = useEditorStore()
+    const scene = createDemo3DScene()
+    scene.id = 'scene-second'
+    scene.name = 'Second Scene'
+    const layer = JSON.parse(JSON.stringify(store.layers.find((item) => item.type === '3d-scene')!)) as typeof store.layers[number]
+    layer.id = 'layer-second-3d'
+    layer.name = 'Second 3D Layer'
+    layer.sceneId = scene.id
+    store.scenes3D.push(scene)
+    store.layers.push(layer)
+    store.selectedSceneEntityId = 'missing-entity'
+
+    store.select3DLayer(layer.id)
+
+    expect(store.selectedLayerId).toBe(layer.id)
+    expect(store.selectedScene?.id).toBe(scene.id)
+    expect(store.selectedSceneEntityId).toBe(scene.objects[0]?.id)
+  })
+
+  it('keeps the selected 3D layer when entering the workspace', () => {
+    const store = useEditorStore()
+    const scene = createDemo3DScene()
+    scene.id = 'scene-second'
+    const layer = JSON.parse(JSON.stringify(store.layers.find((item) => item.type === '3d-scene')!)) as typeof store.layers[number]
+    layer.id = 'layer-second-3d'
+    layer.sceneId = scene.id
+    store.scenes3D.push(scene)
+    store.layers.push(layer)
+    store.selectedLayerId = layer.id
+
+    store.setWorkspace('3D')
+
+    expect(store.selectedScene?.id).toBe(scene.id)
+  })
+})

@@ -23,7 +23,26 @@ const selectedNodeHasImage = computed(() => {
     || node.outputs.some((socket) => socket.type === 'image')
   ))
 })
-const previewRootNodeId = computed(() => selectedNodeHasImage.value ? selectedNode.value!.id : renderRootNodeId.value)
+const selectedNodeUsesAdjustmentLayer = computed(() => {
+  const nodeId = selectedNode.value?.id
+  if (!nodeId) return false
+  const byId = new Map(nodes.value.map((node) => [node.id, node]))
+  const visited = new Set<string>()
+  const visit = (id: string): boolean => {
+    if (visited.has(id)) return false
+    visited.add(id)
+    const node = byId.get(id)
+    if (!node) return false
+    if (node.sourceId) return layers.value.some((layer) => layer.id === node.sourceId && layer.type === 'adjustment')
+    return nodeConnections.value.filter((connection) => connection.toNodeId === id).some((connection) => visit(connection.fromNodeId))
+  }
+  return visit(nodeId)
+})
+const previewRootNodeId = computed(() => {
+  if (!selectedNodeHasImage.value) return renderRootNodeId.value
+  if (selectedNodeUsesAdjustmentLayer.value) return nodes.value.find((node) => node.kind === 'output')?.id ?? selectedNode.value!.id
+  return selectedNode.value!.id
+})
 const previewLabel = computed(() => selectedNodeHasImage.value
   ? selectedNode.value!.title
   : renderRootNodeId.value
@@ -86,7 +105,7 @@ watch([currentTime, project, layers, scenes3D, nodes, nodeConnections, previewRo
       <span class="preview-title"><Eye :size="11" /> Viewport</span>
       <span class="preview-divider" />
       <span class="preview-source" :title="previewLabel">
-        <small>{{ selectedNodeHasImage ? 'Selected node' : 'Render root' }}</small>
+        <small>{{ selectedNodeUsesAdjustmentLayer ? 'Adjustment preview' : selectedNodeHasImage ? 'Selected node' : 'Render root' }}</small>
         <strong>{{ previewLabel }}</strong>
       </span>
       <span class="preview-spacer" />
