@@ -54,6 +54,17 @@ export interface AuroraPBRMaterial {
 
 export type Aurora3DPrimitive = 'box' | 'sphere' | 'plane' | 'model'
 
+export type AuroraInfluenceType = 'array' | 'mirror' | 'subdivide' | 'displace' | 'twist'
+
+/** A non-destructive geometry operation, evaluated in stack order on top of the primitive. */
+export interface AuroraInfluence {
+  id: string
+  type: AuroraInfluenceType
+  name: string
+  enabled: boolean
+  parameters: Record<string, AnimatableProperty<number>>
+}
+
 export interface Aurora3DObject {
   id: string
   name: string
@@ -67,6 +78,7 @@ export interface Aurora3DObject {
   receiveShadow: boolean
   transform: Transform3D
   material: AuroraPBRMaterial
+  influences: AuroraInfluence[]
 }
 
 export interface AuroraCamera {
@@ -77,6 +89,39 @@ export interface AuroraCamera {
   fov: AnimatableProperty<number>
   near: number
   far: number
+  pathConstraint?: AuroraCameraPathConstraint
+}
+
+export type AuroraPathPointMode = 'corner' | 'smooth'
+
+export interface Aurora3DPathPoint {
+  id: string
+  position: [number, number, number]
+  handleIn: [number, number, number]
+  handleOut: [number, number, number]
+  mode: AuroraPathPointMode
+}
+
+export interface Aurora3DPath {
+  id: string
+  name: string
+  color: string
+  transform: Transform3D
+  points: Aurora3DPathPoint[]
+  closed: boolean
+  locked: boolean
+}
+
+export type AuroraPathOrientation = 'tangent' | 'look-at'
+
+export interface AuroraCameraPathConstraint {
+  pathId: string
+  progress: AnimatableProperty<number>
+  bank: AnimatableProperty<number>
+  /** Displacement from the curve in the travel frame: X right, Y up, Z backwards along the tangent. */
+  offset: AnimatableVector3
+  orientation: AuroraPathOrientation
+  lookAtEntityId?: string
 }
 
 export interface AuroraLight {
@@ -102,6 +147,7 @@ export interface Aurora3DScene {
   objects: Aurora3DObject[]
   cameras: AuroraCamera[]
   lights: AuroraLight[]
+  paths: Aurora3DPath[]
   activeCameraId: string | null
   environmentAssetId?: string
   environmentIntensity: number

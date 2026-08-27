@@ -1,5 +1,7 @@
 import * as THREE from 'three'
 import { evaluateNumericProperty } from '@/engine/animation/evaluateProperty'
+import { evaluate3DPath } from '@/engine/scene3d/pathEvaluation'
+import { applyInfluences, influenceSignature } from '@/engine/scene3d/influences'
 import type { Aurora3DObject, Aurora3DScene, AuroraCamera, AuroraLight, Transform3D } from '@/models/editor'
 
 export interface Scene3DRuntime {
@@ -61,6 +63,65 @@ function makeLight(definition: AuroraLight): THREE.Light {
   if (definition.type === 'ambient') return new THREE.AmbientLight(definition.color, definition.intensity.value)
   if (definition.type === 'point') return new THREE.PointLight(definition.color, definition.intensity.value, 0, 2)
   return new THREE.DirectionalLight(definition.color, definition.intensity.value)
+}
+
+/**
+ * Rebuilds the influence stack only when an evaluated parameter actually changes. The untouched
+ * primitive is kept on the mesh so the stack always starts from the same source geometry.
+ */
+function syncInfluences(mesh: THREE.Mesh, definition: Aurora3DObject, time: number) {
+  const signature = influenceSignature(definition.influences, time)
+  if (mesh.userData.influenceSignature === signature) return
+  const base = (mesh.userData.baseGeometry as THREE.BufferGeometry | undefined) ?? mesh.geometry
+  mesh.userData.baseGeometry = base
+  const next = applyInfluences(base, definition.influences, time)
+  if (mesh.geometry !== base && mesh.geometry !== next) mesh.geometry.dispose()
+  mesh.geometry = next
+  mesh.userData.influenceSignature = signature
+}
+
+function entityWorldPosition(runtime: Scene3DRuntime, entityId: string) {
+  const target = runtime.objects.get(entityId) ?? runtime.lights.get(entityId) ?? runtime.cameras.get(entityId)
+  return target ? target.getWorldPosition(new THREE.Vector3()) : null
+}
+
+/** Right / up / backwards basis around the direction of travel, used to place the constraint offset. */
+function pathTravelFrame(tangent: THREE.Vector3) {
+  const forward = tangent.clone().normalize()
+  const right = new THREE.Vector3().crossVectors(forward, new THREE.Vector3(0, 1, 0))
+  if (right.lengthSq() < 0.000001) right.crossVectors(forward, new THREE.Vector3(0, 0, 1))
+  right.normalize()
+  return { forward, right, up: new THREE.Vector3().crossVectors(right, forward).normalize() }
+}
+
+/**
+ * Drives a constrained camera from its path instead of its own transform: the position always comes
+ * from the curve, while the orientation either follows the tangent or stays locked on a target entity.
+ * The offset is applied before aiming, so a look-at target stays dead centre however far the camera
+ * is pushed off the curve.
+ */
+function applyCameraPathConstraint(runtime: Scene3DRuntime, camera: THREE.Camera, definition: AuroraCamera, scene: Aurora3DScene, time: number) {
+  const constraint = definition.pathConstraint
+  const path = constraint ? scene.paths?.find((item) => item.id === constraint.pathId) : undefined
+  if (!constraint || !path) return false
+  const { position, tangent } = evaluate3DPath(path, evaluateNumericProperty(constraint.progress, time), time)
+  const { forward, right, up } = pathTravelFrame(tangent)
+  if (constraint.offset) {
+    position
+      .addScaledVector(right, evaluateNumericProperty(constraint.offset.x, time))
+      .addScaledVector(up, evaluateNumericProperty(constraint.offset.y, time))
+      .addScaledVector(forward, -evaluateNumericProperty(constraint.offset.z, time))
+  }
+  const target = constraint.orientation === 'look-at' && constraint.lookAtEntityId
+    ? entityWorldPosition(runtime, constraint.lookAtEntityId)
+    : null
+  camera.position.copy(position)
+  camera.up.set(0, 1, 0)
+  camera.lookAt(target ?? position.clone().add(forward))
+  const bank = THREE.MathUtils.degToRad(evaluateNumericProperty(constraint.bank, time))
+  if (bank) camera.rotateZ(bank)
+  camera.updateMatrixWorld(true)
+  return true
 }
 
 export class ThreeSceneRuntimeRegistry {
@@ -128,6 +189,7 @@ export class ThreeSceneRuntimeRegistry {
       if (!object) return
       object.visible = item.visible
       applyTransform(object, item.transform, time)
+      if (object instanceof THREE.Mesh) syncInfluences(object, item, time)
       if (object instanceof THREE.Mesh && object.material instanceof THREE.MeshStandardMaterial) {
         object.material.color.set(item.material.baseColor)
         object.material.emissive.set(item.material.emissive)
@@ -138,10 +200,12 @@ export class ThreeSceneRuntimeRegistry {
         object.material.needsUpdate = true
       }
     })
+    runtime.root.updateMatrixWorld(true)
     definition.cameras.forEach((item) => {
       const camera = runtime.cameras.get(item.id)
       if (!camera) return
       applyTransform(camera, item.transform, time)
+      applyCameraPathConstraint(runtime, camera, item, definition, time)
       if (camera instanceof THREE.PerspectiveCamera) {
         camera.aspect = aspect
         camera.fov = evaluateNumericProperty(item.fov, time)
@@ -194,6 +258,8 @@ export class ThreeSceneRuntimeRegistry {
         candidate = candidate.parent
       }
       if (!(object instanceof THREE.Mesh)) return
+      const base = object.userData.baseGeometry as THREE.BufferGeometry | undefined
+      if (base && base !== object.geometry) base.dispose()
       object.geometry.dispose()
       const materials = Array.isArray(object.material) ? object.material : [object.material]
       materials.forEach((material) => {

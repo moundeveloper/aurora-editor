@@ -1,15 +1,16 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
 import { storeToRefs } from 'pinia'
-import { Box, Camera, ChevronDown, Circle, Eye, EyeOff, Lightbulb, Lock, Plus, Square, Sun } from '@lucide/vue'
+import { Box, Camera, ChevronDown, Circle, Eye, EyeOff, Lightbulb, Lock, Plus, Spline, Square, Sun } from '@lucide/vue'
 import { useEditorStore } from '@/stores/editor'
 import PanelHeader from './common/PanelHeader.vue'
 
 const store = useEditorStore()
 const { selectedScene, selectedSceneEntityId } = storeToRefs(store)
 const addMenu = ref(false)
-const sections = ref({ cameras: true, objects: true, lights: true })
-const entityCount = computed(() => (selectedScene.value?.objects.length ?? 0) + (selectedScene.value?.cameras.length ?? 0) + (selectedScene.value?.lights.length ?? 0))
+const sections = ref({ cameras: true, objects: true, lights: true, paths: true })
+const scenePaths = computed(() => selectedScene.value?.paths ?? [])
+const entityCount = computed(() => (selectedScene.value?.objects.length ?? 0) + (selectedScene.value?.cameras.length ?? 0) + (selectedScene.value?.lights.length ?? 0) + scenePaths.value.length)
 
 function select(id: string) {
   if (selectedScene.value) store.selectSceneEntity(selectedScene.value.id, id)
@@ -54,6 +55,12 @@ function toggleVisible(id: string) {
           <button v-for="light in selectedScene?.lights" :key="light.id" class="entity-row" type="button" :class="{ active: selectedSceneEntityId === light.id }" :title="light.name" @click="select(light.id)"><span class="indent" /><Lightbulb :size="11" :style="{ color: light.color }" /><span>{{ light.name }}</span><small>{{ light.type }}</small></button>
         </template>
       </section>
+      <section>
+        <button class="section-row" type="button" @click="sections.paths = !sections.paths"><ChevronDown :size="10" :class="{ closed: !sections.paths }" /><Spline :size="11" /><span>Paths</span><small>{{ scenePaths.length }}</small></button>
+        <template v-if="sections.paths">
+          <button v-for="path in scenePaths" :key="path.id" class="entity-row" type="button" :class="{ active: selectedSceneEntityId === path.id }" :title="path.name" @click="select(path.id)"><span class="indent" /><Spline :size="11" :style="{ color: path.color }" /><span>{{ path.name }}</span><Lock v-if="path.locked" :size="9" /><small>{{ path.points.length }} pts</small></button>
+        </template>
+      </section>
     </div>
 
     <div v-if="addMenu" class="add-menu">
@@ -61,6 +68,7 @@ function toggleVisible(id: string) {
       <button type="button" @click="store.add3DPrimitive('box'); addMenu = false"><Box :size="12" /> Cube</button>
       <button type="button" @click="store.add3DPrimitive('sphere'); addMenu = false"><Circle :size="12" /> Sphere</button>
       <button type="button" @click="store.add3DCamera(); addMenu = false"><Camera :size="12" /> Camera</button>
+      <button type="button" @click="store.add3DPath(); addMenu = false"><Spline :size="12" /> Bézier path</button>
       <button type="button" @click="store.add3DLight('directional'); addMenu = false"><Sun :size="12" /> Directional light</button>
       <button type="button" @click="store.add3DLight('point'); addMenu = false"><Lightbulb :size="12" /> Point light</button>
     </div>

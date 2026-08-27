@@ -26,6 +26,7 @@ export class HybridWebGLRenderBackend implements RenderBackend {
   private sourceTexture: Texture | null = null
   private pixelRatio = 1
   private initialized = false
+  private initialization: Promise<void> | null = null
   private contextLost = false
   private lastStats: HybridRendererStats = {
     backend: 'WebGL2', pixiPasses: 0, threePasses: 0, threeDrawCalls: 0, triangles: 0, width: 1, height: 1,
@@ -33,8 +34,21 @@ export class HybridWebGLRenderBackend implements RenderBackend {
 
   constructor(private readonly canvas: HTMLCanvasElement, private readonly sourceUrl: string) {}
 
+  /**
+   * Setup is asynchronous, so a render requested while it is still running would otherwise start a
+   * second one and build a rival pair of renderers on the same canvas — a shared GL context with
+   * conflicting state, which draws nothing. Concurrent callers share the in-flight attempt instead.
+   */
   async initialize(options: RendererInitializationOptions) {
     if (this.initialized) return
+    this.initialization ??= this.createResources(options).catch((error: unknown) => {
+      this.initialization = null
+      throw error
+    })
+    return this.initialization
+  }
+
+  protected async createResources(options: RendererInitializationOptions) {
     this.pixelRatio = options.pixelRatio
     this.threeRenderer = new THREE.WebGLRenderer({
       canvas: this.canvas,
@@ -266,6 +280,8 @@ export class HybridWebGLRenderBackend implements RenderBackend {
   }
 
   async dispose() {
+    // Tearing down while setup is still running would leave the finished resources orphaned.
+    await this.initialization?.catch(() => undefined)
     this.canvas.removeEventListener('webglcontextlost', this.onContextLost)
     this.canvas.removeEventListener('webglcontextrestored', this.onContextRestored)
     this.runtimeRegistry.dispose()
@@ -277,5 +293,6 @@ export class HybridWebGLRenderBackend implements RenderBackend {
     this.threeRenderer?.dispose()
     this.threeRenderer = null
     this.initialized = false
+    this.initialization = null
   }
 }

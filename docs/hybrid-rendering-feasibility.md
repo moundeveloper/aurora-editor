@@ -25,6 +25,19 @@ This validates the core 2D/3D boundary without stacking DOM canvases or reading 
 | Real media decoding | BLOCKED |
 | Deterministic encoded export | BLOCKED |
 
+## Backend initialization
+
+`HybridWebGLRenderBackend.initialize` is asynchronous — it builds the Three renderer, hands its
+WebGL2 context to PixiJS, and decodes the source image. Renders requested during that window must
+not start a second setup: two renderer pairs on one canvas share a single GL context with
+conflicting state and the preview goes blank. Concurrent callers therefore share the in-flight
+attempt, `dispose` waits for it to settle before tearing anything down, and a failed attempt is not
+cached so a later render can retry.
+
+This matters whenever the preview is mounted while the playhead is moving — switching from the 3D
+workspace to Motion during playback drives a render on every frame, including the frames that land
+inside the setup window.
+
 ## Branch scope
 
 - renderer-neutral contracts and render plan;

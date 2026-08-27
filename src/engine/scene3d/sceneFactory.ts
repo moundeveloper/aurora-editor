@@ -1,6 +1,6 @@
 import type {
-  AnimatableProperty, Aurora3DObject, Aurora3DScene, AuroraCamera, AuroraLight,
-  AuroraPBRMaterial, Transform3D,
+  AnimatableProperty, AnimatableVector3, Aurora3DObject, Aurora3DPath, Aurora3DScene, AuroraCamera,
+  AuroraCameraPathConstraint, AuroraLight, AuroraPBRMaterial, Transform3D,
 } from '@/models/editor'
 
 export function numericProperty(id: string, value: number): AnimatableProperty<number> {
@@ -50,6 +50,7 @@ export function createDemo3DScene(): Aurora3DScene {
     receiveShadow: true,
     transform: makeTransform3D('aurora-cube', [0, .35, 0]),
     material: makePBRMaterial('aurora-cube-material'),
+    influences: [],
   }
   cube.transform.rotation.y.animated = true
   cube.transform.rotation.y.keyframes = [
@@ -69,6 +70,7 @@ export function createDemo3DScene(): Aurora3DScene {
     receiveShadow: true,
     transform: makeTransform3D('ground', [0, -1.2, 0]),
     material: makePBRMaterial('ground-material', '#151a2a'),
+    influences: [],
   }
   floor.transform.rotation.x.value = -90
   floor.transform.scale.x.value = 8
@@ -123,6 +125,7 @@ export function createDemo3DScene(): Aurora3DScene {
     objects: [cube, floor],
     cameras: [camera],
     lights: [ambient, key, rim],
+    paths: [],
     activeCameraId: camera.id,
     environmentIntensity: 1,
     settings: {
@@ -132,6 +135,41 @@ export function createDemo3DScene(): Aurora3DScene {
       backgroundColor: null,
     },
     revision: 1,
+  }
+}
+
+export function create3DPath(index: number): Aurora3DPath {
+  const id = crypto.randomUUID()
+  return {
+    id,
+    name: `Path ${index}`,
+    color: '#7ee0c0',
+    transform: makeTransform3D(id),
+    closed: false,
+    locked: false,
+    points: [
+      { id: crypto.randomUUID(), position: [-3, 1, 2], handleIn: [-3, 1, 2], handleOut: [-1.6, 1.8, 1.5], mode: 'smooth' },
+      { id: crypto.randomUUID(), position: [0, 2, 0], handleIn: [-1.2, 2.2, .8], handleOut: [1.2, 1.8, -.8], mode: 'smooth' },
+      { id: crypto.randomUUID(), position: [3, 1, -2], handleIn: [1.6, 1.4, -1.5], handleOut: [3, 1, -2], mode: 'smooth' },
+    ],
+  }
+}
+
+export function makePathOffset(cameraId: string): AnimatableVector3 {
+  return {
+    x: numericProperty(`${cameraId}-path-offset-x`, 0),
+    y: numericProperty(`${cameraId}-path-offset-y`, 0),
+    z: numericProperty(`${cameraId}-path-offset-z`, 0),
+  }
+}
+
+export function createCameraPathConstraint(cameraId: string, pathId: string): AuroraCameraPathConstraint {
+  return {
+    pathId,
+    progress: numericProperty(`${cameraId}-path-progress`, 0),
+    bank: numericProperty(`${cameraId}-path-bank`, 0),
+    offset: makePathOffset(cameraId),
+    orientation: 'tangent',
   }
 }
 
@@ -148,5 +186,6 @@ export function createPrimitiveObject(primitive: 'box' | 'sphere', index: number
     receiveShadow: true,
     transform: makeTransform3D(id, [0, 0, 0]),
     material: makePBRMaterial(`${id}-material`, primitive === 'box' ? '#8c9bff' : '#6f9fcb'),
+    influences: [],
   }
 }

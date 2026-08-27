@@ -1,14 +1,20 @@
 import { computed, ref, toRaw } from 'vue'
 import { defineStore } from 'pinia'
 import type {
-  AnimatableProperty, Aurora3DScene, AuroraCamera, AuroraLight,
+  AnimatableProperty, Aurora3DScene, AuroraCamera, AuroraInfluenceType, AuroraLight,
+  AuroraPathOrientation, AuroraPathPointMode,
   EditorLayer, EditorProject, MediaAsset, SerializedEditorState, WorkspaceId,
 } from '@/models/editor'
 import { evaluateNumericProperty } from '@/engine/animation/evaluateProperty'
 import { ensureNumericKeyframe, setNumericPropertyAtTime, toggleNumericKeyframe } from '@/engine/animation/editNumericProperty'
 import { deserializeEditorState, serializeEditorState } from '@/engine/project/serialization'
 import { auroraProjectDatabase } from '@/engine/project/AuroraProjectDatabase'
-import { createDemo3DScene, createPrimitiveObject, makeTransform3D, numericProperty } from '@/engine/scene3d/sceneFactory'
+import { create3DPath, createCameraPathConstraint, createDemo3DScene, createPrimitiveObject, makeTransform3D, numericProperty } from '@/engine/scene3d/sceneFactory'
+import {
+  appendPathPoint, insertPathPoint, movePathHandle, movePathPoint, setPathPointMode,
+  type PathHandleKey, type PathVector,
+} from '@/engine/scene3d/pathEditing'
+import { createInfluence, influenceParameters } from '@/engine/scene3d/influences'
 
 const property = (id: string, value: number): AnimatableProperty<number> => ({
   id,
@@ -149,7 +155,9 @@ export const useEditorStore = defineStore('editor', () => {
     const camera = scene.cameras.find((item) => item.id === selectedSceneEntityId.value)
     if (camera) return { kind: 'camera' as const, value: camera }
     const light = scene.lights.find((item) => item.id === selectedSceneEntityId.value)
-    return light ? { kind: 'light' as const, value: light } : null
+    if (light) return { kind: 'light' as const, value: light }
+    const path = scene.paths?.find((item) => item.id === selectedSceneEntityId.value)
+    return path ? { kind: 'path' as const, value: path } : null
   })
 
   let playbackFrame = 0
@@ -574,8 +582,23 @@ export const useEditorStore = defineStore('editor', () => {
     const transformProperties = (['position', 'rotation', 'scale'] as const).flatMap((group) =>
       (['x', 'y', 'z'] as const).map((axis) => entity.value.transform[group][axis]),
     )
-    if (entity.kind === 'object') return [...transformProperties, entity.value.material.metalness, entity.value.material.roughness, entity.value.material.opacity, entity.value.material.emissiveIntensity]
-    if (entity.kind === 'camera') return [...transformProperties, entity.value.fov]
+    if (entity.kind === 'object') {
+      const influenceProperties = (entity.value.influences ?? []).flatMap((influence) => influenceParameters(influence).map((item) => item.property))
+      return [
+        ...transformProperties,
+        entity.value.material.metalness, entity.value.material.roughness,
+        entity.value.material.opacity, entity.value.material.emissiveIntensity,
+        ...influenceProperties,
+      ]
+    }
+    if (entity.kind === 'camera') {
+      const constraint = entity.value.pathConstraint
+      const constraintProperties = constraint
+        ? [constraint.progress, constraint.bank, constraint.offset.x, constraint.offset.y, constraint.offset.z]
+        : []
+      return [...transformProperties, entity.value.fov, ...constraintProperties]
+    }
+    if (entity.kind === 'path') return transformProperties
     return [...transformProperties, entity.value.intensity]
   }
 
@@ -604,6 +627,7 @@ export const useEditorStore = defineStore('editor', () => {
       ? scene.objects.find((item) => item.id === entityId)
         ?? scene.cameras.find((item) => item.id === entityId)
         ?? scene.lights.find((item) => item.id === entityId)
+        ?? scene.paths?.find((item) => item.id === entityId)
       : undefined
     if (!scene || !entity) return
     let changed = false
@@ -631,6 +655,234 @@ export const useEditorStore = defineStore('editor', () => {
     const entity = selectedSceneEntity.value
     if (entity?.kind !== 'camera') return
     if (apply3DPropertyValue(entity.value.fov, value)) markSceneChanged()
+  }
+
+  function selectedObject() {
+    const entity = selectedSceneEntity.value
+    return entity?.kind === 'object' ? entity.value : null
+  }
+
+  function add3DInfluence(type: AuroraInfluenceType) {
+    const object = selectedObject()
+    if (!object) return null
+    if (!Array.isArray(object.influences)) object.influences = []
+    const sameType = object.influences.filter((influence) => influence.type === type).length
+    const influence = createInfluence(type, sameType + 1)
+    object.influences.push(influence)
+    markSceneChanged()
+    return influence
+  }
+
+  function remove3DInfluence(influenceId: string) {
+    const object = selectedObject()
+    if (!object?.influences?.some((influence) => influence.id === influenceId)) return
+    object.influences = object.influences.filter((influence) => influence.id !== influenceId)
+    markSceneChanged()
+  }
+
+  function toggle3DInfluence(influenceId: string) {
+    const influence = selectedObject()?.influences?.find((item) => item.id === influenceId)
+    if (!influence) return
+    influence.enabled = !influence.enabled
+    markSceneChanged()
+  }
+
+  /** Stack order is the evaluation order, so moving an entry changes the resulting geometry. */
+  function move3DInfluence(influenceId: string, direction: -1 | 1) {
+    const object = selectedObject()
+    const index = object?.influences?.findIndex((influence) => influence.id === influenceId) ?? -1
+    const target = index + direction
+    if (!object || index < 0 || target < 0 || target >= object.influences.length) return
+    const [influence] = object.influences.splice(index, 1)
+    object.influences.splice(target, 0, influence!)
+    markSceneChanged()
+  }
+
+  function set3DInfluenceParameter(influenceId: string, key: string, value: number) {
+    const influence = selectedObject()?.influences?.find((item) => item.id === influenceId)
+    const property = influence?.parameters[key]
+    if (!property || !Number.isFinite(value)) return
+    if (apply3DPropertyValue(property, value)) markSceneChanged()
+  }
+
+  function findScenePath(pathId: string) {
+    return selectedScene.value?.paths?.find((path) => path.id === pathId)
+  }
+
+  function add3DPath() {
+    const scene = selectedScene.value
+    if (!scene) return null
+    if (!Array.isArray(scene.paths)) scene.paths = []
+    const path = create3DPath(scene.paths.length + 1)
+    scene.paths.push(path)
+    selectedSceneEntityId.value = path.id
+    markSceneChanged(scene)
+    return path
+  }
+
+  function delete3DPath(pathId: string) {
+    const scene = selectedScene.value
+    if (!scene?.paths?.some((path) => path.id === pathId)) return
+    scene.paths = scene.paths.filter((path) => path.id !== pathId)
+    scene.cameras.forEach((camera) => {
+      if (camera.pathConstraint?.pathId === pathId) delete camera.pathConstraint
+    })
+    if (selectedSceneEntityId.value === pathId) selectedSceneEntityId.value = scene.activeCameraId ?? scene.objects[0]?.id ?? ''
+    markSceneChanged(scene)
+  }
+
+  function move3DPathPoint(pathId: string, pointId: string, target: PathHandleKey, position: PathVector) {
+    const path = findScenePath(pathId)
+    const point = path?.points.find((item) => item.id === pointId)
+    if (!path || !point || path.locked) return
+    if (target === 'position') movePathPoint(point, position)
+    else movePathHandle(point, target, position)
+    markSceneChanged()
+  }
+
+  function set3DPathPointAxis(pathId: string, pointId: string, target: PathHandleKey, axis: 0 | 1 | 2, value: number) {
+    const point = findScenePath(pathId)?.points.find((item) => item.id === pointId)
+    if (!point || !Number.isFinite(value)) return
+    const next = [...point[target]] as PathVector
+    next[axis] = value
+    move3DPathPoint(pathId, pointId, target, next)
+  }
+
+  function set3DPathPointMode(pathId: string, pointId: string, mode: AuroraPathPointMode) {
+    const path = findScenePath(pathId)
+    if (!path || path.locked) return
+    setPathPointMode(path, pointId, mode)
+    markSceneChanged()
+  }
+
+  /** Adds a point in the middle of the segment that follows `afterPointId`, or extends the open end. */
+  function add3DPathPoint(pathId: string, afterPointId?: string) {
+    const path = findScenePath(pathId)
+    if (!path || path.locked) return null
+    const index = afterPointId ? path.points.findIndex((point) => point.id === afterPointId) : path.points.length - 1
+    const hasFollowingSegment = index >= 0 && (path.closed || index < path.points.length - 1)
+    const point = hasFollowingSegment ? insertPathPoint(path, index) : appendPathPoint(path)
+    if (point) markSceneChanged()
+    return point
+  }
+
+  function delete3DPathPoint(pathId: string, pointId: string) {
+    const path = findScenePath(pathId)
+    if (!path || path.locked || path.points.length <= 2) return false
+    path.points = path.points.filter((point) => point.id !== pointId)
+    markSceneChanged()
+    return true
+  }
+
+  function toggle3DPathClosed(pathId: string) {
+    const path = findScenePath(pathId)
+    if (!path || path.locked) return
+    path.closed = !path.closed
+    markSceneChanged()
+  }
+
+  function set3DPathColor(pathId: string, color: string) {
+    const path = findScenePath(pathId)
+    if (!path) return
+    path.color = color
+    markSceneChanged()
+  }
+
+  function set3DPathLocked(pathId: string, locked: boolean) {
+    const path = findScenePath(pathId)
+    if (!path) return
+    path.locked = locked
+    markSceneChanged()
+  }
+
+  function selectedCamera(): AuroraCamera | null {
+    const entity = selectedSceneEntity.value
+    return entity?.kind === 'camera' ? entity.value : null
+  }
+
+  function setCameraPathConstraint(pathId: string | null) {
+    const camera = selectedCamera()
+    if (!camera) return
+    if (!pathId) delete camera.pathConstraint
+    else if (camera.pathConstraint) camera.pathConstraint.pathId = pathId
+    else camera.pathConstraint = createCameraPathConstraint(camera.id, pathId)
+    markSceneChanged()
+  }
+
+  function setCameraPathOrientation(orientation: AuroraPathOrientation) {
+    const constraint = selectedCamera()?.pathConstraint
+    if (!constraint) return
+    constraint.orientation = orientation
+    markSceneChanged()
+  }
+
+  function setCameraPathTarget(entityId: string | null) {
+    const constraint = selectedCamera()?.pathConstraint
+    if (!constraint) return
+    if (entityId) constraint.lookAtEntityId = entityId
+    else delete constraint.lookAtEntityId
+    markSceneChanged()
+  }
+
+  function setCameraPathProgress(value: number) {
+    const constraint = selectedCamera()?.pathConstraint
+    if (!constraint) return
+    if (apply3DPropertyValue(constraint.progress, Math.max(0, Math.min(1, value)))) markSceneChanged()
+  }
+
+  function setCameraPathBank(value: number) {
+    const constraint = selectedCamera()?.pathConstraint
+    if (!constraint) return
+    if (apply3DPropertyValue(constraint.bank, value)) markSceneChanged()
+  }
+
+  function setCameraPathOffset(axis: 'x' | 'y' | 'z', value: number) {
+    const constraint = selectedCamera()?.pathConstraint
+    if (!constraint || !Number.isFinite(value)) return
+    if (apply3DPropertyValue(constraint.offset[axis], value)) markSceneChanged()
+  }
+
+  function resetCameraPathOffset() {
+    const constraint = selectedCamera()?.pathConstraint
+    if (!constraint) return
+    let changed = false
+    ;(['x', 'y', 'z'] as const).forEach((axis) => { changed = apply3DPropertyValue(constraint.offset[axis], 0) || changed })
+    if (changed) markSceneChanged()
+  }
+
+  function toggleLayerPropertyKeyframe(property: AnimatableProperty<number>) {
+    selectedKeyframeId.value = toggleNumericKeyframe(property, currentTime.value, project.value.frameRate)
+    markChanged()
+  }
+
+  function toggle3DPropertyKeyframe(property: AnimatableProperty<number>) {
+    selectedKeyframeId.value = toggleNumericKeyframe(property, currentTime.value, project.value.frameRate)
+    markSceneChanged()
+  }
+
+  /** Moves the playhead onto the neighbouring keyframe of a single channel and selects it. */
+  function stepToAdjacentKeyframe(property: AnimatableProperty<number>, direction: -1 | 1) {
+    const tolerance = (0.5 / project.value.frameRate) + 0.0001
+    const ordered = [...property.keyframes].sort((left, right) => left.time - right.time)
+    const target = direction > 0
+      ? ordered.find((keyframe) => keyframe.time > currentTime.value + tolerance)
+      : ordered.reverse().find((keyframe) => keyframe.time < currentTime.value - tolerance)
+    if (!target) return false
+    currentTime.value = Math.max(0, Math.min(project.value.duration, target.time))
+    selectedKeyframeId.value = target.id
+    return true
+  }
+
+  function hasAdjacentKeyframe(property: AnimatableProperty<number>, direction: -1 | 1) {
+    const tolerance = (0.5 / project.value.frameRate) + 0.0001
+    return property.keyframes.some((keyframe) => direction > 0
+      ? keyframe.time > currentTime.value + tolerance
+      : keyframe.time < currentTime.value - tolerance)
+  }
+
+  function isKeyedAtPlayhead(property: AnimatableProperty<number>) {
+    const tolerance = (0.5 / project.value.frameRate) + 0.0001
+    return property.keyframes.some((keyframe) => keyframe.id === selectedKeyframeId.value || Math.abs(keyframe.time - currentTime.value) <= tolerance)
   }
 
   function toggle3DKeyframe(propertyId: string) {
@@ -697,5 +949,11 @@ export const useEditorStore = defineStore('editor', () => {
     selectSceneEntity, markSceneChanged, add3DPrimitive, add3DLight, add3DCamera, set3DEntityTransform,
     update3DEntityTransform, set3DObjectMaterial, set3DLightIntensity, set3DCameraFov,
     toggle3DKeyframe, keySelected3DTransform, move3DKeyframe, delete3DKeyframe, setActive3DCamera,
+    add3DPath, delete3DPath, findScenePath, move3DPathPoint, set3DPathPointAxis, set3DPathPointMode,
+    add3DPathPoint, delete3DPathPoint, toggle3DPathClosed, set3DPathColor, set3DPathLocked,
+    setCameraPathConstraint, setCameraPathOrientation, setCameraPathTarget, setCameraPathProgress, setCameraPathBank,
+    setCameraPathOffset, resetCameraPathOffset,
+    toggleLayerPropertyKeyframe, toggle3DPropertyKeyframe, stepToAdjacentKeyframe, hasAdjacentKeyframe, isKeyedAtPlayhead,
+    add3DInfluence, remove3DInfluence, toggle3DInfluence, move3DInfluence, set3DInfluenceParameter,
   }
 })
