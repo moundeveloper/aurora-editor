@@ -14,6 +14,10 @@ const canvas = ref<HTMLCanvasElement>()
 const initializing = ref(true)
 const renderError = ref(false)
 let renderer: HybridWebGLRenderBackend | null = null
+let drawFrame = 0
+let rendering = false
+let redrawRequested = false
+let disposed = false
 
 const selectedNode = computed(() => nodes.value.find((node) => node.id === selectedNodeId.value))
 const selectedNodeHasImage = computed(() => {
@@ -55,7 +59,7 @@ const passCount = computed(() => selectedNodeHasImage.value
     .filter((pass) => liveLayers.value.some((layer) => layer.id === pass.layerId)).length
   : liveLayers.value.length)
 
-async function draw() {
+async function drawNow() {
   if (!renderer) return
   try {
     await renderer.renderFrame({
@@ -66,8 +70,8 @@ async function draw() {
       nodeConnections: selectedNodeHasImage.value ? nodeConnections.value : [],
       renderRootNodeId: selectedNodeHasImage.value ? previewRootNodeId.value : null,
       time: currentTime.value,
-      width: 960,
-      height: 540,
+      width: 640,
+      height: 360,
       quality: 'preview',
     })
     renderError.value = false
@@ -76,14 +80,28 @@ async function draw() {
   }
 }
 
+function scheduleDraw() {
+  redrawRequested = true
+  if (drawFrame || rendering || disposed) return
+  drawFrame = requestAnimationFrame(async () => {
+    drawFrame = 0
+    if (!redrawRequested || disposed) return
+    redrawRequested = false
+    rendering = true
+    await drawNow()
+    rendering = false
+    if (redrawRequested) scheduleDraw()
+  })
+}
+
 onMounted(async () => {
   await nextTick()
   if (!canvas.value) return
   try {
     const { HybridWebGLRenderBackend } = await import('@/engine/rendering/HybridWebGLRenderBackend')
     renderer = new HybridWebGLRenderBackend(canvas.value, '/demo/aurora-ridge.png')
-    await renderer.initialize({ width: 960, height: 540, pixelRatio: 1 })
-    await draw()
+    await renderer.initialize({ width: 640, height: 360, pixelRatio: 1 })
+    await drawNow()
   } catch {
     renderError.value = true
   } finally {
@@ -92,11 +110,13 @@ onMounted(async () => {
 })
 
 onBeforeUnmount(() => {
+  disposed = true
+  if (drawFrame) cancelAnimationFrame(drawFrame)
   void renderer?.dispose()
   renderer = null
 })
 
-watch([currentTime, project, layers, scenes3D, nodes, nodeConnections, previewRootNodeId], draw, { deep: true })
+watch([currentTime, project, layers, scenes3D, nodes, nodeConnections, previewRootNodeId], scheduleDraw, { deep: true })
 </script>
 
 <template>
@@ -113,7 +133,7 @@ watch([currentTime, project, layers, scenes3D, nodes, nodeConnections, previewRo
     </header>
 
     <div class="preview-viewport">
-      <canvas ref="canvas" width="960" height="540" aria-label="Live output of the selected node" />
+      <canvas ref="canvas" width="640" height="360" aria-label="Live output of the selected node" />
       <div v-if="initializing" class="preview-message">Starting viewport…</div>
       <div v-else-if="renderError" class="preview-message error"><ImageOff :size="15" /> Preview unavailable</div>
       <div v-else-if="!passCount" class="preview-message"><ImageOff :size="15" /> No image reaches this node</div>

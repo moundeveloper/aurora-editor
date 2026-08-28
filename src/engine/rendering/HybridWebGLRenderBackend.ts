@@ -9,6 +9,7 @@ import {
 } from '@/engine/rendering/contracts'
 import type { EditorLayer } from '@/models/editor'
 import { cameraIdAtTime } from '@/engine/scene3d/cameraCuts'
+import { createMaskGeometry, maskAlphaField, maskGeometryKey, type MaskGeometryField } from '@/engine/rendering/maskField'
 
 /** Colour nodes fold into one matrix so a chain of them still costs a single filter pass. */
 function colorFilterFor(effects: GraphEffects) {
@@ -64,6 +65,39 @@ function vignetteOverlay(effects: GraphEffects, width: number, height: number) {
   return overlay
 }
 
+type MaskEffect = NonNullable<GraphEffects['mask']>
+
+/** Uploads the alpha the field module computes; the arithmetic itself is pure and lives beside its tests. */
+function paintMaskCanvas(geometry: MaskGeometryField, effect: MaskEffect, width: number, height: number, projectWidth: number) {
+  if (typeof document === 'undefined') return null
+  const field = maskAlphaField(geometry, effect, width, height, projectWidth)
+  const canvas = document.createElement('canvas')
+  canvas.width = field.width
+  canvas.height = field.height
+  const context = canvas.getContext('2d')
+  if (!context) return null
+  const pixels = context.createImageData(field.width, field.height)
+  for (let index = 0; index < field.alpha.length; index += 1) {
+    const alphaByte = field.alpha[index]!
+    const pixelIndex = index * 4
+    pixels.data[pixelIndex] = alphaByte
+    pixels.data[pixelIndex + 1] = alphaByte
+    pixels.data[pixelIndex + 2] = alphaByte
+    pixels.data[pixelIndex + 3] = alphaByte
+  }
+  context.putImageData(pixels, 0, 0)
+  return canvas
+}
+
+interface MaskRasterCacheEntry {
+  key: string
+  canvas: HTMLCanvasElement
+  pixiTexture?: Texture
+  threeTexture?: THREE.CanvasTexture
+}
+
+interface MaskGeometryCacheEntry { key: string; geometry: MaskGeometryField }
+
 export interface HybridRendererStats {
   backend: 'WebGL2'
   pixiPasses: number
@@ -78,6 +112,13 @@ export class HybridWebGLRenderBackend implements RenderBackend {
   private threeRenderer: THREE.WebGLRenderer | null = null
   private pixiRenderer: WebGLRenderer | null = null
   private readonly runtimeRegistry = new ThreeSceneRuntimeRegistry()
+  private threeLayerTarget: THREE.WebGLRenderTarget | null = null
+  private readonly maskCompositeScene = new THREE.Scene()
+  private readonly maskCompositeCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1)
+  private readonly maskCompositeMaterial = new THREE.MeshBasicMaterial({ transparent: true, depthTest: false, depthWrite: false, toneMapped: false })
+  private readonly maskCompositeQuad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), this.maskCompositeMaterial)
+  private readonly maskRasterCache = new Map<string, MaskRasterCacheEntry>()
+  private readonly maskGeometryCache = new Map<string, MaskGeometryCacheEntry>()
   private sourceImage: HTMLImageElement | null = null
   private sourceTexture: Texture | null = null
   private pixelRatio = 1
@@ -88,7 +129,9 @@ export class HybridWebGLRenderBackend implements RenderBackend {
     backend: 'WebGL2', pixiPasses: 0, threePasses: 0, threeDrawCalls: 0, triangles: 0, width: 1, height: 1,
   }
 
-  constructor(private readonly canvas: HTMLCanvasElement, private readonly sourceUrl: string) {}
+  constructor(private readonly canvas: HTMLCanvasElement, private readonly sourceUrl: string) {
+    this.maskCompositeScene.add(this.maskCompositeQuad)
+  }
 
   /**
    * Setup is asynchronous, so a render requested while it is still running would otherwise start a
@@ -153,6 +196,7 @@ export class HybridWebGLRenderBackend implements RenderBackend {
     this.threeRenderer.setSize(width, height, false)
     this.pixiRenderer.resolution = pixelRatio
     this.pixiRenderer.resize(width, height)
+    this.threeLayerTarget?.setSize(width, height)
     this.lastStats.width = width
     this.lastStats.height = height
   }
@@ -180,10 +224,10 @@ export class HybridWebGLRenderBackend implements RenderBackend {
       if (pass.backend === 'three-webgl') {
         const scene = pass.sceneId ? sceneMap.get(pass.sceneId) : undefined
         if (!scene) return
-        this.renderThreeLayer(layer, scene, request.time, size.width, size.height, pass.effects)
+        this.renderThreeLayer(layer, scene, request.time, size.width, size.height, request.project.width, request.project.height, pass.effects, layerMap)
         threePasses += 1
       } else {
-        this.renderPixiLayer(layer, request.time, size.width, size.height, request.project.width, request.project.height, pass.effects, pass.blendMode)
+        this.renderPixiLayer(layer, request.time, size.width, size.height, request.project.width, request.project.height, pass.effects, pass.blendMode, layerMap)
         pixiPasses += 1
       }
     })
@@ -204,7 +248,38 @@ export class HybridWebGLRenderBackend implements RenderBackend {
     return { ...this.lastStats }
   }
 
-  private renderPixiLayer(layer: EditorLayer, time: number, width: number, height: number, projectWidth: number, projectHeight: number, effects: GraphEffects, blendMode: NodeBlendMode) {
+  private maskRasterFor(layer: EditorLayer, effect: MaskEffect, time: number, width: number, height: number, projectWidth: number, projectHeight: number) {
+    const geometryKey = maskGeometryKey(layer, time, width, height, projectWidth, projectHeight)
+    let geometryEntry = this.maskGeometryCache.get(layer.id)
+    if (geometryEntry?.key !== geometryKey) {
+      const geometry = createMaskGeometry(layer, time, width, height, projectWidth, projectHeight)
+      if (!geometry) {
+        this.maskGeometryCache.delete(layer.id)
+        const staleRaster = this.maskRasterCache.get(layer.id)
+        staleRaster?.pixiTexture?.destroy(true)
+        staleRaster?.threeTexture?.dispose()
+        this.maskRasterCache.delete(layer.id)
+        return null
+      }
+      geometryEntry = { key: geometryKey, geometry }
+      this.maskGeometryCache.set(layer.id, geometryEntry)
+    }
+    const key = `${geometryKey}|${effect.feather}|${effect.inverted ? 1 : 0}|${effect.edgeFeather.join(',')}`
+    const cached = this.maskRasterCache.get(layer.id)
+    if (cached?.key === key) return cached
+    cached?.pixiTexture?.destroy(true)
+    cached?.threeTexture?.dispose()
+    const canvas = paintMaskCanvas(geometryEntry.geometry, effect, width, height, projectWidth)
+    if (!canvas) {
+      this.maskRasterCache.delete(layer.id)
+      return null
+    }
+    const entry: MaskRasterCacheEntry = { key, canvas }
+    this.maskRasterCache.set(layer.id, entry)
+    return entry
+  }
+
+  private renderPixiLayer(layer: EditorLayer, time: number, width: number, height: number, projectWidth: number, projectHeight: number, effects: GraphEffects, blendMode: NodeBlendMode, layerMap: Map<string, EditorLayer>) {
     if (!this.pixiRenderer || !this.threeRenderer) return
     const container = this.createPixiLayer(layer, time, width, height, projectWidth, projectHeight)
     if (!container) return
@@ -225,6 +300,18 @@ export class HybridWebGLRenderBackend implements RenderBackend {
     if (filters.length) container.filters = filters
     const stage = new Container()
     stage.addChild(container)
+    const maskLayer = effects.mask ? layerMap.get(effects.mask.layerId) : null
+    const maskRaster = effects.mask && maskLayer
+      ? this.maskRasterFor(maskLayer, effects.mask, time, width, height, projectWidth, projectHeight)
+      : null
+    if (maskRaster) {
+      maskRaster.pixiTexture ??= Texture.from(maskRaster.canvas)
+      const maskSprite = new Sprite(maskRaster.pixiTexture)
+      maskSprite.width = width
+      maskSprite.height = height
+      stage.addChild(maskSprite)
+      container.mask = maskSprite
+    }
     const vignette = vignetteOverlay(effects, width, height)
     if (vignette) stage.addChild(vignette)
     this.pixiRenderer.resetState()
@@ -302,39 +389,103 @@ export class HybridWebGLRenderBackend implements RenderBackend {
       container.scale.set(1, 1)
       graphics.rect(0, 0, width, height).fill({ color: '#02040b', alpha: .16 })
     } else if (layer.type === 'shape') {
-      const shapeWidth = 280 * scaleX
-      const shapeHeight = 180 * scaleY
+      const shapeWidth = (layer.shapeWidth ?? 280) * scaleX
+      const shapeHeight = (layer.shapeHeight ?? 180) * scaleY
       if (layer.shapeKind === 'ellipse') graphics.ellipse(0, 0, shapeWidth / 2, shapeHeight / 2)
-      else graphics.roundRect(-shapeWidth / 2, -shapeHeight / 2, shapeWidth, shapeHeight, 12)
-      graphics.fill(layer.color).stroke({ color: '#e2e7ff', alpha: .78, width: 2 })
+      else if (layer.shapeKind === 'path' && layer.shapePath?.points.length) {
+        const points = layer.shapePath.points
+        const first = points[0]!
+        graphics.moveTo(first.position[0] * scaleX, first.position[1] * scaleY)
+        for (let index = 1; index < points.length; index += 1) {
+          const previous = points[index - 1]!
+          const point = points[index]!
+          graphics.bezierCurveTo(
+            previous.handleOut[0] * scaleX, previous.handleOut[1] * scaleY,
+            point.handleIn[0] * scaleX, point.handleIn[1] * scaleY,
+            point.position[0] * scaleX, point.position[1] * scaleY,
+          )
+        }
+        if (layer.shapePath.closed && points.length > 2) {
+          const last = points.at(-1)!
+          graphics.bezierCurveTo(
+            last.handleOut[0] * scaleX, last.handleOut[1] * scaleY,
+            first.handleIn[0] * scaleX, first.handleIn[1] * scaleY,
+            first.position[0] * scaleX, first.position[1] * scaleY,
+          ).closePath()
+        }
+      } else graphics.roundRect(-shapeWidth / 2, -shapeHeight / 2, shapeWidth, shapeHeight, 12)
+      if (layer.shapeKind !== 'path' || layer.shapePath?.closed) graphics.fill(layer.color)
+      graphics.stroke({ color: '#e2e7ff', alpha: .78, width: 2 })
     }
     container.addChild(graphics)
     return container
   }
 
-  private renderThreeLayer(layer: EditorLayer, sceneDefinition: RenderFrameRequest['scenes3D'][number], time: number, width: number, height: number, effects: GraphEffects) {
+  private renderThreeLayer(
+    layer: EditorLayer,
+    sceneDefinition: RenderFrameRequest['scenes3D'][number],
+    time: number,
+    width: number,
+    height: number,
+    projectWidth: number,
+    projectHeight: number,
+    effects: GraphEffects,
+    layerMap: Map<string, EditorLayer>,
+  ) {
     if (!this.threeRenderer) return
     const runtime = this.runtimeRegistry.get(sceneDefinition, width, height, time)
     const cameraId = cameraIdAtTime(sceneDefinition, time)
     const camera = cameraId ? runtime.cameras.get(cameraId) : undefined
     if (!camera) return
-    // A 3D pass draws straight to the frame buffer. Opacity is applied to its materials, while
-    // frame-space effects such as vignette are composited immediately after the Three pass.
     const layerOpacity = (evaluateNumericProperty(layer.transform.opacity, time) / 100) * effects.opacity
-    runtime.root.traverse((object) => {
-      if (!(object instanceof THREE.Mesh)) return
-      const materials = Array.isArray(object.material) ? object.material : [object.material]
-      materials.forEach((material) => {
-        material.transparent = true
-        material.opacity *= layerOpacity
+
+    const maskLayer = effects.mask ? layerMap.get(effects.mask.layerId) : null
+    const maskRaster = effects.mask && maskLayer
+      ? this.maskRasterFor(maskLayer, effects.mask, time, width, height, projectWidth, projectHeight)
+      : null
+    if (maskRaster) {
+      this.threeLayerTarget ??= new THREE.WebGLRenderTarget(width, height, { depthBuffer: true, stencilBuffer: false })
+      if (this.threeLayerTarget.width !== width || this.threeLayerTarget.height !== height) this.threeLayerTarget.setSize(width, height)
+      this.threeLayerTarget.texture.colorSpace = THREE.SRGBColorSpace
+
+      this.threeRenderer.resetState()
+      this.threeRenderer.setRenderTarget(this.threeLayerTarget)
+      this.threeRenderer.setClearColor(0x000000, 0)
+      this.threeRenderer.clear(true, true, true)
+      this.threeRenderer.render(runtime.scene, camera)
+
+      maskRaster.threeTexture ??= new THREE.CanvasTexture(maskRaster.canvas)
+      maskRaster.threeTexture.colorSpace = THREE.NoColorSpace
+      maskRaster.threeTexture.minFilter = THREE.LinearFilter
+      maskRaster.threeTexture.magFilter = THREE.LinearFilter
+      this.maskCompositeMaterial.map = this.threeLayerTarget.texture
+      const enablesAlphaMap = !this.maskCompositeMaterial.alphaMap
+      this.maskCompositeMaterial.alphaMap = maskRaster.threeTexture
+      this.maskCompositeMaterial.opacity = layerOpacity
+      if (enablesAlphaMap) this.maskCompositeMaterial.needsUpdate = true
+
+      this.threeRenderer.setRenderTarget(null)
+      this.threeRenderer.autoClear = false
+      this.threeRenderer.clearDepth()
+      this.threeRenderer.render(this.maskCompositeScene, this.maskCompositeCamera)
+      this.pixiRenderer?.resetState()
+    } else {
+      // An unmasked 3D scene can still take the direct path and avoid allocating an intermediate pass.
+      runtime.root.traverse((object) => {
+        if (!(object instanceof THREE.Mesh)) return
+        const materials = Array.isArray(object.material) ? object.material : [object.material]
+        materials.forEach((material) => {
+          material.transparent = true
+          material.opacity *= layerOpacity
+        })
       })
-    })
-    this.threeRenderer.resetState()
-    this.threeRenderer.setRenderTarget(null)
-    this.threeRenderer.autoClear = false
-    this.threeRenderer.clearDepth()
-    this.threeRenderer.render(runtime.scene, camera)
-    this.pixiRenderer?.resetState()
+      this.threeRenderer.resetState()
+      this.threeRenderer.setRenderTarget(null)
+      this.threeRenderer.autoClear = false
+      this.threeRenderer.clearDepth()
+      this.threeRenderer.render(runtime.scene, camera)
+      this.pixiRenderer?.resetState()
+    }
     const vignette = vignetteOverlay(effects, width, height)
     if (vignette && this.pixiRenderer) {
       this.pixiRenderer.render({ container: vignette, clear: false })
@@ -369,6 +520,16 @@ export class HybridWebGLRenderBackend implements RenderBackend {
     this.canvas.removeEventListener('webglcontextlost', this.onContextLost)
     this.canvas.removeEventListener('webglcontextrestored', this.onContextRestored)
     this.runtimeRegistry.dispose()
+    this.threeLayerTarget?.dispose()
+    this.threeLayerTarget = null
+    this.maskCompositeQuad.geometry.dispose()
+    this.maskCompositeMaterial.dispose()
+    this.maskRasterCache.forEach((entry) => {
+      entry.pixiTexture?.destroy(true)
+      entry.threeTexture?.dispose()
+    })
+    this.maskRasterCache.clear()
+    this.maskGeometryCache.clear()
     this.sourceTexture?.destroy(true)
     this.sourceTexture = null
     this.sourceImage = null

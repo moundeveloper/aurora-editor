@@ -81,6 +81,7 @@ export function createDemo3DScene(): Aurora3DScene {
   const camera: AuroraCamera = {
     id: 'camera-main',
     name: 'Camera Main',
+    visible: true,
     projection: 'perspective',
     transform: makeTransform3D('camera-main', [0, 2.4, 7]),
     fov: numericProperty('camera-main-fov', 42),
@@ -92,6 +93,7 @@ export function createDemo3DScene(): Aurora3DScene {
   const ambient: AuroraLight = {
     id: 'light-ambient',
     name: 'Ambient Fill',
+    visible: true,
     type: 'ambient',
     color: '#b8c1ff',
     intensity: numericProperty('light-ambient-intensity', .7),
@@ -101,6 +103,7 @@ export function createDemo3DScene(): Aurora3DScene {
   const key: AuroraLight = {
     id: 'light-key',
     name: 'Key Light',
+    visible: true,
     type: 'directional',
     color: '#fff0d2',
     intensity: numericProperty('light-key-intensity', 3.2),
@@ -112,6 +115,7 @@ export function createDemo3DScene(): Aurora3DScene {
   const rim: AuroraLight = {
     id: 'light-rim',
     name: 'Rim Light',
+    visible: true,
     type: 'point',
     color: '#718cff',
     intensity: numericProperty('light-rim-intensity', 28),
@@ -146,6 +150,7 @@ export function createEmpty3DScene(name = '3D Scene'): Aurora3DScene {
   const camera: AuroraCamera = {
     id: cameraId,
     name: 'Camera 1',
+    visible: true,
     projection: 'perspective',
     transform: makeTransform3D(cameraId, [0, 2.4, 7]),
     fov: numericProperty(`${cameraId}-fov`, 42),
@@ -163,6 +168,7 @@ export function createEmpty3DScene(name = '3D Scene'): Aurora3DScene {
     lights: [{
       id: lightId,
       name: 'Ambient Fill',
+      visible: true,
       type: 'ambient',
       color: '#b8c1ff',
       intensity: numericProperty(`${lightId}-intensity`, .7),
@@ -187,6 +193,7 @@ export function create3DPath(index: number): Aurora3DPath {
   return {
     id,
     name: `Path ${index}`,
+    visible: true,
     color: '#7ee0c0',
     transform: makeTransform3D(id),
     closed: false,

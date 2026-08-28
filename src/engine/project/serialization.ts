@@ -5,7 +5,7 @@ import { makePathOffset, numericProperty } from '@/engine/scene3d/sceneFactory'
 import { createDemoNodeGraph, NODE_DEFINITIONS } from '@/engine/nodes/nodeGraph'
 import { normalizeCameraCuts } from '@/engine/scene3d/cameraCuts'
 
-export const CURRENT_PROJECT_VERSION = 8
+export const CURRENT_PROJECT_VERSION = 9
 
 export interface EditorStateFallback {
   project: EditorProject
@@ -35,6 +35,9 @@ function normalizeNodeGraph(nodes: unknown, connections: unknown, layers: Editor
   const restored = candidates
   restored.forEach((node) => {
     node.muted = Boolean(node.muted)
+    if (node.kind === 'mask') {
+      node.maskEdgeFeather = Array.from({ length: 32 }, (_, index) => Math.max(0, Math.min(1, node.maskEdgeFeather?.[index] ?? 1)))
+    }
     const definition = NODE_DEFINITIONS[node.kind]
     node.properties = Object.fromEntries(definition.properties.map((property) => [
       property.key,
@@ -63,10 +66,12 @@ function normalizeScene(scene: Aurora3DScene): Aurora3DScene {
   if (!scene.cameras.some((camera) => camera.id === scene.activeCameraId)) scene.activeCameraId = scene.cameraCuts[0]?.cameraId ?? scene.cameras[0]?.id ?? null
   if (!Array.isArray(scene.paths)) scene.paths = []
   scene.objects.forEach((object) => {
+    object.visible = object.visible !== false
     if (!Array.isArray(object.influences)) object.influences = []
     object.influences = object.influences.filter((influence) => influence?.type && influence.parameters)
   })
   scene.paths.forEach((path) => {
+    path.visible = path.visible !== false
     path.color ||= '#7ee0c0'
     path.closed = Boolean(path.closed)
     path.locked = Boolean(path.locked)
@@ -74,6 +79,7 @@ function normalizeScene(scene: Aurora3DScene): Aurora3DScene {
   })
   scene.paths = scene.paths.filter((path) => path.points.length >= 2)
   scene.cameras.forEach((camera) => {
+    camera.visible = camera.visible !== false
     const constraint = camera.pathConstraint
     if (!constraint) return
     if (!scene.paths.some((path) => path.id === constraint.pathId)) {
@@ -86,6 +92,7 @@ function normalizeScene(scene: Aurora3DScene): Aurora3DScene {
     constraint.offset ??= makePathOffset(camera.id)
     if (constraint.lookAtEntityId && !sceneHasEntity(scene, constraint.lookAtEntityId)) delete constraint.lookAtEntityId
   })
+  scene.lights.forEach((light) => { light.visible = light.visible !== false })
   return scene
 }
 

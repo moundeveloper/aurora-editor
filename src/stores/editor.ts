@@ -4,7 +4,7 @@ import type {
   AnimatableProperty, Aurora3DScene, AuroraCamera, AuroraInfluenceType, AuroraLight,
   AuroraPathOrientation, AuroraPathPointMode,
   AuroraCameraCut, EditorLayer, EditorNode, EditorNodeConnection, EditorNodeKind, EditorProject,
-  MediaAsset, SerializedEditorState, WorkspaceId,
+  MediaAsset, SerializedEditorState, ShapePathPoint, WorkspaceId,
 } from '@/models/editor'
 import { evaluateNumericProperty } from '@/engine/animation/evaluateProperty'
 import { ensureNumericKeyframe, setNumericPropertyAtTime, toggleNumericKeyframe } from '@/engine/animation/editNumericProperty'
@@ -12,7 +12,7 @@ import { deserializeEditorState, serializeEditorState } from '@/engine/project/s
 import { auroraProjectDatabase } from '@/engine/project/AuroraProjectDatabase'
 import { create3DPath, createCameraPathConstraint, createDemo3DScene, createEmpty3DScene, createPrimitiveObject, makeTransform3D, numericProperty } from '@/engine/scene3d/sceneFactory'
 import {
-  appendPathPoint, insertPathPoint, movePathHandle, movePathPoint, setPathPointMode,
+  appendPathPoint, insertPathPoint, movePathHandle, movePathPoint, prependPathPoint, setPathPointMode,
   type PathHandleKey, type PathVector,
 } from '@/engine/scene3d/pathEditing'
 import { createInfluence, influenceParameters } from '@/engine/scene3d/influences'
@@ -194,6 +194,62 @@ export const useEditorStore = defineStore('editor', () => {
     else layers.value = next
   }
 
+  function flattenLayers(list: EditorLayer[] = layers.value): EditorLayer[] {
+    return list.flatMap((layer) => [layer, ...(layer.children ? flattenLayers(layer.children) : [])])
+  }
+
+  function renameTimelineLayers(layerIds: string[], name: string) {
+    const nextName = name.trim()
+    if (!nextName) return false
+    const ids = new Set(layerIds)
+    const targets = flattenLayers().filter((layer) => ids.has(layer.id))
+    if (!targets.length) return false
+    targets.forEach((layer) => {
+      layer.name = nextName
+      if (layer.type === '3d-scene' && layer.sceneId) {
+        const scene = scenes3D.value.find((item) => item.id === layer.sceneId)
+        if (scene) scene.name = nextName
+      }
+    })
+    markChanged()
+    return true
+  }
+
+  function setTimelineLayersVisible(layerIds: string[], visible: boolean) {
+    const ids = new Set(layerIds)
+    const targets = flattenLayers().filter((layer) => ids.has(layer.id))
+    if (!targets.length) return false
+    targets.forEach((layer) => { layer.visible = visible })
+    markChanged()
+    return true
+  }
+
+  function deleteTimelineLayers(layerIds: string[]) {
+    const ids = new Set(layerIds)
+    const deleted = layerList().filter((layer) => ids.has(layer.id))
+    if (!deleted.length) return false
+    const deletedTree = flattenLayers(deleted)
+    const deletedIds = new Set(deletedTree.map((layer) => layer.id))
+    replaceLayerList(layerList().filter((layer) => !ids.has(layer.id)))
+    openClusterTabs.value = openClusterTabs.value.filter((id) => !deletedIds.has(id))
+    if (activeClusterId.value && deletedIds.has(activeClusterId.value)) activeClusterId.value = openClusterTabs.value.at(-1) ?? null
+    const remaining = flattenLayers()
+    const deletedSceneIds = new Set(deletedTree.flatMap((layer) => layer.type === '3d-scene' && layer.sceneId ? [layer.sceneId] : []))
+    scenes3D.value = scenes3D.value.filter((scene) => !deletedSceneIds.has(scene.id)
+      || remaining.some((layer) => layer.type === '3d-scene' && layer.sceneId === scene.id))
+    if (!remaining.some((layer) => layer.id === selectedLayerId.value)) {
+      selectedLayerId.value = layerList().find((layer) => !layer.isPlaceholder)?.id ?? activeClusterId.value ?? ''
+      selectedKeyframeId.value = null
+    }
+    if (!scenes3D.value.some((scene) => scene.id === selectedSceneId.value)) {
+      selectedSceneId.value = scenes3D.value[0]?.id ?? ''
+      const scene = scenes3D.value[0]
+      selectedSceneEntityId.value = scene?.objects[0]?.id ?? scene?.cameras[0]?.id ?? scene?.lights[0]?.id ?? scene?.paths[0]?.id ?? ''
+    }
+    markChanged()
+    return true
+  }
+
   const selectedLayer = computed(() => findLayerDeep(layers.value, selectedLayerId.value) ?? timelineLayers.value[0] ?? layers.value[0])
   const selectedScene = computed(() => scenes3D.value.find((scene) => scene.id === selectedSceneId.value) ?? scenes3D.value[0])
   const selectedSceneEntity = computed(() => {
@@ -361,13 +417,50 @@ export const useEditorStore = defineStore('editor', () => {
     return layer
   }
 
-  function addGeneratedLayer(type: 'text' | 'shape', x: number, y: number, shapeKind: 'rectangle' | 'ellipse' = 'rectangle') {
+  /** Keep newly authored Motion layers visible when the node graph is the active render path. */
+  function attachLayerToCompositeGraph(layer: EditorLayer) {
+    if (layer.type === 'audio' || nodes.value.some((node) => node.sourceId === layer.id)) return
+    const output = nodes.value.find((node) => node.kind === 'output')
+    const outputSocket = output?.inputs.find((socket) => socket.type === 'image')
+    if (!output || !outputSocket) return
+
+    const sourceKind: EditorNodeKind = layer.type === '3d-scene' ? 'scene3d' : layer.type === 'text' ? 'text' : 'image'
+    const inputNodeXs = nodes.value.filter((node) => NODE_DEFINITIONS[node.kind].category === 'Input').map((node) => node.x)
+    const source = createNode(sourceKind, Math.min(40, ...inputNodeXs), Math.max(30, ...nodes.value.map((node) => node.y + 90)))
+    source.sourceId = layer.id
+    source.title = layer.name
+    const incoming = nodeConnections.value.find((connection) => connection.toNodeId === output.id && connection.toPortId === outputSocket.id)
+
+    if (!incoming) {
+      nodes.value.push(source)
+      nodeConnections.value.push({
+        id: crypto.randomUUID(), fromNodeId: source.id, fromPortId: source.outputs[0]!.id,
+        toNodeId: output.id, toPortId: outputSocket.id,
+      })
+      return
+    }
+
+    const oldOutputX = output.x
+    output.x += 190
+    const mix = createNode('mix', oldOutputX, output.y)
+    nodes.value.push(source, mix)
+    nodeConnections.value = [
+      ...nodeConnections.value.filter((connection) => connection.id !== incoming.id),
+      { id: crypto.randomUUID(), fromNodeId: incoming.fromNodeId, fromPortId: incoming.fromPortId, toNodeId: mix.id, toPortId: mix.inputs[1]!.id },
+      { id: crypto.randomUUID(), fromNodeId: source.id, fromPortId: source.outputs[0]!.id, toNodeId: mix.id, toPortId: mix.inputs[2]!.id },
+      { id: crypto.randomUUID(), fromNodeId: mix.id, fromPortId: mix.outputs[0]!.id, toNodeId: output.id, toPortId: outputSocket.id },
+    ]
+  }
+
+  function addGeneratedLayer(type: 'text' | 'shape', x: number, y: number, shapeKind: 'rectangle' | 'ellipse' = 'rectangle', shapeSize?: { width: number; height: number }) {
     const id = crypto.randomUUID()
     const layer: EditorLayer = {
       id,
       name: type === 'text' ? 'New Text' : shapeKind === 'ellipse' ? 'Ellipse' : 'Rectangle',
       type,
       shapeKind: type === 'shape' ? shapeKind : undefined,
+      shapeWidth: type === 'shape' ? Math.max(1, shapeSize?.width ?? 280) : undefined,
+      shapeHeight: type === 'shape' ? Math.max(1, shapeSize?.height ?? 180) : undefined,
       textContent: type === 'text' ? 'New Text' : undefined,
       start: currentTime.value,
       duration: Math.max(1 / project.value.frameRate, project.value.duration - currentTime.value),
@@ -384,6 +477,55 @@ export const useEditorStore = defineStore('editor', () => {
     layerList().splice(0, 0, layer)
     selectedLayerId.value = layer.id
     selectedKeyframeId.value = null
+    attachLayerToCompositeGraph(layer)
+    markChanged()
+    return layer
+  }
+
+  function addPathLayer(points: ShapePathPoint[], closed: boolean) {
+    if (points.length < 2) return null
+    const xs = points.flatMap((point) => [point.position[0], point.handleIn[0], point.handleOut[0]])
+    const ys = points.flatMap((point) => [point.position[1], point.handleIn[1], point.handleOut[1]])
+    const minX = Math.min(...xs)
+    const maxX = Math.max(...xs)
+    const minY = Math.min(...ys)
+    const maxY = Math.max(...ys)
+    const centerX = (minX + maxX) / 2
+    const centerY = (minY + maxY) / 2
+    const localize = (value: [number, number]): [number, number] => [value[0] - centerX, value[1] - centerY]
+    const id = crypto.randomUUID()
+    const layer: EditorLayer = {
+      id,
+      name: 'Path',
+      type: 'shape',
+      shapeKind: 'path',
+      shapeWidth: Math.max(1, maxX - minX),
+      shapeHeight: Math.max(1, maxY - minY),
+      shapePath: {
+        closed,
+        points: points.map((point) => ({
+          ...point,
+          position: localize(point.position),
+          handleIn: localize(point.handleIn),
+          handleOut: localize(point.handleOut),
+        })),
+      },
+      start: currentTime.value,
+      duration: Math.max(1 / project.value.frameRate, project.value.duration - currentTime.value),
+      color: '#8c9bff',
+      visible: true,
+      locked: false,
+      muted: false,
+      expanded: false,
+      transform: makeTransform(id),
+      effects: [],
+    }
+    layer.transform.x.value = centerX
+    layer.transform.y.value = centerY
+    layerList().splice(0, 0, layer)
+    selectedLayerId.value = layer.id
+    selectedKeyframeId.value = null
+    attachLayerToCompositeGraph(layer)
     markChanged()
     return layer
   }
@@ -855,6 +997,7 @@ export const useEditorStore = defineStore('editor', () => {
     const light: AuroraLight = {
       id,
       name: `${type[0]?.toUpperCase()}${type.slice(1)} Light`,
+      visible: true,
       type,
       color: type === 'ambient' ? '#c5ccff' : '#ffffff',
       intensity: numericProperty(`${id}-intensity`, type === 'point' ? 18 : 1.5),
@@ -874,6 +1017,7 @@ export const useEditorStore = defineStore('editor', () => {
     const camera: AuroraCamera = {
       id,
       name: `Camera ${scene.cameras.length + 1}`,
+      visible: true,
       projection: 'perspective',
       transform: makeTransform3D(id, [0, 2.4, 7]),
       fov: numericProperty(`${id}-fov`, 45),
@@ -1031,6 +1175,57 @@ export const useEditorStore = defineStore('editor', () => {
     return path
   }
 
+  function rename3DEntity(entityId: string, name: string) {
+    const scene = selectedScene.value
+    const nextName = name.trim()
+    if (!scene || !nextName) return false
+    const entity = [...scene.objects, ...scene.cameras, ...scene.lights, ...(scene.paths ?? [])].find((item) => item.id === entityId)
+    if (!entity) return false
+    entity.name = nextName
+    markSceneChanged(scene)
+    return true
+  }
+
+  function set3DEntityVisible(entityId: string, visible: boolean) {
+    const scene = selectedScene.value
+    if (!scene) return false
+    const entity = [...scene.objects, ...scene.cameras, ...scene.lights, ...(scene.paths ?? [])].find((item) => item.id === entityId)
+    if (!entity) return false
+    entity.visible = visible
+    markSceneChanged(scene)
+    return true
+  }
+
+  function delete3DEntity(entityId: string) {
+    const scene = selectedScene.value
+    if (!scene) return false
+    if (scene.paths.some((path) => path.id === entityId)) {
+      delete3DPath(entityId)
+      return true
+    }
+    const objectIndex = scene.objects.findIndex((item) => item.id === entityId)
+    const cameraIndex = scene.cameras.findIndex((item) => item.id === entityId)
+    const lightIndex = scene.lights.findIndex((item) => item.id === entityId)
+    if (objectIndex >= 0) {
+      scene.objects.splice(objectIndex, 1)
+      scene.objects.forEach((object) => { if (object.parentId === entityId) delete object.parentId })
+      scene.cameras.forEach((camera) => {
+        if (camera.pathConstraint?.lookAtEntityId === entityId) delete camera.pathConstraint.lookAtEntityId
+      })
+    } else if (cameraIndex >= 0) {
+      if (scene.cameras.length <= 1) return false
+      scene.cameras.splice(cameraIndex, 1)
+      scene.cameraCuts = normalizeCameraCuts(scene, scene.cameraCuts.filter((cut) => cut.cameraId !== entityId))
+      if (scene.activeCameraId === entityId) scene.activeCameraId = scene.cameraCuts[0]?.cameraId ?? scene.cameras[0]?.id ?? null
+    } else if (lightIndex >= 0) scene.lights.splice(lightIndex, 1)
+    else return false
+    if (selectedSceneEntityId.value === entityId) {
+      selectedSceneEntityId.value = scene.objects[0]?.id ?? scene.cameras[0]?.id ?? scene.lights[0]?.id ?? scene.paths[0]?.id ?? ''
+    }
+    markSceneChanged(scene)
+    return true
+  }
+
   function delete3DPath(pathId: string) {
     const scene = selectedScene.value
     if (!scene?.paths?.some((path) => path.id === pathId)) return
@@ -1073,6 +1268,14 @@ export const useEditorStore = defineStore('editor', () => {
     const index = afterPointId ? path.points.findIndex((point) => point.id === afterPointId) : path.points.length - 1
     const hasFollowingSegment = index >= 0 && (path.closed || index < path.points.length - 1)
     const point = hasFollowingSegment ? insertPathPoint(path, index) : appendPathPoint(path)
+    if (point) markSceneChanged()
+    return point
+  }
+
+  function add3DPathEndpoint(pathId: string, side: 'start' | 'end') {
+    const path = findScenePath(pathId)
+    if (!path || path.locked || path.closed) return null
+    const point = side === 'start' ? prependPathPoint(path) : appendPathPoint(path)
     if (point) markSceneChanged()
     return point
   }
@@ -1381,6 +1584,13 @@ export const useEditorStore = defineStore('editor', () => {
     markChanged()
   }
 
+  function setNodeMaskEdgeFeather(nodeId: string, values: number[]) {
+    const node = nodes.value.find((item) => item.id === nodeId && item.kind === 'mask')
+    if (!node) return
+    node.maskEdgeFeather = values.map((value) => Math.max(0, Math.min(1, value)))
+    markChanged()
+  }
+
   function toggleNodeMuted(nodeId: string) {
     const node = nodes.value.find((item) => item.id === nodeId)
     if (!node) return
@@ -1408,20 +1618,22 @@ export const useEditorStore = defineStore('editor', () => {
     selectedNodeId, selectedSceneId, selectedSceneEntityId, zoom, saveStatus, exportProgress, assets, layers, scenes3D,
     nodes, nodeConnections, selectedConnectionId, renderRootNodeId,
     selectNode, selectNodeConnection, addNode, moveNode, deleteNode, connectNodes, disconnectNodes,
-    setNodeSource, setNodeSocketValue, setNodeProperty, toggleNodeMuted, setRenderRootNode,
+    setNodeSource, setNodeSocketValue, setNodeProperty, setNodeMaskEdgeFeather, toggleNodeMuted, setRenderRootNode,
     selectedLayer, selectedScene, selectedSceneEntity,
     togglePlayback, setTime, stepFrame, setProjectDuration, addKeyframe, setLayerValue, addFiles,
-    addAssetToTimeline, addGeneratedLayer, addTimelineLayer, reorderTrack, moveSegmentToTrack, moveSegmentToNewTrack, addEmptyTrack,
+    addAssetToTimeline, addGeneratedLayer, addPathLayer, addTimelineLayer, reorderTrack, moveSegmentToTrack, moveSegmentToNewTrack, addEmptyTrack,
+    renameTimelineLayers, setTimelineLayersVisible, deleteTimelineLayers,
     createCluster, releaseCluster, createEmptyCluster,
     openClusterTabs, activeClusterId, activeCluster, timelineLayers, clusterTabs,
     enterCluster, activateTimelineTab, closeClusterTab, fitClusterToChildren, publishClusterAsset, ensureClusterAssets,
     splitLayerAt, splitSelectedLayer, markChanged, saveProjectNow, flushProjectSave, initializePersistence, setWorkspace, startExport,
     selectSceneEntity, select3DLayer, markSceneChanged, add3DPrimitive, add3DLight, add3DCamera, set3DEntityTransform,
+    rename3DEntity, set3DEntityVisible, delete3DEntity,
     update3DEntityTransform, set3DObjectMaterial, set3DLightIntensity, set3DCameraFov,
     toggle3DKeyframe, keySelected3DTransform, move3DKeyframe, delete3DKeyframe, setActive3DCamera,
     add3DCameraCut, set3DCameraCutCamera, move3DCameraCut, delete3DCameraCut,
     add3DPath, delete3DPath, findScenePath, move3DPathPoint, set3DPathPointAxis, set3DPathPointMode,
-    add3DPathPoint, delete3DPathPoint, toggle3DPathClosed, set3DPathColor, set3DPathLocked,
+    add3DPathPoint, add3DPathEndpoint, delete3DPathPoint, toggle3DPathClosed, set3DPathColor, set3DPathLocked,
     setCameraPathConstraint, setCameraPathOrientation, setCameraPathTarget, setCameraPathProgress, setCameraPathBank,
     setCameraPathOffset, resetCameraPathOffset,
     toggleLayerPropertyKeyframe, toggle3DPropertyKeyframe, stepToAdjacentKeyframe, hasAdjacentKeyframe, isKeyedAtPlayhead,

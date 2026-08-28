@@ -41,4 +41,20 @@ describe('3D layer selection', () => {
 
     expect(store.selectedScene?.id).toBe(scene.id)
   })
+
+  it('renames, hides, and deletes scene entities without removing the final camera', () => {
+    const store = useEditorStore()
+    const scene = store.selectedScene!
+    const object = scene.objects[0]!
+    const onlyCamera = scene.cameras[0]!
+
+    expect(store.rename3DEntity(object.id, 'Renamed Object')).toBe(true)
+    expect(object.name).toBe('Renamed Object')
+    expect(store.set3DEntityVisible(object.id, false)).toBe(true)
+    expect(object.visible).toBe(false)
+    expect(store.delete3DEntity(object.id)).toBe(true)
+    expect(scene.objects.some((item) => item.id === object.id)).toBe(false)
+    expect(store.delete3DEntity(onlyCamera.id)).toBe(false)
+    expect(scene.cameras).toHaveLength(1)
+  })
 })

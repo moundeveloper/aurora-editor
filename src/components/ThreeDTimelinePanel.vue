@@ -506,4 +506,5 @@ watch(selectedKeyframeId, (keyframeId) => {
 .camera-boundary { position: absolute; z-index: 5; top: 1px; bottom: 1px; width: 7px; border-left: 1px solid #c0c8fa; transform: translateX(-3px); cursor: col-resize; }
 .camera-boundary::after { position: absolute; top: 1px; left: -3px; width: 6px; height: 4px; background: #c0c8fa; clip-path: polygon(0 0, 100% 0, 50% 100%); content: ''; }
 .empty-timeline { inset: 55px 0 0 220px; }
+.playhead { z-index: 13; top: 2px; background: #e4b767; }.playhead span { top: -2px; left: -6px; width: 13px; height: 11px; background: #e4b767; clip-path: polygon(0 0, 100% 0, 100% 60%, 50% 100%, 0 60%); }.playhead i { top: 0; left: -2px; width: 5px; background: rgb(228 183 103 / .06); }
 </style>

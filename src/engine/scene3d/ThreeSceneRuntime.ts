@@ -204,6 +204,7 @@ export class ThreeSceneRuntimeRegistry {
     definition.cameras.forEach((item) => {
       const camera = runtime.cameras.get(item.id)
       if (!camera) return
+      camera.visible = item.visible
       applyTransform(camera, item.transform, time)
       applyCameraPathConstraint(runtime, camera, item, definition, time)
       if (camera instanceof THREE.PerspectiveCamera) {
@@ -226,6 +227,7 @@ export class ThreeSceneRuntimeRegistry {
     definition.lights.forEach((item) => {
       const light = runtime.lights.get(item.id)
       if (!light) return
+      light.visible = item.visible
       light.color.set(item.color)
       light.intensity = evaluateNumericProperty(item.intensity, time)
       applyTransform(light, item.transform, time)

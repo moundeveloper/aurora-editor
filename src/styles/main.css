@@ -42,12 +42,14 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--focus); out
 ::-webkit-scrollbar-track { background: #101217; }
 ::-webkit-scrollbar-thumb { background: #353943; border: 2px solid #101217; border-radius: 5px; }
 ::-webkit-scrollbar-thumb:hover { background: #464b57; }
+::-webkit-scrollbar-corner { background: #101217; }
 
 .app-shell { display: grid; width: 100%; height: 100%; min-width: 980px; grid-template-rows: auto auto minmax(0, 1fr) 22px; overflow: hidden; background: var(--bg-app); }
 .workspace-shell { display: grid; min-height: 0; grid-template-rows: minmax(0, 1fr) 4px var(--bottom-height); overflow: hidden; }
 .upper-workspace { display: grid; min-height: 0; grid-template-columns: var(--left-width) 4px minmax(360px, 1fr) 4px var(--right-width); overflow: hidden; }
 .left-pane, .center-pane, .right-pane, .bottom-pane { min-width: 0; min-height: 0; overflow: hidden; }
 .right-pane.preview-right-pane { display: grid; grid-template-rows: var(--node-preview-height) minmax(0, 1fr); }
+.right-pane.preview-right-pane.mask-editor-open { grid-template-rows: var(--node-preview-height) 220px minmax(0, 1fr); }
 .node-inspector-pane { min-height: 0; overflow: hidden; border-top: 1px solid #30343c; }
 .left-pane { border-right: 1px solid var(--border-subtle); }.right-pane { border-left: 1px solid var(--border-subtle); }.bottom-pane { border-top: 1px solid #30343c; }
 .pane-resizer { position: relative; z-index: 30; background: #0c0e12; transition: background .12s ease; }.pane-resizer:hover, body.is-resizing .pane-resizer { background: #525d92; }.pane-resizer.vertical { width: 4px; cursor: col-resize; }.pane-resizer.horizontal { height: 4px; cursor: row-resize; }.pane-resizer::after { position: absolute; content: ''; }.pane-resizer.vertical::after { top: 0; bottom: 0; left: -2px; width: 8px; }.pane-resizer.horizontal::after { top: -2px; right: 0; bottom: -2px; left: 0; }

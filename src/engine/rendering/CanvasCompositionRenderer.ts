@@ -85,15 +85,37 @@ export class CanvasCompositionRenderer {
         ctx.shadowBlur = 16
         ctx.fillText(layer.textContent ?? layer.name, 0, 0)
       } else if (layer.type === 'shape') {
-        const shapeWidth = 280 * scaleX
-        const shapeHeight = 180 * scaleY
+        const shapeWidth = (layer.shapeWidth ?? 280) * scaleX
+        const shapeHeight = (layer.shapeHeight ?? 180) * scaleY
         ctx.fillStyle = layer.color
         ctx.strokeStyle = 'rgba(226, 231, 255, .78)'
         ctx.lineWidth = 2
         ctx.beginPath()
         if (layer.shapeKind === 'ellipse') ctx.ellipse(0, 0, shapeWidth / 2, shapeHeight / 2, 0, 0, Math.PI * 2)
-        else ctx.roundRect(-shapeWidth / 2, -shapeHeight / 2, shapeWidth, shapeHeight, 12)
-        ctx.fill()
+        else if (layer.shapeKind === 'path' && layer.shapePath?.points.length) {
+          const points = layer.shapePath.points
+          const first = points[0]!
+          ctx.moveTo(first.position[0] * scaleX, first.position[1] * scaleY)
+          for (let index = 1; index < points.length; index += 1) {
+            const previous = points[index - 1]!
+            const point = points[index]!
+            ctx.bezierCurveTo(
+              previous.handleOut[0] * scaleX, previous.handleOut[1] * scaleY,
+              point.handleIn[0] * scaleX, point.handleIn[1] * scaleY,
+              point.position[0] * scaleX, point.position[1] * scaleY,
+            )
+          }
+          if (layer.shapePath.closed && points.length > 2) {
+            const last = points.at(-1)!
+            ctx.bezierCurveTo(
+              last.handleOut[0] * scaleX, last.handleOut[1] * scaleY,
+              first.handleIn[0] * scaleX, first.handleIn[1] * scaleY,
+              first.position[0] * scaleX, first.position[1] * scaleY,
+            )
+            ctx.closePath()
+          }
+        } else ctx.roundRect(-shapeWidth / 2, -shapeHeight / 2, shapeWidth, shapeHeight, 12)
+        if (layer.shapeKind !== 'path' || layer.shapePath?.closed) ctx.fill()
         ctx.stroke()
       } else if (layer.type === 'image' && this.ready) {
         const imageSize = 260 * Math.min(scaleX, scaleY)

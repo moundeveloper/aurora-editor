@@ -84,6 +84,7 @@ export interface Aurora3DObject {
 export interface AuroraCamera {
   id: string
   name: string
+  visible: boolean
   projection: 'perspective' | 'orthographic'
   transform: Transform3D
   fov: AnimatableProperty<number>
@@ -112,6 +113,7 @@ export interface Aurora3DPathPoint {
 export interface Aurora3DPath {
   id: string
   name: string
+  visible: boolean
   color: string
   transform: Transform3D
   points: Aurora3DPathPoint[]
@@ -134,6 +136,7 @@ export interface AuroraCameraPathConstraint {
 export interface AuroraLight {
   id: string
   name: string
+  visible: boolean
   type: 'ambient' | 'directional' | 'point'
   color: string
   intensity: AnimatableProperty<number>
@@ -163,6 +166,18 @@ export interface Aurora3DScene {
   revision: number
 }
 
+export interface ShapePathPoint {
+  id: string
+  position: [number, number]
+  handleIn: [number, number]
+  handleOut: [number, number]
+}
+
+export interface ShapePath {
+  closed: boolean
+  points: ShapePathPoint[]
+}
+
 export interface EditorLayer {
   id: string
   trackId?: string
@@ -171,7 +186,10 @@ export interface EditorLayer {
   start: number
   duration: number
   sourceOffset?: number
-  shapeKind?: 'rectangle' | 'ellipse'
+  shapeKind?: 'rectangle' | 'ellipse' | 'path'
+  shapeWidth?: number
+  shapeHeight?: number
+  shapePath?: ShapePath
   textContent?: string
   sceneId?: string
   /** Library entry this cluster publishes itself to, kept in step as the cluster is edited. */
@@ -204,7 +222,7 @@ export type EditorNodeKind =
   | 'translate' | 'rotate' | 'scale'
   | 'blur' | 'glow' | 'vignette'
   | 'invert' | 'brightnessContrast' | 'colorMatrix' | 'hueSaturation' | 'rgbToBw'
-  | 'mix' | 'stack' | 'math'
+  | 'mix' | 'stack' | 'mask' | 'math'
   | 'output' | 'viewer'
 
 /** Sockets are typed like Blender's: an image stream, or a single number. */
@@ -231,6 +249,8 @@ export interface EditorNode {
   sourceId?: string
   /** Enum choices shown as dropdowns on the node body, such as a blend mode. */
   properties: Record<string, string>
+  /** Perimeter samples painted by the mask edge brush: 0 is hard, 1 receives the node feather. */
+  maskEdgeFeather?: number[]
   inputs: EditorNodeSocket[]
   outputs: EditorNodeSocket[]
 }

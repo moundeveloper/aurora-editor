@@ -230,6 +230,31 @@ describe('node graph', () => {
     expect(muted[0]!.effects.blur).toBe(0)
   })
 
+  it('uses a shape branch as a mask without rendering that branch', () => {
+    const content = createNode('image', 0, 0, 'content')
+    const shape = createNode('image', 0, 0, 'shape')
+    const mask = createNode('mask', 0, 0, 'mask')
+    const output = createNode('output', 0, 0, 'out')
+    content.sourceId = 'layer-video'
+    shape.sourceId = 'layer-title'
+    mask.inputs[2]!.value = 36
+    mask.properties.invert = 'outside'
+    mask.maskEdgeFeather = Array.from({ length: 32 }, (_, index) => index < 8 ? 0 : 1)
+    const nodes = [content, shape, mask, output]
+    const connections = [
+      link(content, mask, 0, 'content-mask'),
+      link(shape, mask, 1, 'shape-mask'),
+      link(mask, output, 0, 'mask-output'),
+    ]
+
+    const passes = evaluateNodeGraph(nodes, connections)!
+    expect(passes).toHaveLength(1)
+    expect(passes[0]!.layerId).toBe('layer-video')
+    expect(passes[0]!.effects.mask).toEqual({
+      layerId: 'layer-title', feather: 36, inverted: true, edgeFeather: mask.maskEdgeFeather,
+    })
+  })
+
   it('keeps one free Stack input as links arrive and go', () => {
     const stack = createNode('stack', 0, 0, 'stack')
     const source = createNode('image', 0, 0, 'source')

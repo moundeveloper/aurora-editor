@@ -2,14 +2,15 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { storeToRefs } from 'pinia'
 import {
-  AudioLines, Box, ChevronDown, ChevronRight, Circle, CircleDot, Eye, Film, FolderPlus, Gauge, GripVertical, Image as ImageIcon, KeyRound,
+  AudioLines, Box, ChevronDown, ChevronRight, Circle, CircleDot, Eye, EyeOff, Film, FolderPlus, Gauge, GripVertical, Image as ImageIcon, KeyRound,
   Link2, Lock, Magnet, Minus, MousePointer2, Plus, Scissors, Search,
-  SlidersHorizontal, Sparkles, SquareStack, Type as TypeIcon, Unlock, Video, Volume2, VolumeX, X,
+  Pencil, SlidersHorizontal, Sparkles, SquareStack, Trash2, Type as TypeIcon, Unlock, Video, Volume2, VolumeX, X,
 } from '@lucide/vue'
 import { useEditorStore, type TimelineLayerPreset } from '@/stores/editor'
 import type { EditorLayer, Keyframe } from '@/models/editor'
 import IconButton from './common/IconButton.vue'
 import CurveEditor from './CurveEditor.vue'
+import MDialog from './common/MDialog.vue'
 
 const store = useEditorStore()
 const {
@@ -38,6 +39,9 @@ const addLayerMenuOpen = ref(false)
 const addLayerTrigger = ref<HTMLElement>()
 const addLayerMenuStyle = ref<Record<string, string>>({ top: '29px' })
 const layerMarqueeRect = ref<{ left: number; top: number; width: number; height: number } | null>(null)
+const trackContextMenu = ref<{ trackId: string; layerIds: string[]; x: number; y: number } | null>(null)
+const trackDialog = ref<{ mode: 'rename' | 'delete'; layerIds: string[]; name: string; clipCount: number } | null>(null)
+const trackRenameValue = ref('')
 const tabs = ['Timeline', 'Graph Editor', 'Audio Mixer', 'Scopes']
 
 const layerPresets = [
@@ -316,6 +320,57 @@ function toggleTrackMuted(track: TimelineTrack, event: MouseEvent) {
   event.stopPropagation()
   const muted = !trackDisplayLayer(track).muted
   track.segments.forEach((segment) => { segment.muted = muted })
+}
+
+function contextTrack() {
+  const menu = trackContextMenu.value
+  return menu ? timelineTracks.value.find((track) => track.id === menu.trackId) ?? null : null
+}
+
+function openTrackContextMenu(event: MouseEvent, track: TimelineTrack) {
+  event.preventDefault()
+  selectTrack(track, event)
+  trackContextMenu.value = {
+    trackId: track.id,
+    layerIds: track.segments.map((segment) => segment.id),
+    x: Math.min(event.clientX, window.innerWidth - 174),
+    y: Math.min(event.clientY, window.innerHeight - 96),
+  }
+}
+
+function renameContextTrack() {
+  const track = contextTrack()
+  const menu = trackContextMenu.value
+  if (!track || !menu) return
+  const name = trackDisplayLayer(track).name
+  trackRenameValue.value = name
+  trackDialog.value = { mode: 'rename', layerIds: menu.layerIds, name, clipCount: track.segments.length }
+  trackContextMenu.value = null
+}
+
+function toggleContextTrackVisible() {
+  const track = contextTrack()
+  const menu = trackContextMenu.value
+  if (!track || !menu) return
+  store.setTimelineLayersVisible(menu.layerIds, !track.segments.every((segment) => segment.visible))
+  trackContextMenu.value = null
+}
+
+function deleteContextTrack() {
+  const track = contextTrack()
+  const menu = trackContextMenu.value
+  if (!track || !menu) return
+  const label = trackDisplayLayer(track).name
+  trackDialog.value = { mode: 'delete', layerIds: menu.layerIds, name: label, clipCount: track.segments.length }
+  trackContextMenu.value = null
+}
+
+function confirmTrackDialog() {
+  const target = trackDialog.value
+  if (!target) return
+  if (target.mode === 'rename') store.renameTimelineLayers(target.layerIds, trackRenameValue.value)
+  else store.deleteTimelineLayers(target.layerIds)
+  trackDialog.value = null
 }
 
 function trackLabel(track: TimelineTrack, index: number) {
@@ -771,6 +826,7 @@ function endPointerInteraction() {
 function onKeyDown(event: KeyboardEvent) {
   if (event.key === 'Escape') {
     addLayerMenuOpen.value = false
+    trackContextMenu.value = null
     if (isCutMode.value) {
       isCutMode.value = false
       cutGhost.value.visible = false
@@ -780,6 +836,7 @@ function onKeyDown(event: KeyboardEvent) {
 
 function onWindowPointerDown(event: PointerEvent) {
   if (!(event.target as Element | null)?.closest('.add-layer-control')) addLayerMenuOpen.value = false
+  if (!(event.target as Element | null)?.closest('.timeline-context-menu')) trackContextMenu.value = null
 }
 
 async function setZoom(nextZoom: number, anchorClientX?: number) {
@@ -965,6 +1022,7 @@ onBeforeUnmount(() => {
               :data-track-id="track.id"
               :data-track-label="trackLabel(track, index)"
               @click="selectTrack(track, $event)"
+              @contextmenu="openTrackContextMenu($event, track)"
               @dragover.prevent.stop="updateTrackDrop($event, track)"
               @drop.stop="dropTrack($event, track)"
             >
@@ -976,7 +1034,7 @@ onBeforeUnmount(() => {
                 <strong :title="trackDisplayLayer(track).name">{{ trackDisplayLayer(track).name }}</strong>
                 <small v-if="trackDisplayLayer(track).type === 'cluster'" class="cluster-count">{{ trackDisplayLayer(track).children?.length ?? 0 }} items</small>
                 <small v-if="track.segments.length > 1" class="segment-count">{{ track.segments.length }}</small>
-                <button type="button" :class="{ off: !trackDisplayLayer(track).visible }" title="Toggle track visibility" @click="toggleTrackVisible(track, $event)"><Eye :size="10" /></button>
+                <button type="button" :class="{ off: !trackDisplayLayer(track).visible }" :title="trackDisplayLayer(track).visible ? 'Hide timeline layer' : 'Show timeline layer'" @click="toggleTrackVisible(track, $event)"><Eye v-if="trackDisplayLayer(track).visible" :size="10" /><EyeOff v-else :size="10" /></button>
                 <button type="button" :class="{ active: trackDisplayLayer(track).locked }" title="Toggle track lock" @click="toggleTrackLock(track, $event)"><Lock v-if="trackDisplayLayer(track).locked" :size="10" /><Unlock v-else :size="10" /></button>
                 <button type="button" :class="{ active: trackDisplayLayer(track).muted }" title="Mute track" @click="toggleTrackMuted(track, $event)"><VolumeX :size="10" /></button>
               </div>
@@ -1035,6 +1093,27 @@ onBeforeUnmount(() => {
           <small>{{ cutGhost.time.toFixed(2) }}s</small>
         </div>
       </div>
+      <Teleport to="body">
+        <div v-if="trackContextMenu" class="timeline-context-menu" :style="{ left: `${trackContextMenu.x}px`, top: `${trackContextMenu.y}px` }" role="menu" @contextmenu.prevent>
+          <button type="button" role="menuitem" @click="renameContextTrack"><Pencil :size="11" /> Rename</button>
+          <button type="button" role="menuitem" @click="toggleContextTrackVisible"><EyeOff v-if="contextTrack()?.segments.every((segment) => segment.visible)" :size="11" /><Eye v-else :size="11" /> {{ contextTrack()?.segments.every((segment) => segment.visible) ? 'Hide' : 'Show' }}</button>
+          <span />
+          <button type="button" class="danger" role="menuitem" @click="deleteContextTrack"><Trash2 :size="11" /> Delete</button>
+        </div>
+      </Teleport>
+      <MDialog
+        :open="Boolean(trackDialog)"
+        :title="trackDialog?.mode === 'rename' ? 'Rename timeline layer' : 'Delete timeline layer'"
+        :description="trackDialog?.mode === 'delete' && trackDialog.clipCount > 1 ? `This removes “${trackDialog.name}” and all ${trackDialog.clipCount} clips on its track.` : trackDialog?.mode === 'delete' ? `This removes “${trackDialog.name}” from the timeline.` : 'The new name is applied to every clip on this track.'"
+        :confirm-label="trackDialog?.mode === 'delete' ? 'Delete' : 'Rename'"
+        :danger="trackDialog?.mode === 'delete'"
+        :confirm-disabled="trackDialog?.mode === 'rename' && !trackRenameValue.trim()"
+        @close="trackDialog = null"
+        @confirm="confirmTrackDialog"
+      >
+        <input v-if="trackDialog?.mode === 'rename'" v-model="trackRenameValue" autofocus aria-label="New layer name" @focus="($event.target as HTMLInputElement).select()" />
+        <p v-else class="dialog-warning">This action cannot be undone.</p>
+      </MDialog>
     </template>
 
     <CurveEditor v-else-if="activeBottomTab === 'Graph Editor'" />
@@ -1044,6 +1123,12 @@ onBeforeUnmount(() => {
 
 <style scoped>
 .timeline-panel { display: flex; height: 100%; min-height: 0; flex-direction: column; overflow: hidden; background: #101217; }.timeline-tabbar { display: flex; height: 29px; flex: 0 0 auto; align-items: flex-end; gap: 1px; padding: 0 5px; border-bottom: 1px solid var(--border-subtle); background: #13151b; }.timeline-tabbar > button { position: relative; height: 27px; padding: 0 10px; color: var(--text-muted); background: transparent; border: 0; font: inherit; font-size: 10px; cursor: pointer; }.timeline-tabbar > button:hover { color: var(--text-primary); }.timeline-tabbar > button.active { color: var(--text-primary); background: #191c23; }.timeline-tabbar > button.active::after { position: absolute; right: 5px; bottom: -1px; left: 5px; height: 2px; background: var(--accent); content: ''; }.tab-spacer { flex: 1; }.timeline-status { display: flex; height: 28px; align-items: center; gap: 5px; color: var(--text-muted); font-size: 8.5px; }.status-led { width: 5px; height: 5px; border-radius: 50%; background: var(--success); }
+:global(.timeline-context-menu) { position: fixed; z-index: 600; display: grid; width: 164px; padding: 4px; background: #171920; border: 1px solid #3b3f4b; border-radius: 4px; box-shadow: 0 10px 26px rgb(0 0 0 / .5); }
+:global(.timeline-context-menu > button) { display: flex; height: 26px; align-items: center; gap: 7px; padding: 0 7px; color: #aeb3bf; background: transparent; border: 0; border-radius: 3px; font: inherit; font-size: 9px; text-align: left; cursor: pointer; }
+:global(.timeline-context-menu > button:hover) { color: #eef0ff; background: var(--bg-selected); }
+:global(.timeline-context-menu > button.danger) { color: #d88991; }
+:global(.timeline-context-menu > span) { height: 1px; margin: 3px 2px; background: var(--border-subtle); }
+.dialog-warning { margin: 0; color: var(--text-secondary); font-size: 9px; }
 .timeline-toolbar { position: relative; z-index: 25; display: flex; height: 34px; flex: 0 0 auto; align-items: center; gap: 2px; padding: 0 6px; border-bottom: 1px solid var(--border-subtle); }.divider { width: 1px; height: 20px; margin: 0 4px; background: var(--border-subtle); }.toolbar-spacer { flex: 1; }.toggle-control { display: flex; height: 25px; align-items: center; gap: 4px; padding: 0 6px; color: var(--text-muted); background: transparent; border: 1px solid transparent; border-radius: 4px; font: inherit; font-size: 9px; cursor: pointer; white-space: nowrap; }.toggle-control:hover { color: var(--text-primary); background: var(--bg-hover); }.toggle-control.active { color: #cdd5ff; background: var(--bg-selected); border-color: var(--accent-border); }.timecode-button { height: 24px; padding: 0 8px; color: var(--text-primary); background: #090b0f; border: 1px solid var(--border-strong); border-radius: 3px; font: inherit; font-size: 9.5px; font-variant-numeric: tabular-nums; }.zoom-slider { width: 72px; height: 2px; accent-color: var(--button-accent); }.zoom-value { width: 34px; color: var(--text-muted); font-size: 8px; text-align: right; }
 .context-tabs { display: flex; height: 24px; flex: 0 0 auto; align-items: stretch; gap: 2px; padding: 0 6px; background: #0f1116; border-bottom: 1px solid var(--border-subtle); }.context-tabs > button { display: flex; align-items: center; gap: 4px; padding: 0 8px; color: var(--text-muted); background: transparent; border: 0; border-bottom: 2px solid transparent; font: inherit; font-size: 8.5px; cursor: pointer; white-space: nowrap; }.context-tabs > button:hover { color: var(--text-secondary); }.context-tabs > button.active { color: #dce1ff; border-bottom-color: var(--accent); }.context-tabs .cluster-tab { padding-right: 4px; }.close-tab { display: grid; width: 14px; height: 14px; place-items: center; color: inherit; border-radius: 2px; opacity: .55; }.close-tab:hover { background: rgb(255 255 255 / .1); opacity: 1; }.context-hint { display: flex; align-items: center; margin-left: auto; color: #5b6170; font-size: 7.5px; }
 .add-layer-control { position: relative; height: 25px; }.add-layer-trigger { color: #b8c1ee; background: rgb(140 155 255 / .06); border-color: rgb(140 155 255 / .2); }.add-layer-trigger:hover, .add-layer-trigger.active { color: #eef0ff; background: rgb(140 155 255 / .16); border-color: #6370ad; }.add-layer-menu { position: fixed; z-index: 400; width: 224px; overflow-y: auto; overscroll-behavior: contain; padding: 5px; background: #171920; border: 1px solid #3b3f4b; border-radius: 5px; box-shadow: 0 10px 26px rgb(0 0 0 / .48); }.add-layer-group { padding: 6px 7px 3px; color: #686f7e; font-size: 7px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }.add-layer-menu > button { display: grid; width: 100%; min-height: 34px; grid-template-columns: 22px 1fr; align-items: center; padding: 3px 6px; color: #9da5b7; background: transparent; border: 0; border-radius: 3px; font: inherit; text-align: left; cursor: pointer; }.add-layer-menu > button:hover, .add-layer-menu > button:focus-visible { color: #e8ebf6; background: var(--bg-hover); outline: 0; }.add-layer-menu > button svg { color: #8f9ee8; }.add-layer-menu > button span { display: flex; min-width: 0; flex-direction: column; gap: 1px; }.add-layer-menu > button strong { color: inherit; font-size: 9px; font-weight: 560; }.add-layer-menu > button small { color: #6f7685; font-size: 7.5px; }.selection-count { padding: 2px 5px; color: #cbd2ff; background: rgb(140 155 255 / .1); border: 1px solid rgb(165 180 252 / .25); border-radius: 3px; font-size: 7.5px; white-space: nowrap; }

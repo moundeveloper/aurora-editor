@@ -183,6 +183,16 @@ export const NODE_DEFINITIONS: Record<EditorNodeKind, NodeKindDefinition> = {
     inputs: [{ key: 'in', label: 'Input 1', type: 'image' }, { key: 'in', label: 'Input 2', type: 'image' }],
     outputs: [IMAGE_OUT], properties: [], dynamicInputs: true,
   },
+  mask: {
+    kind: 'mask', label: 'Shape Mask', category: 'Composite', color: '#609a86',
+    inputs: [
+      { key: 'image', label: 'Layer', type: 'image' },
+      { key: 'mask', label: 'Shape', type: 'image' },
+      { key: 'feather', label: 'Feather', type: 'value', value: 24, min: 0, max: 400, step: 1, suffix: 'px' },
+    ],
+    outputs: [IMAGE_OUT],
+    properties: [{ key: 'invert', label: 'Area', value: 'inside', options: [{ value: 'inside', label: 'Inside' }, { value: 'outside', label: 'Outside' }] }],
+  },
   math: {
     kind: 'math', label: 'Math', category: 'Converter', color: '#7a8494',
     inputs: [
@@ -233,6 +243,7 @@ export function createNode(kind: EditorNodeKind, x: number, y: number, id: strin
     properties: Object.fromEntries(definition.properties.map((property) => [property.key, property.value])),
     inputs: makeSockets(definition.inputs, `${id}-in`),
     outputs: makeSockets(definition.outputs, `${id}-out`),
+    ...(kind === 'mask' ? { maskEdgeFeather: Array.from({ length: 32 }, () => 1) } : {}),
   }
 }
 

@@ -20,6 +20,7 @@ export interface GraphEffects {
   greyscale: number
   vignetteAmount: number
   vignetteSoftness: number
+  mask: { layerId: string; feather: number; edgeFeather: number[]; inverted: boolean } | null
 }
 
 export interface GraphPass {
@@ -33,6 +34,7 @@ export const NEUTRAL_EFFECTS: GraphEffects = {
   blur: 0, offsetX: 0, offsetY: 0, rotation: 0, scale: 1, opacity: 1,
   invert: 0, brightness: 0, contrast: 0, temperature: 0,
   hue: 0, saturation: 1, greyscale: 0, vignetteAmount: 0, vignetteSoftness: 72,
+  mask: null,
 }
 
 interface EvaluationContext {
@@ -164,6 +166,22 @@ export function evaluateNodeGraph(
       const background = follow(imageInputs[0]!.id, effects, blendMode)
       const foreground = follow(imageInputs[1]!.id, { ...effects, opacity: effects.opacity * factor }, blend)
       return [...background, ...foreground]
+    }
+
+    if (node.kind === 'mask') {
+      const shapeSocket = imageInputs[1]
+      const shapePass = shapeSocket ? follow(shapeSocket.id, NEUTRAL_EFFECTS, 'normal')[0] : null
+      const feather = Math.max(0, resolveValue(context, node, node.inputs[2]!.id, branch))
+      const maskedEffects = shapePass ? {
+        ...effects,
+        mask: {
+          layerId: shapePass.layerId,
+          feather,
+          edgeFeather: node.maskEdgeFeather?.length ? [...node.maskEdgeFeather] : Array.from({ length: 32 }, () => 1),
+          inverted: node.properties.invert === 'outside',
+        },
+      } : effects
+      return imageInputs[0] ? follow(imageInputs[0].id, maskedEffects, blendMode) : []
     }
 
     const next = applyNode(context, node, effects, branch)

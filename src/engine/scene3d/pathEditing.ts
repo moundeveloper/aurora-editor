@@ -98,3 +98,24 @@ export function appendPathPoint(path: Aurora3DPath): Aurora3DPathPoint | null {
   path.points.push(point)
   return point
 }
+
+/** Prepends a point that continues the incoming direction before the open path's first anchor. */
+export function prependPathPoint(path: Aurora3DPath): Aurora3DPathPoint | null {
+  const first = path.points[0]
+  if (!first) return null
+  const next = path.points[1]
+  const heading = subtract(first.position, next?.position ?? add(first.position, [1, 0, 0]))
+  const headingLength = length(heading)
+  const direction: PathVector = headingLength < 0.000001 ? [-1, 0, 0] : scale(heading, 1 / headingLength)
+  const span = Math.max(1.5, headingLength)
+  const position = add(first.position, scale(direction, span))
+  const point: Aurora3DPathPoint = {
+    id: crypto.randomUUID(),
+    position,
+    handleIn: add(position, scale(direction, span / 3)),
+    handleOut: add(position, scale(direction, -span / 3)),
+    mode: 'smooth',
+  }
+  path.points.unshift(point)
+  return point
+}

@@ -3,7 +3,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import { storeToRefs } from 'pinia'
 import {
   Aperture, Blend, Box, Circle, Contrast, Droplet, Eye, EyeOff, Focus, Grid2X2, Image, Layers,
-  Maximize2, Minus, MoreHorizontal, Move, Palette, Play, Plus, RotateCw, Scaling, Search,
+  Maximize2, Minus, MoreHorizontal, Move, Palette, Play, Plus, RotateCw, Scaling, ScanLine, Search,
   Sigma, Sparkles, Sun, Trash2, Type, ZoomIn,
 } from '@lucide/vue'
 import { useEditorStore } from '@/stores/editor'
@@ -15,6 +15,7 @@ import {
 import { contributingNodeIds, evaluateNodeGraph } from '@/engine/nodes/evaluateGraph'
 import type { EditorNode, EditorNodeKind, EditorNodeSocket } from '@/models/editor'
 import IconButton from './common/IconButton.vue'
+import MSelect, { type MSelectOption } from './common/MSelect.vue'
 
 const MIN_ZOOM = .25
 const MAX_ZOOM = 2.5
@@ -33,6 +34,7 @@ const kindIcons: Record<EditorNodeKind, unknown> = {
   blur: Sparkles, glow: Sun, vignette: Aperture,
   invert: Circle, brightnessContrast: Palette, colorMatrix: Grid2X2, hueSaturation: Droplet, rgbToBw: Contrast,
   mix: Blend, stack: Layers, math: Sigma,
+  mask: ScanLine,
   output: Play, viewer: Eye,
 }
 
@@ -118,9 +120,14 @@ function rowStyle(index: number, section: 'outputs' | 'properties' | 'inputs', n
 
 const isLinked = (node: EditorNode, socket: EditorNodeSocket) => linkedSocketIds.value.has(`${node.id}:${socket.id}`)
 
-function sourceOptions(node: EditorNode) {
+function sourceOptions(node: EditorNode): MSelectOption[] {
   const kinds = NODE_DEFINITIONS[node.kind].sourceLayerTypes ?? []
-  return layers.value.filter((layer) => !layer.isPlaceholder && kinds.includes(layer.type))
+  return [
+    { value: '', label: 'No source' },
+    ...layers.value
+      .filter((layer) => !layer.isPlaceholder && kinds.includes(layer.type))
+      .map((layer) => ({ value: layer.id, label: layer.name })),
+  ]
 }
 
 function graphPoint(clientX: number, clientY: number) {
@@ -384,9 +391,13 @@ onBeforeUnmount(() => {
           </span>
 
           <span v-for="(property, index) in NODE_DEFINITIONS[node.kind].properties" :key="property.key" class="node-row property" :style="rowStyle(index, 'properties', node)">
-            <select :value="node.properties[property.key] ?? property.value" @pointerdown.stop @change="store.setNodeProperty(node.id, property.key, ($event.target as HTMLSelectElement).value)">
-              <option v-for="option in property.options" :key="option.value" :value="option.value">{{ option.label }}</option>
-            </select>
+            <MSelect
+              :model-value="node.properties[property.key] ?? property.value"
+              :options="property.options"
+              :label="`${node.title}: ${property.label}`"
+              @pointerdown.stop
+              @update:model-value="store.setNodeProperty(node.id, property.key, $event)"
+            />
           </span>
 
           <span v-for="(socket, index) in node.inputs" :key="socket.id" class="node-row input" :style="rowStyle(index, 'inputs', node)">
@@ -407,10 +418,13 @@ onBeforeUnmount(() => {
           </span>
 
           <span v-if="isSourceKind(node.kind)" class="node-row source-row" :style="rowStyle(0, 'properties', node)">
-            <select :value="node.sourceId ?? ''" @pointerdown.stop @change="store.setNodeSource(node.id, ($event.target as HTMLSelectElement).value || null)">
-              <option value="">No source</option>
-              <option v-for="layer in sourceOptions(node)" :key="layer.id" :value="layer.id">{{ layer.name }}</option>
-            </select>
+            <MSelect
+              :model-value="node.sourceId ?? ''"
+              :options="sourceOptions(node)"
+              :label="`${node.title}: source layer`"
+              @pointerdown.stop
+              @update:model-value="store.setNodeSource(node.id, $event || null)"
+            />
           </span>
 
           <i
@@ -450,9 +464,9 @@ onBeforeUnmount(() => {
 <style scoped>
 .node-workspace { display: flex; height: 100%; min-height: 0; flex-direction: column; background: #0d0f13; }.node-toolbar { display: flex; height: 34px; flex: 0 0 auto; align-items: center; gap: 3px; padding: 0 7px; background: var(--bg-panel-alt); border-bottom: 1px solid var(--border-subtle); }.add-node-button { display: flex; height: 25px; align-items: center; gap: 4px; padding: 0 7px; color: #dbe1ff; background: var(--bg-selected); border: 1px solid var(--accent-border); border-radius: 4px; font: inherit; font-size: 9.5px; cursor: pointer; }.divider { width: 1px; height: 20px; margin: 0 3px; background: var(--border-subtle); }.toolbar-spacer { flex: 1; }.zoom-label { min-width: 32px; color: var(--text-muted); font-size: 8.5px; text-align: center; font-variant-numeric: tabular-nums; }.node-search { display: flex; width: 116px; height: 24px; align-items: center; gap: 5px; padding: 0 6px; color: var(--text-muted); background: var(--bg-input); border: 1px solid var(--border-strong); border-radius: 3px; }.node-search input { width: 100%; min-width: 0; color: var(--text-primary); background: transparent; border: 0; outline: 0; font: inherit; font-size: 9px; }.render-summary { padding: 0 6px; color: #7ee0c0; font-size: 8px; white-space: nowrap; }.render-summary.empty { color: #c98d8d; }
 .node-canvas { position: relative; min-height: 0; flex: 1; overflow: hidden; cursor: grab; touch-action: none; }.node-canvas.panning { cursor: grabbing; }.node-canvas.linking { cursor: crosshair; }.node-grid { position: absolute; inset: 0; background-color: #0c0e12; background-image: radial-gradient(#272b34 1px, transparent 1px), radial-gradient(#181b21 1px, transparent 1px); }.graph-layer { position: absolute; top: 0; left: 0; transform-origin: 0 0; }.connections { position: absolute; top: 0; left: 0; width: 1px; height: 1px; overflow: visible; }.connections path { fill: none; stroke-width: 2; cursor: pointer; pointer-events: stroke; }.connections path:hover { stroke-width: 3; }.connections path.selected { stroke: #e3ae72 !important; stroke-width: 3; }.connections path.pending { stroke-dasharray: 5 4; pointer-events: none; opacity: .7; }.connections path.pending.valid { stroke-dasharray: none; opacity: 1; }
-.graph-node { --node-color: #7b84b8; position: absolute; z-index: 2; overflow: visible; color: var(--text-secondary); text-align: left; background: #1b1e26; border: 1px solid #3a3e48; border-radius: 5px; box-shadow: 0 4px 12px rgb(0 0 0 / .35); cursor: grab; user-select: none; }.graph-node:hover { border-color: #666c7b; }.graph-node.selected { border-color: #e0e5ff; box-shadow: 0 0 0 1px #e0e5ff, 0 7px 18px rgb(0 0 0 / .45); }.graph-node.dimmed { opacity: .3; }.graph-node.inert { opacity: .55; border-style: dashed; }.graph-node.muted { filter: grayscale(.7); }.graph-node.muted .node-header { background: #4a4f5c; }
+.graph-node { --node-color: #7b84b8; position: absolute; z-index: 2; overflow: visible; color: var(--text-secondary); text-align: left; background: #1b1e26; border: 1px solid #3a3e48; border-radius: 5px; box-shadow: 0 4px 12px rgb(0 0 0 / .35); cursor: grab; user-select: none; }.graph-node:hover { border-color: #666c7b; }.graph-node.selected { z-index: 5; border-color: #e0e5ff; box-shadow: 0 0 0 1px #e0e5ff, 0 7px 18px rgb(0 0 0 / .45); }.graph-node.dimmed { opacity: .3; }.graph-node.inert { opacity: .55; border-style: dashed; }.graph-node.muted { filter: grayscale(.7); }.graph-node.muted .node-header { background: #4a4f5c; }
 .node-header { position: absolute; top: 0; right: 0; left: 0; display: flex; height: 22px; align-items: center; gap: 4px; padding: 0 6px; color: #f2f4fb; background: color-mix(in srgb, var(--node-color) 68%, #15171d); border-radius: 4px 4px 0 0; }.node-header strong { min-width: 0; flex: 1; overflow: hidden; font-size: 8.5px; font-weight: 620; text-overflow: ellipsis; white-space: nowrap; }.viewer-toggle { display: grid; width: 15px; height: 15px; place-items: center; padding: 0; color: #f2f4fb; background: rgb(0 0 0 / .25); border: 0; border-radius: 2px; cursor: pointer; }.viewer-toggle.active { color: #101219; background: #e3ae72; }
-.node-row { position: absolute; right: 0; left: 0; display: flex; align-items: center; gap: 4px; padding: 0 8px; font-size: 8px; }.node-row.output { justify-content: flex-end; }.node-row .socket-label { overflow: hidden; color: var(--text-muted); text-overflow: ellipsis; white-space: nowrap; }.node-row.input .socket-label { flex: 0 0 auto; }.socket-value { width: 100%; min-width: 0; height: 15px; margin-left: auto; padding: 0 4px; color: var(--text-primary); background: #2b3040; border: 1px solid #3c4354; border-radius: 8px; outline: 0; font: inherit; font-size: 8px; text-align: right; }.socket-value:focus { border-color: var(--focus); }.node-row select { width: 100%; height: 16px; padding: 0 4px; color: var(--text-primary); background: #2b3040; border: 1px solid #3c4354; border-radius: 3px; outline: 0; font: inherit; font-size: 8px; cursor: pointer; }.node-row.source-row { z-index: 1; }
+.node-row { position: absolute; right: 0; left: 0; display: flex; align-items: center; gap: 4px; padding: 0 8px; font-size: 8px; }.node-row.output { justify-content: flex-end; }.node-row .socket-label { overflow: hidden; color: var(--text-muted); text-overflow: ellipsis; white-space: nowrap; }.node-row.input .socket-label { flex: 0 0 auto; }.socket-value { width: 100%; min-width: 0; height: 15px; margin-left: auto; padding: 0 4px; color: var(--text-primary); background: #2b3040; border: 1px solid #3c4354; border-radius: 8px; outline: 0; font: inherit; font-size: 8px; text-align: right; }.socket-value:focus { border-color: var(--focus); }.node-row :deep(.m-select) { width: 100%; }.node-row :deep(.m-select-trigger) { height: 16px; padding: 0 4px; background: #272c39; border-color: #394052; border-radius: 3px; font-size: 7.5px; }.node-row :deep(.m-select-trigger svg) { width: 8px; height: 8px; }.node-row :deep(.m-select-menu) { top: calc(100% + 2px); min-width: 132px; max-height: 144px; padding: 2px; }.node-row :deep(.m-select-menu button) { height: 20px; padding: 0 4px; font-size: 7.5px; }.node-row.source-row { z-index: 4; }
 .socket { position: absolute; z-index: 3; width: 10px; height: 10px; margin-top: -5px; border: 1px solid #0e1014; border-radius: 50%; cursor: crosshair; }.socket:hover { transform: scale(1.3); }.socket.input.active { box-shadow: 0 0 0 3px rgb(126 224 192 / .5); transform: scale(1.3); }
 .canvas-help { position: absolute; right: 9px; bottom: 8px; color: #6f7583; font-size: 7px; pointer-events: none; }
 .node-menu { position: absolute; z-index: 10; top: 8px; left: 10px; display: grid; max-height: calc(100% - 24px); width: 168px; gap: 6px; overflow: auto; padding: 6px; background: #1a1d24; border: 1px solid #444955; border-radius: 5px; box-shadow: 0 12px 30px rgb(0 0 0 / .55); }.menu-group { display: grid; }.menu-group strong { padding: 3px 5px 4px; color: var(--text-muted); font-size: 7px; letter-spacing: .07em; text-transform: uppercase; }.node-menu button { display: flex; height: 22px; align-items: center; gap: 6px; padding: 0 6px; color: var(--text-secondary); background: transparent; border: 1px solid transparent; border-radius: 3px; font: inherit; font-size: 8.5px; cursor: pointer; }.node-menu button:hover { color: #dce2ff; background: var(--bg-selected); border-color: var(--accent-border); }

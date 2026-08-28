@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { storeToRefs } from 'pinia'
-import { Box, Camera, Crosshair, Grid3X3, Move3D, Plus, Rotate3D, Scaling, Spline, Sun, Trash2, View } from '@lucide/vue'
+import { ArrowLeftToLine, ArrowRightToLine, Box, Camera, Crosshair, Grid3X3, Move3D, Plus, Rotate3D, Scaling, Spline, Sun, Trash2, View } from '@lucide/vue'
 import * as THREE from 'three'
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js'
 import { TransformControls, type TransformControlsMode } from 'three/addons/controls/TransformControls.js'
@@ -13,7 +13,7 @@ import type { Aurora3DPath, Aurora3DPathPoint, Aurora3DScene } from '@/models/ed
 import IconButton from './common/IconButton.vue'
 
 const store = useEditorStore()
-const { selectedScene, selectedSceneEntityId, currentTime, playing } = storeToRefs(store)
+const { selectedLayer, selectedScene, selectedSceneEntityId, currentTime, playing } = storeToRefs(store)
 const viewport = ref<HTMLElement>()
 const canvas = ref<HTMLCanvasElement>()
 const transformMode = ref<TransformControlsMode>('translate')
@@ -28,7 +28,9 @@ const PATH_GROUP_PREFIX = 'aurora-editor-path-'
 
 const runtimeRegistry = new ThreeSceneRuntimeRegistry()
 let renderer: THREE.WebGLRenderer | null = null
-let editorCamera: THREE.PerspectiveCamera | null = null
+let perspectiveCamera: THREE.PerspectiveCamera | null = null
+let orthographicCamera: THREE.OrthographicCamera | null = null
+let editorCamera: THREE.Camera | null = null
 let orbit: OrbitControls | null = null
 let transform: TransformControls | null = null
 let runtime: Scene3DRuntime | null = null
@@ -169,6 +171,7 @@ function updatePathHelper(group: THREE.Object3D, path: Aurora3DPath, time: numbe
   group.position.copy(position)
   group.rotation.copy(rotation)
   group.scale.copy(scale)
+  group.visible = path.visible && selectedLayer.value?.visible !== false
 
   const points = previewPathPoints(path)
   const curve = group.getObjectByName('path-curve') as THREE.Line | undefined
@@ -274,8 +277,13 @@ function updateEditorHelpers(target: Scene3DRuntime) {
     light.target.updateMatrixWorld(true)
   })
   target.scene.traverse((object) => {
-    if (object instanceof THREE.DirectionalLightHelper || object instanceof THREE.PointLightHelper) object.update()
+    if (object instanceof THREE.DirectionalLightHelper || object instanceof THREE.PointLightHelper) {
+      const light = selectedScene.value?.lights.find((item) => item.id === object.userData.auroraId)
+      object.visible = selectedLayer.value?.visible !== false && light?.visible !== false
+      object.update()
+    }
   })
+  if (transform) transform.getHelper().visible = selectedLayer.value?.visible !== false && store.selectedSceneEntity?.value.visible !== false
 }
 
 function attachSelection() {
@@ -312,6 +320,7 @@ function renderViewport() {
   const targetRuntime = runtime
   if (!targetRuntime) return
   ensureEditorHelpers(targetRuntime)
+  targetRuntime.root.visible = selectedLayer.value?.visible !== false
   syncPathHelpers(targetRuntime, sceneDefinition)
   if (syncScene) attachSelection()
   updateEditorHelpers(targetRuntime)
@@ -328,8 +337,19 @@ function resizeViewport() {
   const width = Math.max(1, host.clientWidth)
   const height = Math.max(1, host.clientHeight)
   renderer.setSize(width, height, false)
-  editorCamera.aspect = width / height
-  editorCamera.updateProjectionMatrix()
+  const aspect = width / height
+  if (perspectiveCamera) {
+    perspectiveCamera.aspect = aspect
+    perspectiveCamera.updateProjectionMatrix()
+  }
+  if (orthographicCamera) {
+    const halfHeight = 5.5
+    orthographicCamera.left = -halfHeight * aspect
+    orthographicCamera.right = halfHeight * aspect
+    orthographicCamera.top = halfHeight
+    orthographicCamera.bottom = -halfHeight
+    orthographicCamera.updateProjectionMatrix()
+  }
   renderViewport()
 }
 
@@ -354,6 +374,13 @@ function addPointAfterSelection() {
   if (point) pathSelection.value = { pathId: path.id, pointId: point.id, target: 'position' }
 }
 
+function extendPath(side: 'start' | 'end') {
+  const path = selectedPath.value
+  if (!path) return
+  const point = store.add3DPathEndpoint(path.id, side)
+  if (point) pathSelection.value = { pathId: path.id, pointId: point.id, target: 'position' }
+}
+
 function deleteSelectedPathPoint() {
   const path = selectedPath.value
   const selection = activePathPoint.value
@@ -362,15 +389,38 @@ function deleteSelectedPathPoint() {
 }
 
 function setCameraView(view: 'Perspective' | 'Front' | 'Right' | 'Top') {
-  if (!editorCamera || !orbit) return
+  if (!perspectiveCamera || !orthographicCamera || !orbit) return
   cameraView.value = view
+  orbit.target.set(0, 0, 0)
+  editorCamera = view === 'Perspective' ? perspectiveCamera : orthographicCamera
+  orbit.object = editorCamera
+  if (transform) transform.camera = editorCamera
+  editorCamera.up.set(0, 1, 0)
   if (view === 'Front') editorCamera.position.set(0, 0, 10)
   else if (view === 'Right') editorCamera.position.set(10, 0, 0)
-  else if (view === 'Top') editorCamera.position.set(0, 10, .001)
-  else editorCamera.position.set(7, 5, 8)
-  orbit.target.set(0, 0, 0)
+  else if (view === 'Top') {
+    editorCamera.position.set(0, 10, 0)
+    editorCamera.up.set(0, 0, -1)
+  } else editorCamera.position.set(7, 5, 8)
+  editorCamera.lookAt(orbit.target)
+  orbit.enableRotate = view === 'Perspective'
+  orbit.mouseButtons.LEFT = view === 'Perspective' ? THREE.MOUSE.ROTATE : THREE.MOUSE.PAN
   orbit.update()
   renderViewport()
+}
+
+/** Keeps the axis presets mathematically square after OrbitControls pans or zooms the view. */
+function enforceAxisView() {
+  if (!editorCamera || !orbit || cameraView.value === 'Perspective') return
+  const distance = Math.max(.1, editorCamera.position.distanceTo(orbit.target))
+  editorCamera.up.set(0, 1, 0)
+  if (cameraView.value === 'Front') editorCamera.position.copy(orbit.target).add(new THREE.Vector3(0, 0, distance))
+  else if (cameraView.value === 'Right') editorCamera.position.copy(orbit.target).add(new THREE.Vector3(distance, 0, 0))
+  else {
+    editorCamera.position.copy(orbit.target).add(new THREE.Vector3(0, distance, 0))
+    editorCamera.up.set(0, 0, -1)
+  }
+  editorCamera.lookAt(orbit.target)
 }
 
 function rememberPickStart(event: PointerEvent) {
@@ -586,15 +636,20 @@ onMounted(async () => {
   renderer.setClearColor('#090b10', 1)
   renderer.shadowMap.enabled = true
   renderer.shadowMap.type = THREE.PCFSoftShadowMap
-  editorCamera = new THREE.PerspectiveCamera(48, 1, .1, 2000)
-  editorCamera.position.set(7, 5, 8)
+  perspectiveCamera = new THREE.PerspectiveCamera(48, 1, .1, 2000)
+  perspectiveCamera.position.set(7, 5, 8)
+  orthographicCamera = new THREE.OrthographicCamera(-5.5, 5.5, 5.5, -5.5, .1, 2000)
+  editorCamera = perspectiveCamera
   orbit = new OrbitControls(editorCamera, canvas.value)
   orbit.enableDamping = false
   orbit.mouseButtons.LEFT = THREE.MOUSE.ROTATE
   orbit.mouseButtons.MIDDLE = THREE.MOUSE.PAN
   orbit.mouseButtons.RIGHT = THREE.MOUSE.PAN
   orbit.target.set(0, 0, 0)
-  orbit.addEventListener('change', renderViewport)
+  orbit.addEventListener('change', () => {
+    enforceAxisView()
+    renderViewport()
+  })
   transform = new TransformControls(editorCamera, canvas.value)
   transform.setMode(transformMode.value)
   transform.setSize(.82)
@@ -631,9 +686,12 @@ onBeforeUnmount(() => {
   runtimeRegistry.dispose()
   renderer?.dispose()
   renderer = null
+  editorCamera = null
+  perspectiveCamera = null
+  orthographicCamera = null
 })
 
-watch([selectedScene, currentTime, selectedSceneEntityId], renderViewport, { deep: true })
+watch([selectedLayer, selectedScene, currentTime, selectedSceneEntityId], renderViewport, { deep: true })
 </script>
 
 <template>
@@ -645,11 +703,13 @@ watch([selectedScene, currentTime, selectedSceneEntityId], renderViewport, { dee
         <IconButton :icon="Scaling" label="Scale (S)" :active="transformMode === 'scale'" @click="setTransformMode('scale')" />
       </div>
       <span class="toolbar-divider" />
-      <button v-for="view in (['Perspective', 'Front', 'Right', 'Top'] as const)" :key="view" type="button" class="view-button" :class="{ active: cameraView === view }" @click="setCameraView(view)">{{ view }}</button>
+      <button v-for="view in (['Perspective', 'Front', 'Right', 'Top'] as const)" :key="view" type="button" class="view-button" :title="view === 'Perspective' ? 'Switch to perspective view' : `Switch to exact ${view.toLowerCase()} orthographic view`" @click="setCameraView(view)">{{ view }}</button>
       <template v-if="selectedPath">
         <span class="toolbar-divider" />
         <span class="path-label"><Spline :size="11" :style="{ color: selectedPath.color }" /> {{ selectedPath.name }}</span>
-        <IconButton :icon="Plus" label="Add path point after the selected one" :disabled="selectedPath.locked" @click="addPointAfterSelection" />
+        <IconButton :icon="Plus" label="Insert a point after the selected vertex, preserving the Bézier segment" :disabled="selectedPath.locked" @click="addPointAfterSelection" />
+        <IconButton :icon="ArrowLeftToLine" label="Extend the open path before its first endpoint" :disabled="selectedPath.locked || selectedPath.closed" @click="extendPath('start')" />
+        <IconButton :icon="ArrowRightToLine" label="Extend the open path beyond its last endpoint" :disabled="selectedPath.locked || selectedPath.closed" @click="extendPath('end')" />
         <IconButton :icon="Trash2" label="Delete the selected path point" :disabled="!activePathPoint || selectedPath.points.length <= 2" @click="deleteSelectedPathPoint" />
         <button type="button" class="view-button" :class="{ active: selectedPath.closed }" title="Close the path into a loop" @click="store.toggle3DPathClosed(selectedPath.id)">Closed</button>
       </template>
@@ -659,7 +719,7 @@ watch([selectedScene, currentTime, selectedSceneEntityId], renderViewport, { dee
 
     <div ref="viewport" class="three-viewport">
       <canvas ref="canvas" aria-label="3D scene editor viewport" @pointerdown="rememberPickStart" @click="pickObject" @contextmenu.prevent />
-      <div class="viewport-badge"><View :size="10" /> {{ cameraView }}</div>
+      <div class="viewport-badge"><View :size="10" /> {{ cameraView }}{{ cameraView === 'Perspective' ? '' : ' · Orthographic' }}</div>
       <div class="viewport-axis"><span class="x">X</span><span class="y">Y</span><span class="z">Z</span></div>
       <div class="viewport-help">{{ selectedPath ? 'Click an anchor or handle to edit it · drag with the gizmo · G/R/S: transform' : 'Orbit: left-drag · Pan: middle-drag · Zoom: wheel · G/R/S: transform' }}</div>
     </div>

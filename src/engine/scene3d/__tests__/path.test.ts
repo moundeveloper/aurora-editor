@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import * as THREE from 'three'
 import { create3DPath, createCameraPathConstraint, createDemo3DScene, numericProperty } from '@/engine/scene3d/sceneFactory'
 import { evaluate3DPath, sampleLocalPath } from '@/engine/scene3d/pathEvaluation'
-import { appendPathPoint, insertPathPoint, movePathHandle, movePathPoint, setPathPointMode } from '@/engine/scene3d/pathEditing'
+import { appendPathPoint, insertPathPoint, movePathHandle, movePathPoint, prependPathPoint, setPathPointMode } from '@/engine/scene3d/pathEditing'
 import { ThreeSceneRuntimeRegistry } from '@/engine/scene3d/ThreeSceneRuntime'
 import { CURRENT_PROJECT_VERSION, deserializeEditorState } from '@/engine/project/serialization'
 import { createDemoNodeGraph } from '@/engine/nodes/nodeGraph'
@@ -98,6 +98,20 @@ describe('3D Bézier paths', () => {
     expect(path.points[1]!.handleIn).not.toEqual(path.points[1]!.position)
     expect(appendPathPoint(path)).not.toBeNull()
     expect(path.points).toHaveLength(4)
+  })
+
+  it('extends either open endpoint without replacing segment insertion', () => {
+    const path = create3DPath(1)
+    const originalFirst = path.points[0]!
+    const originalLast = path.points.at(-1)!
+    const prepended = prependPathPoint(path)!
+    const appended = appendPathPoint(path)!
+
+    expect(path.points[0]).toBe(prepended)
+    expect(path.points[1]).toBe(originalFirst)
+    expect(path.points.at(-2)).toBe(originalLast)
+    expect(path.points.at(-1)).toBe(appended)
+    expect(path.points).toHaveLength(5)
   })
 
   it('drives a constrained camera along the path tangent and locks it onto a look-at target', () => {

@@ -10,6 +10,7 @@ import InspectorPanel from '@/components/InspectorPanel.vue'
 import TimelinePanel from '@/components/TimelinePanel.vue'
 import NodeWorkspace from '@/components/NodeWorkspace.vue'
 import NodePreviewPanel from '@/components/NodePreviewPanel.vue'
+import MaskEdgePanel from '@/components/MaskEdgePanel.vue'
 import AudioWorkspace from '@/components/AudioWorkspace.vue'
 import ExportWorkspace from '@/components/ExportWorkspace.vue'
 
@@ -20,7 +21,7 @@ const ThreeDInspectorPanel = defineAsyncComponent(() => import('@/components/Thr
 const ThreeDTimelinePanel = defineAsyncComponent(() => import('@/components/ThreeDTimelinePanel.vue'))
 
 const store = useEditorStore()
-const { workspace, currentTime, project, selectedLayer } = storeToRefs(store)
+const { workspace, currentTime, project, selectedLayer, nodes, selectedNodeId } = storeToRefs(store)
 const leftWidth = ref(224)
 const rightWidth = ref(275)
 const bottomHeight = ref(258)
@@ -28,6 +29,7 @@ const leftOpen = ref(true)
 const rightOpen = ref(true)
 const bottomOpen = ref(true)
 const nodePreviewHeight = computed(() => Math.round(Math.max(120, (rightWidth.value - 28) * 9 / 16 + 50)))
+const maskEditorOpen = computed(() => workspace.value === 'Nodes' && nodes.value.some((node) => node.id === selectedNodeId.value && node.kind === 'mask'))
 const resizing = ref<'left' | 'right' | 'bottom' | null>(null)
 
 const layoutStyle = computed(() => ({
@@ -93,9 +95,10 @@ onBeforeUnmount(() => {
         </div>
 
         <div v-show="rightOpen" class="pane-resizer vertical right" role="separator" aria-label="Resize inspector" @pointerdown="startResize('right')" />
-        <div v-show="rightOpen" class="right-pane" :class="{ 'preview-right-pane': workspace === 'Nodes' || workspace === '3D' }">
+        <div v-show="rightOpen" class="right-pane" :class="{ 'preview-right-pane': workspace === 'Nodes' || workspace === '3D', 'mask-editor-open': maskEditorOpen }">
           <template v-if="workspace === 'Nodes'">
             <NodePreviewPanel />
+            <MaskEdgePanel v-if="maskEditorOpen" />
             <div class="node-inspector-pane"><InspectorPanel /></div>
           </template>
           <template v-else-if="workspace === '3D'">

@@ -9,15 +9,16 @@ import {
 import { useEditorStore } from '@/stores/editor'
 import type { HybridWebGLRenderBackend } from '@/engine/rendering/HybridWebGLRenderBackend'
 import { evaluateNumericProperty } from '@/engine/animation/evaluateProperty'
-import type { EditorLayer } from '@/models/editor'
+import type { EditorLayer, ShapePathPoint } from '@/models/editor'
 import IconButton from './common/IconButton.vue'
 
 const store = useEditorStore()
-const { project, currentTime, playing, loop, snap, zoom, layers, scenes3D, selectedLayer, selectedLayerId, selectedKeyframeId } = storeToRefs(store)
+const { project, currentTime, playing, loop, snap, zoom, layers, scenes3D, nodes, nodeConnections, renderRootNodeId, selectedLayer, selectedLayerId, selectedKeyframeId } = storeToRefs(store)
 const canvas = ref<HTMLCanvasElement>()
 const canvasWrap = ref<HTMLElement>()
 const transformBox = ref<HTMLElement>()
-const activeTool = ref('Select')
+type MotionTool = 'Select' | 'Hand' | 'Zoom' | 'Text' | 'Rectangle' | 'Ellipse' | 'Pen' | 'Transform'
+const activeTool = ref<MotionTool>('Select')
 const activeTransformMode = ref<'move' | 'scale' | 'rotate' | null>(null)
 const audioEnabled = ref(true)
 const showGrid = ref(false)
@@ -27,6 +28,27 @@ const viewportPan = ref({ x: 0, y: 0 })
 const isViewportPanning = ref(false)
 let renderer: HybridWebGLRenderBackend | null = null
 let resizeObserver: ResizeObserver | null = null
+let drawFrame = 0
+let rendering = false
+let redrawRequested = false
+let disposed = false
+
+interface ShapeDrawState {
+  pointerId: number
+  kind: 'rectangle' | 'ellipse'
+  start: { x: number; y: number }
+  current: { x: number; y: number }
+  startClientX: number
+  startClientY: number
+  shift: boolean
+  alt: boolean
+}
+
+interface PenDragState { pointerId: number; pointId: string }
+
+const shapeDraw = ref<ShapeDrawState | null>(null)
+const penDraft = ref<{ points: ShapePathPoint[] } | null>(null)
+let penDrag: PenDragState | null = null
 
 interface ViewportTransformState {
   layer: EditorLayer
@@ -52,7 +74,7 @@ interface ViewportPanState { pointerId: number; startX: number; startY: number; 
 
 let viewportTransformState: ViewportTransformState | null = null
 let viewportPanState: ViewportPanState | null = null
-const tools = [
+const tools: Array<{ name: MotionTool; icon: typeof MousePointer2 }> = [
   { name: 'Select', icon: MousePointer2 }, { name: 'Hand', icon: Hand }, { name: 'Zoom', icon: ZoomIn },
   { name: 'Text', icon: Type }, { name: 'Rectangle', icon: Square }, { name: 'Ellipse', icon: Circle },
   { name: 'Pen', icon: PenTool }, { name: 'Transform', icon: Move },
@@ -75,7 +97,10 @@ const interactiveLayers = computed(() => [...layers.value]
 function layerBoxSize(layer: EditorLayer) {
   if (layer.type === 'cluster') return { width: 72, height: 72 }
   if (layer.type === 'video') return { width: 100, height: 100 }
-  if (layer.type === 'shape') return { width: 14.6, height: 16.7 }
+  if (layer.type === 'shape') return {
+    width: ((layer.shapeWidth ?? 280) / project.value.width) * 100,
+    height: ((layer.shapeHeight ?? 180) / project.value.height) * 100,
+  }
   if (layer.type === 'image') return { width: 20, height: 35.5 }
   return { width: layer.textContent === 'New Text' ? 28 : 48, height: 13 }
 }
@@ -110,16 +135,42 @@ const stageStyle = computed(() => {
   }
 })
 
-function draw() {
+async function drawNow() {
   if (!renderer) return
-  void renderer.renderFrame({
-    project: project.value,
-    layers: layers.value,
-    scenes3D: scenes3D.value,
-    time: currentTime.value,
-    width: 1280,
-    height: 720,
-    quality: 'preview',
+  try {
+    await renderer.renderFrame({
+      project: project.value,
+      layers: layers.value,
+      scenes3D: scenes3D.value,
+      nodes: nodes.value,
+      nodeConnections: nodeConnections.value,
+      renderRootNodeId: renderRootNodeId.value,
+      time: currentTime.value,
+      width: 1280,
+      height: 720,
+      quality: 'preview',
+    })
+  } catch {
+    // A dropped preview frame must never break viewport interaction.
+  }
+}
+
+/**
+ * Brush strokes and drags mutate the graph many times per pointer event, and every mutation reaches
+ * the deep watcher below. Coalesce to one full-size frame, and never start a second render while the
+ * previous one is still resolving.
+ */
+function draw() {
+  redrawRequested = true
+  if (drawFrame || rendering || disposed) return
+  drawFrame = requestAnimationFrame(async () => {
+    drawFrame = 0
+    if (!redrawRequested || disposed) return
+    redrawRequested = false
+    rendering = true
+    await drawNow()
+    rendering = false
+    if (redrawRequested) draw()
   })
 }
 
@@ -208,6 +259,82 @@ function projectPointAt(event: PointerEvent) {
   }
 }
 
+function shapeDrawBounds(state: ShapeDrawState) {
+  let dx = state.current.x - state.start.x
+  let dy = state.current.y - state.start.y
+  if (state.shift) {
+    const size = Math.max(Math.abs(dx), Math.abs(dy))
+    dx = (dx < 0 ? -1 : 1) * size
+    dy = (dy < 0 ? -1 : 1) * size
+  }
+  const left = state.alt ? state.start.x - Math.abs(dx) : Math.min(state.start.x, state.start.x + dx)
+  const right = state.alt ? state.start.x + Math.abs(dx) : Math.max(state.start.x, state.start.x + dx)
+  const top = state.alt ? state.start.y - Math.abs(dy) : Math.min(state.start.y, state.start.y + dy)
+  const bottom = state.alt ? state.start.y + Math.abs(dy) : Math.max(state.start.y, state.start.y + dy)
+  return { left, top, width: right - left, height: bottom - top, x: (left + right) / 2, y: (top + bottom) / 2 }
+}
+
+const shapePreviewStyle = computed(() => {
+  if (!shapeDraw.value) return { display: 'none' }
+  const bounds = shapeDrawBounds(shapeDraw.value)
+  return {
+    left: `${(bounds.left / project.value.width) * 100}%`,
+    top: `${(bounds.top / project.value.height) * 100}%`,
+    width: `${(bounds.width / project.value.width) * 100}%`,
+    height: `${(bounds.height / project.value.height) * 100}%`,
+    borderRadius: shapeDraw.value.kind === 'ellipse' ? '50%' : '2px',
+  }
+})
+
+function pathData(points: ShapePathPoint[], closed = false) {
+  const first = points[0]
+  if (!first) return ''
+  let result = `M ${first.position[0]} ${first.position[1]}`
+  for (let index = 1; index < points.length; index += 1) {
+    const previous = points[index - 1]!
+    const point = points[index]!
+    result += ` C ${previous.handleOut[0]} ${previous.handleOut[1]} ${point.handleIn[0]} ${point.handleIn[1]} ${point.position[0]} ${point.position[1]}`
+  }
+  if (closed && points.length > 2) {
+    const last = points.at(-1)!
+    result += ` C ${last.handleOut[0]} ${last.handleOut[1]} ${first.handleIn[0]} ${first.handleIn[1]} ${first.position[0]} ${first.position[1]} Z`
+  }
+  return result
+}
+
+const penDraftPath = computed(() => pathData(penDraft.value?.points ?? []))
+
+function closeEnoughToFirst(point: { x: number; y: number }) {
+  const first = penDraft.value?.points[0]
+  const bounds = canvas.value?.getBoundingClientRect()
+  if (!first || !bounds) return false
+  const dx = ((point.x - first.position[0]) / project.value.width) * bounds.width
+  const dy = ((point.y - first.position[1]) / project.value.height) * bounds.height
+  return Math.hypot(dx, dy) <= 10
+}
+
+function finishPen(closed: boolean) {
+  const points = penDraft.value?.points ?? []
+  if (points.length >= 2) store.addPathLayer(points.map((point) => ({ ...point, position: [...point.position], handleIn: [...point.handleIn], handleOut: [...point.handleOut] })), closed)
+  penDraft.value = null
+  penDrag = null
+  activeTool.value = 'Select'
+}
+
+function finishPenFromDoubleClick() {
+  const points = penDraft.value?.points
+  if (!points?.length) return
+  const last = points.at(-1)
+  const previous = points.at(-2)
+  if (last && previous && Math.hypot(last.position[0] - previous.position[0], last.position[1] - previous.position[1]) < 2) points.pop()
+  finishPen(false)
+}
+
+function selectTool(tool: MotionTool) {
+  if (activeTool.value === 'Pen' && tool !== 'Pen' && penDraft.value?.points.length) finishPen(false)
+  activeTool.value = tool
+}
+
 function onViewportPointerDown(event: PointerEvent) {
   if (beginViewportPan(event)) return
   if (event.button !== 0) return
@@ -222,8 +349,33 @@ function onViewportPointerDown(event: PointerEvent) {
     activeTool.value = 'Select'
   } else if (activeTool.value === 'Rectangle' || activeTool.value === 'Ellipse') {
     event.preventDefault()
-    store.addGeneratedLayer('shape', point.x, point.y, activeTool.value === 'Ellipse' ? 'ellipse' : 'rectangle')
-    activeTool.value = 'Select'
+    shapeDraw.value = {
+      pointerId: event.pointerId,
+      kind: activeTool.value === 'Ellipse' ? 'ellipse' : 'rectangle',
+      start: point,
+      current: point,
+      startClientX: event.clientX,
+      startClientY: event.clientY,
+      shift: event.shiftKey,
+      alt: event.altKey,
+    }
+    canvasWrap.value?.setPointerCapture?.(event.pointerId)
+  } else if (activeTool.value === 'Pen') {
+    event.preventDefault()
+    if (penDraft.value?.points.length && closeEnoughToFirst(point) && penDraft.value.points.length > 2) {
+      finishPen(true)
+      return
+    }
+    const next: ShapePathPoint = {
+      id: crypto.randomUUID(),
+      position: [point.x, point.y],
+      handleIn: [point.x, point.y],
+      handleOut: [point.x, point.y],
+    }
+    if (penDraft.value) penDraft.value.points.push(next)
+    else penDraft.value = { points: [next] }
+    penDrag = { pointerId: event.pointerId, pointId: next.id }
+    canvasWrap.value?.setPointerCapture?.(event.pointerId)
   }
 }
 
@@ -237,6 +389,24 @@ function onViewportPointerMove(event: PointerEvent) {
     viewportPan.value = {
       x: viewportPanState.originX + event.clientX - viewportPanState.startX,
       y: viewportPanState.originY + event.clientY - viewportPanState.startY,
+    }
+    return
+  }
+  if (shapeDraw.value && shapeDraw.value.pointerId === event.pointerId) {
+    const point = projectPointAt(event)
+    if (point) {
+      shapeDraw.value.current = point
+      shapeDraw.value.shift = event.shiftKey
+      shapeDraw.value.alt = event.altKey
+    }
+    return
+  }
+  if (penDrag?.pointerId === event.pointerId && penDraft.value) {
+    const point = projectPointAt(event)
+    const anchor = penDraft.value.points.find((item) => item.id === penDrag?.pointId)
+    if (point && anchor) {
+      anchor.handleOut = [point.x, point.y]
+      anchor.handleIn = [anchor.position[0] * 2 - point.x, anchor.position[1] * 2 - point.y]
     }
     return
   }
@@ -277,13 +447,44 @@ function onViewportPointerMove(event: PointerEvent) {
   }
 }
 
-function endViewportTransform() {
+function endViewportTransform(event?: PointerEvent) {
+  if (shapeDraw.value && (!event || shapeDraw.value.pointerId === event.pointerId)) {
+    const state = shapeDraw.value
+    const bounds = shapeDrawBounds(state)
+    const moved = Math.hypot((event?.clientX ?? state.startClientX) - state.startClientX, (event?.clientY ?? state.startClientY) - state.startClientY) > 3
+    if (moved && bounds.width > 1 && bounds.height > 1) store.addGeneratedLayer('shape', bounds.x, bounds.y, state.kind, { width: bounds.width, height: bounds.height })
+    if (canvasWrap.value?.hasPointerCapture?.(state.pointerId)) canvasWrap.value.releasePointerCapture(state.pointerId)
+    shapeDraw.value = null
+    activeTool.value = 'Select'
+  }
+  if (penDrag && (!event || penDrag.pointerId === event.pointerId)) {
+    if (canvasWrap.value?.hasPointerCapture?.(penDrag.pointerId)) canvasWrap.value.releasePointerCapture(penDrag.pointerId)
+    penDrag = null
+  }
   if (viewportTransformState?.moved) store.markChanged()
   if (viewportPanState && canvasWrap.value?.hasPointerCapture?.(viewportPanState.pointerId)) canvasWrap.value.releasePointerCapture(viewportPanState.pointerId)
   viewportTransformState = null
   viewportPanState = null
   isViewportPanning.value = false
   activeTransformMode.value = null
+}
+
+function onViewerKeydown(event: KeyboardEvent) {
+  if ((event.target as HTMLElement)?.matches('input, textarea')) return
+  if (activeTool.value !== 'Pen') return
+  if (event.key === 'Enter' && penDraft.value?.points.length) {
+    event.preventDefault()
+    finishPen(false)
+  } else if (event.key === 'Escape') {
+    event.preventDefault()
+    penDraft.value = null
+    penDrag = null
+    activeTool.value = 'Select'
+  } else if ((event.key === 'Backspace' || event.key === 'Delete') && penDraft.value?.points.length) {
+    event.preventDefault()
+    penDraft.value.points.pop()
+    if (!penDraft.value.points.length) penDraft.value = null
+  }
 }
 
 onMounted(async () => {
@@ -302,26 +503,30 @@ onMounted(async () => {
   window.addEventListener('pointermove', onViewportPointerMove)
   window.addEventListener('pointerup', endViewportTransform)
   window.addEventListener('pointercancel', endViewportTransform)
+  window.addEventListener('keydown', onViewerKeydown)
   draw()
 })
 
 onBeforeUnmount(() => {
+  disposed = true
+  if (drawFrame) cancelAnimationFrame(drawFrame)
   resizeObserver?.disconnect()
   window.removeEventListener('pointermove', onViewportPointerMove)
   window.removeEventListener('pointerup', endViewportTransform)
   window.removeEventListener('pointercancel', endViewportTransform)
+  window.removeEventListener('keydown', onViewerKeydown)
   void renderer?.dispose()
   renderer = null
 })
 
-watch([currentTime, layers, scenes3D], draw, { deep: true })
+watch([currentTime, layers, scenes3D, nodes, nodeConnections, renderRootNodeId], draw, { deep: true })
 </script>
 
 <template>
   <section class="viewer-panel">
     <div class="viewer-toolbar">
       <div class="tool-group">
-        <IconButton v-for="tool in tools" :key="tool.name" :icon="tool.icon" :label="tool.name" :active="activeTool === tool.name" @click="activeTool = tool.name" />
+        <IconButton v-for="tool in tools" :key="tool.name" :icon="tool.icon" :label="tool.name" :active="activeTool === tool.name" @click="selectTool(tool.name)" />
       </div>
       <span class="toolbar-divider" />
       <IconButton :icon="BoxSelect" label="Safe guides" :active="showGuides" @click="showGuides = !showGuides" />
@@ -338,9 +543,19 @@ watch([currentTime, layers, scenes3D], draw, { deep: true })
       <IconButton :icon="Maximize2" label="Full screen viewer" />
     </div>
 
-    <div ref="canvasWrap" class="canvas-viewport" :class="{ 'show-grid': showGrid, panning: isViewportPanning, 'hand-tool': activeTool === 'Hand', 'zoom-tool': activeTool === 'Zoom' }" @pointerdown="onViewportPointerDown" @wheel="onViewportWheel" @auxclick.prevent>
+    <div ref="canvasWrap" class="canvas-viewport" :class="{ 'show-grid': showGrid, panning: isViewportPanning, 'hand-tool': activeTool === 'Hand', 'zoom-tool': activeTool === 'Zoom', 'drawing-tool': activeTool === 'Rectangle' || activeTool === 'Ellipse', 'pen-tool': activeTool === 'Pen' }" @pointerdown="onViewportPointerDown" @dblclick.prevent="activeTool === 'Pen' && finishPenFromDoubleClick()" @wheel="onViewportWheel" @auxclick.prevent>
       <div class="canvas-stage" :style="stageStyle">
         <canvas ref="canvas" width="1280" height="720" aria-label="Composition preview" />
+        <div v-if="shapeDraw" class="shape-draw-preview" :style="shapePreviewStyle" />
+        <svg v-if="penDraft" class="pen-draft-overlay" :viewBox="`0 0 ${project.width} ${project.height}`" preserveAspectRatio="none" aria-label="Path being drawn">
+          <path :d="penDraftPath" />
+          <g v-for="point in penDraft.points" :key="point.id">
+            <line :x1="point.handleIn[0]" :y1="point.handleIn[1]" :x2="point.handleOut[0]" :y2="point.handleOut[1]" />
+            <circle class="handle" :cx="point.handleIn[0]" :cy="point.handleIn[1]" r="5" />
+            <circle class="handle" :cx="point.handleOut[0]" :cy="point.handleOut[1]" r="5" />
+            <circle class="anchor" :cx="point.position[0]" :cy="point.position[1]" r="7" />
+          </g>
+        </svg>
         <div v-if="showGuides" class="safe-guides"><span /><span /></div>
         <button
           v-for="layer in interactiveLayers"
@@ -373,7 +588,7 @@ watch([currentTime, layers, scenes3D], draw, { deep: true })
         </div>
       </div>
       <div class="viewport-badge"><span class="live-dot" /> Active camera</div>
-      <div class="viewport-help">Middle-drag: pan · Wheel: zoom<span v-if="['Text', 'Rectangle', 'Ellipse'].includes(activeTool)"> · Click composition to create {{ activeTool.toLowerCase() }}</span></div>
+      <div class="viewport-help">Middle-drag: pan · Wheel: zoom<span v-if="activeTool === 'Text'"> · Click composition to create text</span><span v-else-if="activeTool === 'Rectangle' || activeTool === 'Ellipse'"> · Drag to draw · Shift: equal sides · Alt: from centre</span><span v-else-if="activeTool === 'Pen'"> · Click: corner · Drag: Bézier handles · Click first point to close · Enter: finish</span></div>
     </div>
 
     <div class="viewer-controls">
@@ -401,9 +616,12 @@ watch([currentTime, layers, scenes3D], draw, { deep: true })
 .viewer-select { display: flex; height: 25px; align-items: center; gap: 6px; padding: 0 6px; color: var(--text-secondary); background: #171920; border: 1px solid var(--border-strong); border-radius: 4px; font: inherit; font-size: 9.5px; cursor: pointer; }
 .viewer-select:hover { color: var(--text-primary); background: var(--bg-hover); }
 .canvas-viewport { position: relative; display: flex; min-height: 0; flex: 1; align-items: center; justify-content: center; padding: 24px; overflow: hidden; background-color: #08090c; background-image: linear-gradient(45deg, #0c0e13 25%, transparent 25%), linear-gradient(-45deg, #0c0e13 25%, transparent 25%), linear-gradient(45deg, transparent 75%, #0c0e13 75%), linear-gradient(-45deg, transparent 75%, #0c0e13 75%); background-position: 0 0, 0 8px, 8px -8px, -8px 0; background-size: 16px 16px; touch-action: none; }
+.canvas-viewport.drawing-tool, .canvas-viewport.pen-tool { cursor: crosshair; }.canvas-viewport.drawing-tool .layer-hit-target, .canvas-viewport.drawing-tool .transform-box, .canvas-viewport.pen-tool .layer-hit-target, .canvas-viewport.pen-tool .transform-box { pointer-events: none; }
 .canvas-viewport.show-grid::after { position: absolute; inset: 0; background-image: linear-gradient(rgb(142 154 225 / .08) 1px, transparent 1px), linear-gradient(90deg, rgb(142 154 225 / .08) 1px, transparent 1px); background-size: 36px 36px; content: ''; pointer-events: none; }
 .canvas-viewport.hand-tool { cursor: grab; }.canvas-viewport.zoom-tool { cursor: zoom-in; }.canvas-viewport.panning { cursor: grabbing; user-select: none; }.canvas-stage { position: relative; flex: 0 0 auto; aspect-ratio: 16 / 9; box-shadow: 0 15px 45px rgb(0 0 0 / .55), 0 0 0 1px #30333d; transform-origin: center; }
 .canvas-stage canvas { display: block; width: 100%; height: 100%; }
+.shape-draw-preview { position: absolute; z-index: 12; background: rgb(140 155 255 / .16); border: 1px solid #a5b4fc; box-shadow: 0 0 0 1px rgb(13 15 24 / .55); pointer-events: none; }
+.pen-draft-overlay { position: absolute; z-index: 12; inset: 0; width: 100%; height: 100%; overflow: visible; pointer-events: none; }.pen-draft-overlay path { fill: rgb(140 155 255 / .1); stroke: #a5b4fc; stroke-width: 3; vector-effect: non-scaling-stroke; }.pen-draft-overlay line { stroke: #717da9; stroke-width: 1; vector-effect: non-scaling-stroke; }.pen-draft-overlay circle.handle { fill: #151821; stroke: #8c9bff; stroke-width: 2; vector-effect: non-scaling-stroke; }.pen-draft-overlay circle.anchor { fill: #e0e7ff; stroke: #4f5d9d; stroke-width: 2; vector-effect: non-scaling-stroke; }
 .safe-guides { position: absolute; inset: 5%; border: 1px solid rgb(230 233 246 / .22); pointer-events: none; }.safe-guides span:first-child { position: absolute; inset: 5%; border: 1px dashed rgb(230 233 246 / .15); }.safe-guides span:last-child::before, .safe-guides span:last-child::after { position: absolute; top: 50%; left: 50%; background: rgb(230 233 246 / .18); content: ''; }.safe-guides span:last-child::before { width: 1px; height: 12px; transform: translateY(-6px); }.safe-guides span:last-child::after { width: 12px; height: 1px; transform: translateX(-6px); }
 .layer-hit-target { position: absolute; z-index: 2; padding: 0; background: transparent; border: 0; outline: 0; cursor: move; touch-action: none; }.layer-hit-target:hover { box-shadow: inset 0 0 0 1px rgb(165 180 252 / .45); }.layer-hit-target.selected { pointer-events: none; }.transform-box { position: absolute; z-index: 4; width: 48%; height: 13%; border: 1px solid #9aa8ff; box-shadow: 0 0 0 1px rgb(20 24 39 / .45); cursor: move; touch-action: none; user-select: none; }.transform-box.background-layer { z-index: 1; }.transform-box.move { cursor: grabbing; }.transform-box.scale { cursor: nwse-resize; }.transform-box.rotate { cursor: crosshair; }.handle { position: absolute; z-index: 3; width: 8px; height: 8px; background: #dce2ff; border: 1px solid #6978d0; pointer-events: auto; }.handle:hover { background: #fff; box-shadow: 0 0 0 2px rgb(154 168 255 / .25); }.h-1 { top: -5px; left: -5px; cursor: nwse-resize; }.h-2 { top: -5px; left: 50%; cursor: ns-resize; }.h-3 { top: -5px; right: -5px; cursor: nesw-resize; }.h-4 { top: 50%; right: -5px; cursor: ew-resize; }.h-5 { right: -5px; bottom: -5px; cursor: nwse-resize; }.h-6 { bottom: -5px; left: 50%; cursor: ns-resize; }.h-7 { bottom: -5px; left: -5px; cursor: nesw-resize; }.h-8 { top: 50%; left: -5px; cursor: ew-resize; }.rotation-line { position: absolute; bottom: -29px; left: 50%; width: 11px; height: 29px; border-left: 1px solid #9aa8ff; pointer-events: auto; cursor: crosshair; }.rotation-line::after { position: absolute; bottom: -1px; left: -5px; width: 9px; height: 9px; background: #dce2ff; border: 1px solid #6978d0; border-radius: 50%; content: ''; }.rotation-line:hover::after { background: #fff; box-shadow: 0 0 0 2px rgb(154 168 255 / .25); }.anchor-point { position: absolute; top: 50%; left: 50%; display: grid; color: #edc68b; transform: translate(-50%, -50%); pointer-events: none; }
 .viewport-badge { position: absolute; top: 8px; left: 9px; display: flex; align-items: center; gap: 5px; padding: 4px 7px; color: #9ba0aa; background: rgb(12 14 19 / .72); border: 1px solid #262a32; border-radius: 3px; font-size: 8.5px; backdrop-filter: blur(5px); }.live-dot { width: 5px; height: 5px; border-radius: 50%; background: #7eb89f; }
