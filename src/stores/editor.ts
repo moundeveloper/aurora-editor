@@ -59,7 +59,7 @@ export const useEditorStore = defineStore('editor', () => {
   const autoKey = ref(false)
   const snap = ref(true)
   const ripple = ref(false)
-  const selectedLayerId = ref('layer-title')
+  const selectedLayerId = ref<string | null>('layer-title')
   const selectedKeyframeId = ref<string | null>(null)
   /** Which mask segment the edge editor is focused on; null selects the whole outline. */
   const selectedMaskSegment = ref<number | null>(null)
@@ -240,7 +240,7 @@ export const useEditorStore = defineStore('editor', () => {
     scenes3D.value = scenes3D.value.filter((scene) => !deletedSceneIds.has(scene.id)
       || remaining.some((layer) => layer.type === '3d-scene' && layer.sceneId === scene.id))
     if (!remaining.some((layer) => layer.id === selectedLayerId.value)) {
-      selectedLayerId.value = layerList().find((layer) => !layer.isPlaceholder)?.id ?? activeClusterId.value ?? ''
+      selectedLayerId.value = layerList().find((layer) => !layer.isPlaceholder)?.id ?? activeClusterId.value ?? null
       selectedKeyframeId.value = null
     }
     if (!scenes3D.value.some((scene) => scene.id === selectedSceneId.value)) {
@@ -252,7 +252,7 @@ export const useEditorStore = defineStore('editor', () => {
     return true
   }
 
-  const selectedLayer = computed(() => findLayerDeep(layers.value, selectedLayerId.value) ?? timelineLayers.value[0] ?? layers.value[0])
+  const selectedLayer = computed(() => findLayerDeep(layers.value, selectedLayerId.value ?? '') ?? timelineLayers.value[0] ?? layers.value[0])
   const selectedScene = computed(() => scenes3D.value.find((scene) => scene.id === selectedSceneId.value) ?? scenes3D.value[0])
   const selectedSceneEntity = computed(() => {
     const scene = selectedScene.value

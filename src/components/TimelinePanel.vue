@@ -15,7 +15,7 @@ import MDialog from './common/MDialog.vue'
 const store = useEditorStore()
 const {
   project, currentTime, layers, timelineLayers, clusterTabs, activeClusterId,
-  selectedLayer, selectedLayerId, selectedKeyframeId, autoKey, snap, ripple,
+  selectedLayer, selectedLayerId, selectedKeyframeId, autoKey, snap, ripple, workspace,
 } = storeToRefs(store)
 const activeBottomTab = ref('Timeline')
 const timelineZoom = ref(100)
@@ -33,14 +33,14 @@ const draggingClipId = ref<string | null>(null)
 const clipDragGhost = ref({ visible: false, x: 0, y: 0, width: 0, color: '', label: '', valid: false, invalid: false })
 const newTrackDropCategory = ref<'visual' | 'audio' | null>(null)
 const selectedTrackIds = ref<string[]>([])
-const selectedLayerIds = ref<string[]>([selectedLayerId.value])
+const selectedLayerIds = ref<string[]>(selectedLayerId.value ? [selectedLayerId.value] : [])
 const selectionAnchorId = ref(selectedLayerId.value)
 const addLayerMenuOpen = ref(false)
 const addLayerTrigger = ref<HTMLElement>()
 const addLayerMenuStyle = ref<Record<string, string>>({ top: '29px' })
 const layerMarqueeRect = ref<{ left: number; top: number; width: number; height: number } | null>(null)
-const trackContextMenu = ref<{ trackId: string; layerIds: string[]; x: number; y: number } | null>(null)
-const trackDialog = ref<{ mode: 'rename' | 'delete'; layerIds: string[]; name: string; clipCount: number } | null>(null)
+const trackContextMenu = ref<{ trackId: string; layerIds: string[]; clipId: string | null; x: number; y: number } | null>(null)
+const trackDialog = ref<{ mode: 'rename' | 'delete'; scope: 'track' | 'clips'; layerIds: string[]; name: string; clipCount: number } | null>(null)
 const trackRenameValue = ref('')
 const tabs = ['Timeline', 'Graph Editor', 'Audio Mixer', 'Scopes']
 
@@ -329,13 +329,47 @@ function contextTrack() {
 
 function openTrackContextMenu(event: MouseEvent, track: TimelineTrack) {
   event.preventDefault()
-  selectTrack(track, event)
+  // Right-clicking a clip should offer that clip, not silently target the whole track it sits on.
+  const clipId = (event.target as Element | null)?.closest('[data-layer-id]')?.getAttribute('data-layer-id') ?? null
+  const clip = clipId ? track.segments.find((segment) => segment.id === clipId && !segment.isPlaceholder) ?? null : null
+  if (clip && !selectedLayerIds.value.includes(clip.id)) publishLayerSelection([clip.id], clip.id)
+  else if (!clip) selectTrack(track, event)
   trackContextMenu.value = {
     trackId: track.id,
     layerIds: track.segments.map((segment) => segment.id),
+    clipId: clip?.id ?? null,
     x: Math.min(event.clientX, window.innerWidth - 174),
-    y: Math.min(event.clientY, window.innerHeight - 96),
+    y: Math.min(event.clientY, window.innerHeight - 124),
   }
+}
+
+const trackDialogDescription = computed(() => {
+  const target = trackDialog.value
+  if (!target) return ''
+  if (target.mode === 'rename') return 'The new name is applied to every clip on this track.'
+  if (target.scope === 'clips') {
+    return target.clipCount > 1
+      ? `This removes ${target.clipCount} clips from the timeline.`
+      : `This removes “${target.name}” from the timeline.`
+  }
+  return target.clipCount > 1
+    ? `This removes “${target.name}” and all ${target.clipCount} clips on its track.`
+    : `This removes “${target.name}” from the timeline.`
+})
+
+const contextClipDeleteLabel = computed(() => {
+  const clipId = trackContextMenu.value?.clipId
+  const multiple = clipId && selectedLayerIds.value.includes(clipId) && selectedLayerIds.value.length > 1
+  return multiple ? `Delete ${selectedLayerIds.value.length} clips` : 'Delete clip'
+})
+
+/** Deletes what is selected when the click landed on a clip, falling back to the whole track. */
+function deleteContextClips() {
+  const menu = trackContextMenu.value
+  if (!menu?.clipId) return
+  const selection = selectedLayerIds.value.includes(menu.clipId) ? selectedLayerIds.value : [menu.clipId]
+  trackContextMenu.value = null
+  requestDeleteLayers(selection)
 }
 
 function renameContextTrack() {
@@ -344,7 +378,7 @@ function renameContextTrack() {
   if (!track || !menu) return
   const name = trackDisplayLayer(track).name
   trackRenameValue.value = name
-  trackDialog.value = { mode: 'rename', layerIds: menu.layerIds, name, clipCount: track.segments.length }
+  trackDialog.value = { mode: 'rename', scope: 'track', layerIds: menu.layerIds, name, clipCount: track.segments.length }
   trackContextMenu.value = null
 }
 
@@ -361,7 +395,7 @@ function deleteContextTrack() {
   const menu = trackContextMenu.value
   if (!track || !menu) return
   const label = trackDisplayLayer(track).name
-  trackDialog.value = { mode: 'delete', layerIds: menu.layerIds, name: label, clipCount: track.segments.length }
+  trackDialog.value = { mode: 'delete', scope: 'track', layerIds: menu.layerIds, name: label, clipCount: track.segments.length }
   trackContextMenu.value = null
 }
 
@@ -823,7 +857,29 @@ function endPointerInteraction() {
   isScrubbing.value = false
 }
 
+/** Deleting is not undoable yet, so it always goes through the same confirmation the track menu uses. */
+function requestDeleteLayers(layerIds: string[]) {
+  const targets = timelineTracks.value.flatMap((track) => track.segments).filter((layer) => layerIds.includes(layer.id) && !layer.isPlaceholder)
+  if (!targets.length) return
+  trackDialog.value = {
+    mode: 'delete',
+    scope: 'clips',
+    layerIds: targets.map((layer) => layer.id),
+    name: targets.length === 1 ? targets[0]!.name : `${targets.length} clips`,
+    clipCount: targets.length,
+  }
+}
+
 function onKeyDown(event: KeyboardEvent) {
+  if (event.key === 'Delete' || event.key === 'Backspace') {
+    // Nodes has its own Delete, and a field being typed into owns the key outright.
+    const target = event.target as Element | null
+    if (workspace.value !== 'Motion' || target?.closest('input, textarea, select, [contenteditable="true"]')) return
+    if (trackDialog.value || !selectedLayerIds.value.length) return
+    event.preventDefault()
+    requestDeleteLayers(selectedLayerIds.value)
+    return
+  }
   if (event.key === 'Escape') {
     addLayerMenuOpen.value = false
     trackContextMenu.value = null
@@ -899,7 +955,13 @@ watch(activeBottomTab, async (tab) => {
 })
 
 watch(selectedLayerId, (id) => {
-  if (id && !selectedLayerIds.value.includes(id)) {
+  // Clearing the selection elsewhere — clicking empty composition, say — clears the clips too.
+  if (!id) {
+    selectedLayerIds.value = []
+    selectedTrackIds.value = []
+    return
+  }
+  if (!selectedLayerIds.value.includes(id)) {
     selectedLayerIds.value = [id]
     selectionAnchorId.value = id
   }
@@ -1098,13 +1160,14 @@ onBeforeUnmount(() => {
           <button type="button" role="menuitem" @click="renameContextTrack"><Pencil :size="11" /> Rename</button>
           <button type="button" role="menuitem" @click="toggleContextTrackVisible"><EyeOff v-if="contextTrack()?.segments.every((segment) => segment.visible)" :size="11" /><Eye v-else :size="11" /> {{ contextTrack()?.segments.every((segment) => segment.visible) ? 'Hide' : 'Show' }}</button>
           <span />
-          <button type="button" class="danger" role="menuitem" @click="deleteContextTrack"><Trash2 :size="11" /> Delete</button>
+          <button v-if="trackContextMenu?.clipId" type="button" class="danger" role="menuitem" @click="deleteContextClips"><Trash2 :size="11" /> {{ contextClipDeleteLabel }}</button>
+          <button type="button" class="danger" role="menuitem" @click="deleteContextTrack"><Trash2 :size="11" /> Delete track</button>
         </div>
       </Teleport>
       <MDialog
         :open="Boolean(trackDialog)"
-        :title="trackDialog?.mode === 'rename' ? 'Rename timeline layer' : 'Delete timeline layer'"
-        :description="trackDialog?.mode === 'delete' && trackDialog.clipCount > 1 ? `This removes “${trackDialog.name}” and all ${trackDialog.clipCount} clips on its track.` : trackDialog?.mode === 'delete' ? `This removes “${trackDialog.name}” from the timeline.` : 'The new name is applied to every clip on this track.'"
+        :title="trackDialog?.mode === 'rename' ? 'Rename timeline layer' : trackDialog?.scope === 'clips' ? 'Delete clips' : 'Delete timeline layer'"
+        :description="trackDialogDescription"
         :confirm-label="trackDialog?.mode === 'delete' ? 'Delete' : 'Rename'"
         :danger="trackDialog?.mode === 'delete'"
         :confirm-disabled="trackDialog?.mode === 'rename' && !trackRenameValue.trim()"

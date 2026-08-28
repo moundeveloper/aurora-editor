@@ -117,8 +117,11 @@ function layerOverlayStyle(layer: EditorLayer) {
   }
 }
 
+/** Nothing selected means no box: the store still falls back to a layer, the viewport must not. */
+const activeSelection = computed(() => (selectedLayerId.value ? selectedLayer.value : null))
+
 const selectionStyle = computed(() => {
-  const layer = selectedLayer.value
+  const layer = activeSelection.value
   if (!layer || !['text', 'shape', 'image', 'video', 'cluster'].includes(layer.type) || currentTime.value < layer.start || currentTime.value >= layer.start + layer.duration) return { display: 'none' }
   return layerOverlayStyle(layer)
 })
@@ -339,6 +342,16 @@ function onViewportPointerDown(event: PointerEvent) {
   if (beginViewportPan(event)) return
   if (event.button !== 0) return
   const point = projectPointAt(event)
+  /*
+   * Layer hit targets and the transform box stop propagation, so anything still arriving here with
+   * the Select tool is a click on empty composition — which clears the selection, the same way
+   * clicking away from a shape does in any editor. Clicks outside the stage entirely count too.
+   */
+  if (activeTool.value === 'Select' || activeTool.value === 'Transform') {
+    selectedLayerId.value = null
+    selectedKeyframeId.value = null
+    return
+  }
   if (!point) return
   if (activeTool.value === 'Zoom') {
     event.preventDefault()
@@ -568,10 +581,10 @@ watch([currentTime, layers, scenes3D, nodes, nodeConnections, renderRootNodeId],
           @pointerdown="beginLayerMove($event, layer)"
         />
         <div
-          v-if="selectedLayer && ['text', 'shape', 'image', 'video', 'cluster'].includes(selectedLayer.type)"
+          v-if="activeSelection && ['text', 'shape', 'image', 'video', 'cluster'].includes(activeSelection.type)"
           ref="transformBox"
           class="transform-box"
-          :class="[activeTransformMode, { 'background-layer': selectedLayer.type === 'video' }]"
+          :class="[activeTransformMode, { 'background-layer': activeSelection.type === 'video' }]"
           :style="selectionStyle"
           title="Drag to move"
           @pointerdown="beginViewportTransform($event, 'move')"
