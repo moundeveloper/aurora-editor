@@ -80,6 +80,12 @@ export interface MaskGeometryField {
   scale: number
   /** Render-space distance to the perimeter, positive inside the shape and negative outside. */
   signedDistance: Float32Array
+  /**
+   * Continuous position along the perimeter, in [0, 1) — segment index *plus* how far along that
+   * segment the closest point sits. Storing the bare segment index instead makes this piecewise
+   * constant, and every painted feather value then steps across the Voronoi bisectors between
+   * segments, fanning the fade out into flat straight-edged facets.
+   */
   edgePosition: Float32Array
   /** Deepest point inside the shape, in render pixels — the ceiling on how far a feather may reach. */
   maxInside: number
@@ -104,6 +110,7 @@ export function createMaskGeometry(layer: EditorLayer, time: number, width: numb
       const x = (fieldX + .5) / fieldScale
       let bestSquared = Infinity
       let bestSegment = 0
+      let bestAmount = 0
       for (let segment = 0; segment < segmentCount; segment += 1) {
         const base = segment * 5
         const startX = segments[base]!
@@ -117,17 +124,48 @@ export function createMaskGeometry(layer: EditorLayer, time: number, width: numb
         if (squared < bestSquared) {
           bestSquared = squared
           bestSegment = segment
+          bestAmount = amount
         }
       }
       const index = fieldY * fieldWidth + fieldX
       const distance = Math.sqrt(bestSquared)
       const isInside = pointInsidePolygon(x, y, polygon)
       signedDistance[index] = isInside ? distance : -distance
-      edgePosition[index] = bestSegment / segmentCount
+      // Adjacent segments share a vertex, so both agree on this value at the bisector between them.
+      edgePosition[index] = (bestSegment + bestAmount) / segmentCount
       if (isInside && distance > maxInside) maxInside = distance
     }
   }
   return { width: fieldWidth, height: fieldHeight, scale: fieldScale, signedDistance, edgePosition, maxInside }
+}
+
+/**
+ * Separable box blur over a scalar field, via running sums so cost is independent of radius.
+ * Edges clamp rather than wrap; the field is frame-sized and its borders are saturated anyway.
+ */
+function blurScalarField(values: Float32Array, width: number, height: number, radius: number) {
+  if (radius < 1) return
+  const scratch = new Float32Array(values.length)
+  const window = radius * 2 + 1
+  const clampX = (x: number) => Math.min(width - 1, Math.max(0, x))
+  const clampY = (y: number) => Math.min(height - 1, Math.max(0, y))
+  for (let y = 0; y < height; y += 1) {
+    const row = y * width
+    let sum = 0
+    for (let offset = -radius; offset <= radius; offset += 1) sum += values[row + clampX(offset)]!
+    for (let x = 0; x < width; x += 1) {
+      scratch[row + x] = sum / window
+      sum += values[row + clampX(x + radius + 1)]! - values[row + clampX(x - radius)]!
+    }
+  }
+  for (let x = 0; x < width; x += 1) {
+    let sum = 0
+    for (let offset = -radius; offset <= radius; offset += 1) sum += scratch[clampY(offset) * width + x]!
+    for (let y = 0; y < height; y += 1) {
+      values[y * width + x] = sum / window
+      sum += scratch[clampY(y + radius + 1) * width + x]! - scratch[clampY(y - radius) * width + x]!
+    }
+  }
 }
 
 export interface MaskAlphaField {
@@ -147,12 +185,49 @@ export function maskAlphaField(geometry: MaskGeometryField, effect: MaskEffectIn
   const featherLimit = Math.max(hardRamp, geometry.maxInside * 2)
   const feather = Math.min(effect.feather * width / projectWidth, featherLimit)
   const sampleCount = effect.edgeFeather.length
+
+  /*
+   * Pass 1 — the selector: how wide the feather should be at each pixel, read off the perimeter.
+   * Attribution is by nearest segment, which is discontinuous wherever two non-adjacent stretches of
+   * the perimeter compete for the same pixel (the medial axis: a rectangle's corner diagonals, the
+   * spine of any concave shape). Sampled raw, those seams become straight-edged facets radiating out
+   * of the shape as soon as the feather is wide enough to see them.
+   */
+  const selector = new Float32Array(rasterWidth * rasterHeight)
+  for (let rasterY = 0; rasterY < rasterHeight; rasterY += 1) {
+    const fieldY = ((rasterY + .5) / rasterScale) * geometry.scale - .5
+    const topRow = Math.max(0, Math.min(geometry.height - 1, Math.floor(fieldY)))
+    const bottomRow = Math.min(geometry.height - 1, topRow + 1)
+    const nearestRow = (clamp01(fieldY - topRow) < .5 ? topRow : bottomRow) * geometry.width
+    for (let rasterX = 0; rasterX < rasterWidth; rasterX += 1) {
+      const fieldX = ((rasterX + .5) / rasterScale) * geometry.scale - .5
+      const leftColumn = Math.max(0, Math.min(geometry.width - 1, Math.floor(fieldX)))
+      const rightColumn = Math.min(geometry.width - 1, leftColumn + 1)
+      // Edge position wraps at 0/1, so it is picked nearest — blending it would smear sample 31 into 0.
+      const nearestColumn = clamp01(fieldX - leftColumn) < .5 ? leftColumn : rightColumn
+      const position = geometry.edgePosition[nearestRow + nearestColumn]! * sampleCount
+      const lowerSample = Math.floor(position)
+      const lower = effect.edgeFeather[lowerSample % sampleCount] ?? 1
+      const upper = effect.edgeFeather[(lowerSample + 1) % sampleCount] ?? 1
+      selector[rasterY * rasterWidth + rasterX] = clamp01(lower + (upper - lower) * (position - lowerSample))
+    }
+  }
+
+  /*
+   * Pass 2 — smooth the selector in 2D, not along the perimeter. Blurring is what makes the seams
+   * vanish: a discontinuity in a scalar field cannot survive a blur, and the radius is tied to the
+   * feather so the smoothing covers exactly the distance over which the fade is visible. This is the
+   * blurred-selector step a variable-blur compositor does; doing it here costs three linear passes.
+   */
+  blurScalarField(selector, rasterWidth, rasterHeight, Math.round(feather * rasterScale / 3))
+
+  // Pass 3 — the ramp, with the painted value scaling the feather *width* the way After Effects'
+  // variable mask feather treats its feather points.
   for (let rasterY = 0; rasterY < rasterHeight; rasterY += 1) {
     const fieldY = ((rasterY + .5) / rasterScale) * geometry.scale - .5
     const topRow = Math.max(0, Math.min(geometry.height - 1, Math.floor(fieldY)))
     const bottomRow = Math.min(geometry.height - 1, topRow + 1)
     const weightY = clamp01(fieldY - topRow)
-    const nearestRow = (weightY < .5 ? topRow : bottomRow) * geometry.width
     for (let rasterX = 0; rasterX < rasterWidth; rasterX += 1) {
       const fieldX = ((rasterX + .5) / rasterScale) * geometry.scale - .5
       const leftColumn = Math.max(0, Math.min(geometry.width - 1, Math.floor(fieldX)))
@@ -163,15 +238,10 @@ export function maskAlphaField(geometry: MaskGeometryField, effect: MaskEffectIn
       const bottom = geometry.signedDistance[bottomRow * geometry.width + leftColumn]! * (1 - weightX)
         + geometry.signedDistance[bottomRow * geometry.width + rightColumn]! * weightX
       const signed = top * (1 - weightY) + bottom * weightY
-      // Edge position wraps at 0/1, so it is picked nearest — blending it would smear sample 31 into 0.
-      const nearestColumn = weightX < .5 ? leftColumn : rightColumn
-      const sample = Math.floor(geometry.edgePosition[nearestRow + nearestColumn]! * sampleCount) % sampleCount
-      const edgeStrength = clamp01(effect.edgeFeather[sample] ?? 1)
-      const hardAlpha = clamp01(.5 + signed / hardRamp)
-      const softAlpha = feather > 0 ? clamp01(.5 + signed / feather) : hardAlpha
-      let value = hardAlpha + (softAlpha - hardAlpha) * edgeStrength
+      const index = rasterY * rasterWidth + rasterX
+      let value = clamp01(.5 + signed / Math.max(hardRamp, feather * selector[index]!))
       if (effect.inverted) value = 1 - value
-      alpha[rasterY * rasterWidth + rasterX] = Math.round(value * 255)
+      alpha[index] = Math.round(value * 255)
     }
   }
   return { width: rasterWidth, height: rasterHeight, alpha }

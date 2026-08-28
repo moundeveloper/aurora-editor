@@ -57,6 +57,28 @@ describe('mask alpha field', () => {
     expect(hardRun(130)).toBeGreaterThan(40)
   })
 
+  it('varies feather around the edge without faceting', () => {
+    // Every sample is feathered, only by differing amounts, so nothing in this field may step abruptly.
+    // A nearest-segment lookup breaks exactly here: it is piecewise constant per perimeter segment, so
+    // the strength jumps across each segment's Voronoi bisector and the fade fans out into flat facets.
+    // Held to a mild contrast on purpose: the narrowest ramp here is 78px wide, so its own per-pixel
+    // slope is about 4/255. Anything materially above that is a seam rather than a gradient.
+    const varied = Array.from({ length: 32 }, (_, index) => (index < 16 ? 1 : .6))
+    const { field } = fieldFor(130, varied)
+    let worstJump = 0
+    for (let y = 1; y < field.height - 1; y += 1) {
+      for (let x = 1; x < field.width - 1; x += 1) {
+        const here = field.alpha[y * field.width + x]!
+        worstJump = Math.max(
+          worstJump,
+          Math.abs(here - field.alpha[y * field.width + x + 1]!),
+          Math.abs(here - field.alpha[(y + 1) * field.width + x]!),
+        )
+      }
+    }
+    expect(worstJump).toBeLessThan(6)
+  })
+
   it('paints a hard cut where the edge is painted hard and leaves the rest feathered', () => {
     const painted = neutralEdge.map((_, index) => (index < 8 ? 0 : 1))
     const { field } = fieldFor(130, painted)
