@@ -140,6 +140,15 @@ export const useEditorStore = defineStore('editor', () => {
     nodes.value = state.nodes
     nodeConnections.value = state.nodeConnections
     ensureClusterAssets()
+    /*
+     * The default selection is a layer id from the starter project. A restored project usually has
+     * no such layer, and the selection would otherwise point at nothing while still reading as a
+     * selection — a transform box in the viewport with no clip behind it.
+     */
+    if (!findLayerDeep(layers.value, selectedLayerId.value ?? '')) {
+      selectedLayerId.value = null
+      selectedKeyframeId.value = null
+    }
   }
 
   function currentState(): SerializedEditorState {
@@ -459,6 +468,9 @@ export const useEditorStore = defineStore('editor', () => {
         item.children?.forEach(renewLayer)
       }
       renewLayer(layer)
+      // Templates snapshotted before the link existed carry no assetId; without one the copy reads
+      // as a brand new cluster and earns a duplicate Library entry.
+      layer.assetId = asset.id
       layer.name = asset.name
       layerList().splice(0, 0, layer)
       project.value.duration = Math.max(project.value.duration, layer.start + layer.duration)
@@ -771,16 +783,21 @@ export const useEditorStore = defineStore('editor', () => {
    * rather than left describing whatever the cluster looked like the moment it was made.
    */
   function publishClusterAsset(cluster: EditorLayer) {
-    const snapshot = structuredClone(rawLayerTree(cluster))
     const count = cluster.children?.length ?? 0
     const existing = cluster.assetId ? assets.value.find((asset) => asset.id === cluster.assetId) : undefined
     if (existing) {
       existing.name = cluster.name
       existing.duration = cluster.duration
       existing.sizeLabel = `${count} reusable ${count === 1 ? 'layer' : 'layers'}`
-      existing.layerTemplate = snapshot
+      existing.layerTemplate = structuredClone(rawLayerTree(cluster))
       return existing
     }
+    /*
+     * The link is written onto the cluster before it is snapshotted, so the template carries it too.
+     * Snapshotting first leaves every copy dropped from this entry with no idea which entry it came
+     * from, and `ensureClusterAssets` then hands each one a Library entry of its own — one more
+     * identical row per drop.
+     */
     const asset: MediaAsset = {
       id: crypto.randomUUID(),
       name: cluster.name,
@@ -788,9 +805,10 @@ export const useEditorStore = defineStore('editor', () => {
       duration: cluster.duration,
       dimensions: `${project.value.width} × ${project.value.height}`,
       sizeLabel: `${count} reusable ${count === 1 ? 'layer' : 'layers'}`,
-      layerTemplate: snapshot,
+      layerTemplate: undefined,
     }
     cluster.assetId = asset.id
+    asset.layerTemplate = structuredClone(rawLayerTree(cluster))
     assets.value.unshift(asset)
     return asset
   }

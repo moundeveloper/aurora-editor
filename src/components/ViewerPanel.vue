@@ -117,8 +117,12 @@ function layerOverlayStyle(layer: EditorLayer) {
   }
 }
 
-/** Nothing selected means no box: the store still falls back to a layer, the viewport must not. */
-const activeSelection = computed(() => (selectedLayerId.value ? selectedLayer.value : null))
+/**
+ * Nothing selected means no box. The store's `selectedLayer` falls back to the first layer when the
+ * id resolves to nothing, which the inspector wants and the viewport must not have — a box drawn
+ * around a fallback is a selection the user never made. Only an exact match counts.
+ */
+const activeSelection = computed(() => (selectedLayer.value?.id === selectedLayerId.value ? selectedLayer.value : null))
 
 const selectionStyle = computed(() => {
   const layer = activeSelection.value
