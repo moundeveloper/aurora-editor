@@ -6,6 +6,7 @@ import { useEditorStore } from '@/stores/editor'
 import { shapeSegmentCount } from '@/engine/shapes/shapeGeometry'
 import type { EditorLayer, EditorNode } from '@/models/editor'
 import MaskEdgePainter from './MaskEdgePainter.vue'
+import NumberField from './common/NumberField.vue'
 import PanelHeader from './common/PanelHeader.vue'
 
 const store = useEditorStore()
@@ -98,15 +99,15 @@ function applyToAll(value: number) {
             title="Feather width for this segment, in project pixels. Zero is a hard cut."
             @input="setFeather(Number(($event.target as HTMLInputElement).value))"
           />
-          <input
+          <NumberField
             class="feather-number"
-            :value="activeFeather"
-            type="number"
-            min="0"
-            step="1"
-            aria-label="Feather width in pixels"
-            @change="setFeather(Number(($event.target as HTMLInputElement).value))"
-          />
+            :model-value="activeFeather"
+            :min="0"
+            :max="featherMax"
+            :step="1"
+            label="Feather width in pixels"
+            @update:model-value="setFeather($event)"
+            />
           <span>px</span>
         </div>
         <div class="segment-actions">
@@ -126,7 +127,7 @@ function applyToAll(value: number) {
 .mask-source { display: flex; height: 20px; min-width: 0; align-items: center; justify-content: space-between; gap: 8px; }.mask-source span { overflow: hidden; color: var(--text-secondary); font-size: 8px; font-weight: 560; text-overflow: ellipsis; white-space: nowrap; }.mask-source small { flex: 0 0 auto; color: var(--text-muted); font-size: 6.5px; }
 .segment-editor { display: grid; gap: 4px; margin-top: 6px; padding-top: 5px; border-top: 1px solid #2a2e37; }
 .segment-title { display: flex; align-items: baseline; justify-content: space-between; gap: 6px; }.segment-title strong { color: #edc68b; font-size: 7.5px; font-weight: 600; }.segment-title small { color: var(--text-muted); font-size: 6.5px; }
-.feather-control { display: flex; height: 20px; align-items: center; gap: 5px; color: var(--text-muted); font-size: 7px; }.feather-control label { flex: 0 0 auto; }.feather-control input[type="range"] { min-width: 0; flex: 1; accent-color: var(--focus); }.feather-number { width: 34px; flex: 0 0 auto; padding: 1px 3px; color: var(--text-secondary); background: #20232b; border: 1px solid #353a46; border-radius: 3px; font: inherit; font-size: 7px; font-variant-numeric: tabular-nums; text-align: right; }.feather-number:focus { border-color: var(--focus); outline: none; }
+.feather-control { display: flex; height: 20px; align-items: center; gap: 5px; color: var(--text-muted); font-size: 7px; }.feather-control label { flex: 0 0 auto; }.feather-control input[type="range"] { min-width: 0; flex: 1; accent-color: var(--focus); }.feather-number { width: 34px; flex: 0 0 auto; padding: 1px 3px; color: var(--text-secondary); background: #20232b; border: 1px solid #353a46; border-radius: 3px; font: inherit; font-size: 7px; font-variant-numeric: tabular-nums; }.feather-number :deep(input) { text-align: right; }.feather-number:focus-within { border-color: var(--focus); }
 .segment-actions { display: flex; gap: 3px; }.segment-actions button { flex: 1; height: 18px; padding: 0 4px; color: var(--text-muted); background: #20232b; border: 1px solid #353a46; border-radius: 3px; font: inherit; font-size: 6.5px; cursor: pointer; white-space: nowrap; }.segment-actions button:hover { color: var(--text-primary); border-color: #596173; }
 .segment-empty { margin: 6px 0 0; color: var(--text-muted); font-size: 7px; text-align: center; }
 .mask-empty { display: flex; min-height: 0; flex: 1; align-items: center; justify-content: center; gap: 6px; padding: 12px; color: var(--text-muted); font-size: 8px; text-align: center; }.mask-empty svg { color: #727da9; }

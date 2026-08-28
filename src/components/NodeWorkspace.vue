@@ -15,6 +15,7 @@ import {
 import { contributingNodeIds, evaluateNodeGraph } from '@/engine/nodes/evaluateGraph'
 import type { EditorNode, EditorNodeKind, EditorNodeSocket } from '@/models/editor'
 import IconButton from './common/IconButton.vue'
+import NumberField from './common/NumberField.vue'
 import MSelect, { type MSelectOption } from './common/MSelect.vue'
 
 const MIN_ZOOM = .25
@@ -403,15 +404,15 @@ onBeforeUnmount(() => {
           <span v-for="(socket, index) in node.inputs" :key="socket.id" class="node-row input" :style="rowStyle(index, 'inputs', node)">
             <template v-if="socket.type === 'value' && !isLinked(node, socket)">
               <span class="socket-label">{{ socket.label }}</span>
-              <input
+              <NumberField
                 class="socket-value"
-                type="number"
-                :value="socket.value ?? 0"
+                :model-value="socket.value ?? 0"
                 :min="socketMeta(node.kind, 'input', index)?.min"
                 :max="socketMeta(node.kind, 'input', index)?.max"
                 :step="socketMeta(node.kind, 'input', index)?.step ?? 1"
+                :label="socket.label"
                 @pointerdown.stop
-                @input="store.setNodeSocketValue(node.id, socket.id, Number(($event.target as HTMLInputElement).value))"
+                @update:model-value="store.setNodeSocketValue(node.id, socket.id, $event)"
               />
             </template>
             <span v-else class="socket-label">{{ socket.label }}</span>
@@ -466,7 +467,7 @@ onBeforeUnmount(() => {
 .node-canvas { position: relative; min-height: 0; flex: 1; overflow: hidden; cursor: grab; touch-action: none; }.node-canvas.panning { cursor: grabbing; }.node-canvas.linking { cursor: crosshair; }.node-grid { position: absolute; inset: 0; background-color: #0c0e12; background-image: radial-gradient(#272b34 1px, transparent 1px), radial-gradient(#181b21 1px, transparent 1px); }.graph-layer { position: absolute; top: 0; left: 0; transform-origin: 0 0; }.connections { position: absolute; top: 0; left: 0; width: 1px; height: 1px; overflow: visible; }.connections path { fill: none; stroke-width: 2; cursor: pointer; pointer-events: stroke; }.connections path:hover { stroke-width: 3; }.connections path.selected { stroke: #e3ae72 !important; stroke-width: 3; }.connections path.pending { stroke-dasharray: 5 4; pointer-events: none; opacity: .7; }.connections path.pending.valid { stroke-dasharray: none; opacity: 1; }
 .graph-node { --node-color: #7b84b8; position: absolute; z-index: 2; overflow: visible; color: var(--text-secondary); text-align: left; background: #1b1e26; border: 1px solid #3a3e48; border-radius: 5px; box-shadow: 0 4px 12px rgb(0 0 0 / .35); cursor: grab; user-select: none; }.graph-node:hover { border-color: #666c7b; }.graph-node.selected { z-index: 5; border-color: #e0e5ff; box-shadow: 0 0 0 1px #e0e5ff, 0 7px 18px rgb(0 0 0 / .45); }.graph-node.dimmed { opacity: .3; }.graph-node.inert { opacity: .55; border-style: dashed; }.graph-node.muted { filter: grayscale(.7); }.graph-node.muted .node-header { background: #4a4f5c; }
 .node-header { position: absolute; top: 0; right: 0; left: 0; display: flex; height: 22px; align-items: center; gap: 4px; padding: 0 6px; color: #f2f4fb; background: color-mix(in srgb, var(--node-color) 68%, #15171d); border-radius: 4px 4px 0 0; }.node-header strong { min-width: 0; flex: 1; overflow: hidden; font-size: 8.5px; font-weight: 620; text-overflow: ellipsis; white-space: nowrap; }.viewer-toggle { display: grid; width: 15px; height: 15px; place-items: center; padding: 0; color: #f2f4fb; background: rgb(0 0 0 / .25); border: 0; border-radius: 2px; cursor: pointer; }.viewer-toggle.active { color: #101219; background: #e3ae72; }
-.node-row { position: absolute; right: 0; left: 0; display: flex; align-items: center; gap: 4px; padding: 0 8px; font-size: 8px; }.node-row.output { justify-content: flex-end; }.node-row .socket-label { overflow: hidden; color: var(--text-muted); text-overflow: ellipsis; white-space: nowrap; }.node-row.input .socket-label { flex: 0 0 auto; }.socket-value { width: 100%; min-width: 0; height: 15px; margin-left: auto; padding: 0 4px; color: var(--text-primary); background: #2b3040; border: 1px solid #3c4354; border-radius: 8px; outline: 0; font: inherit; font-size: 8px; text-align: right; }.socket-value:focus { border-color: var(--focus); }.node-row :deep(.m-select) { width: 100%; }.node-row :deep(.m-select-trigger) { height: 16px; padding: 0 4px; background: #272c39; border-color: #394052; border-radius: 3px; font-size: 7.5px; }.node-row :deep(.m-select-trigger svg) { width: 8px; height: 8px; }.node-row :deep(.m-select-menu) { top: calc(100% + 2px); min-width: 132px; max-height: 144px; padding: 2px; }.node-row :deep(.m-select-menu button) { height: 20px; padding: 0 4px; font-size: 7.5px; }.node-row.source-row { z-index: 4; }
+.node-row { position: absolute; right: 0; left: 0; display: flex; align-items: center; gap: 4px; padding: 0 8px; font-size: 8px; }.node-row.output { justify-content: flex-end; }.node-row .socket-label { overflow: hidden; color: var(--text-muted); text-overflow: ellipsis; white-space: nowrap; }.node-row.input .socket-label { flex: 0 0 auto; }.socket-value { width: 100%; min-width: 0; height: 15px; margin-left: auto; padding: 0 4px; color: var(--text-primary); background: #2b3040; border: 1px solid #3c4354; border-radius: 8px; font: inherit; font-size: 8px; }.socket-value :deep(input) { text-align: right; }.socket-value:focus-within { border-color: var(--focus); }.node-row :deep(.m-select) { width: 100%; }.node-row :deep(.m-select-trigger) { height: 16px; padding: 0 4px; background: #272c39; border-color: #394052; border-radius: 3px; font-size: 7.5px; }.node-row :deep(.m-select-trigger svg) { width: 8px; height: 8px; }.node-row :deep(.m-select-menu) { top: calc(100% + 2px); min-width: 132px; max-height: 144px; padding: 2px; }.node-row :deep(.m-select-menu button) { height: 20px; padding: 0 4px; font-size: 7.5px; }.node-row.source-row { z-index: 4; }
 .socket { position: absolute; z-index: 3; width: 10px; height: 10px; margin-top: -5px; border: 1px solid #0e1014; border-radius: 50%; cursor: crosshair; }.socket:hover { transform: scale(1.3); }.socket.input.active { box-shadow: 0 0 0 3px rgb(126 224 192 / .5); transform: scale(1.3); }
 .canvas-help { position: absolute; right: 9px; bottom: 8px; color: #6f7583; font-size: 7px; pointer-events: none; }
 .node-menu { position: absolute; z-index: 10; top: 8px; left: 10px; display: grid; max-height: calc(100% - 24px); width: 168px; gap: 6px; overflow: auto; padding: 6px; background: #1a1d24; border: 1px solid #444955; border-radius: 5px; box-shadow: 0 12px 30px rgb(0 0 0 / .55); }.menu-group { display: grid; }.menu-group strong { padding: 3px 5px 4px; color: var(--text-muted); font-size: 7px; letter-spacing: .07em; text-transform: uppercase; }.node-menu button { display: flex; height: 22px; align-items: center; gap: 6px; padding: 0 6px; color: var(--text-secondary); background: transparent; border: 1px solid transparent; border-radius: 3px; font: inherit; font-size: 8.5px; cursor: pointer; }.node-menu button:hover { color: #dce2ff; background: var(--bg-selected); border-color: var(--accent-border); }

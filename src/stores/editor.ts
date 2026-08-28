@@ -226,13 +226,35 @@ export const useEditorStore = defineStore('editor', () => {
     return true
   }
 
-  function deleteTimelineLayers(layerIds: string[]) {
+  /**
+   * `keepTracks` separates removing a clip from removing the track it sits on. Deleting the last clip
+   * of a track would otherwise take the track row with it, because a track exists only as the layers
+   * grouped under it — so an empty one is left behind as a placeholder, the same shape `addEmptyTrack`
+   * produces. The track context menu still deletes the row outright.
+   */
+  function deleteTimelineLayers(layerIds: string[], options: { keepTracks?: boolean } = {}) {
     const ids = new Set(layerIds)
     const deleted = layerList().filter((layer) => ids.has(layer.id))
     if (!deleted.length) return false
+    const trackKeyOf = (layer: EditorLayer) => layer.trackId ?? layer.id
+    const emptiedTracks = new Map<string, { index: number; template: EditorLayer }>()
+    layerList().forEach((layer, index) => {
+      const key = trackKeyOf(layer)
+      if (ids.has(layer.id) && !emptiedTracks.has(key)) emptiedTracks.set(key, { index, template: layer })
+    })
     const deletedTree = flattenLayers(deleted)
     const deletedIds = new Set(deletedTree.map((layer) => layer.id))
     replaceLayerList(layerList().filter((layer) => !ids.has(layer.id)))
+    if (options.keepTracks) {
+      // Descending, so each insertion index still refers to the position it was recorded at.
+      ;[...emptiedTracks.entries()].sort(([, left], [, right]) => right.index - left.index).forEach(([key, { index, template }]) => {
+        if (layerList().some((layer) => trackKeyOf(layer) === key)) return
+        const placeholder = makeEmptyTrack(template.type === 'audio' ? 'audio' : 'visual', key)
+        placeholder.name = template.name
+        placeholder.color = template.color
+        layerList().splice(Math.min(index, layerList().length), 0, placeholder)
+      })
+    }
     openClusterTabs.value = openClusterTabs.value.filter((id) => !deletedIds.has(id))
     if (activeClusterId.value && deletedIds.has(activeClusterId.value)) activeClusterId.value = openClusterTabs.value.at(-1) ?? null
     const remaining = flattenLayers()
