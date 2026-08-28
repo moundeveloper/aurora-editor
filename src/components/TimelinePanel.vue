@@ -21,6 +21,7 @@ const {
 const activeBottomTab = ref('Timeline')
 const timelineZoom = ref(100)
 const timelineRef = ref<HTMLElement>()
+const tracksScroll = ref<HTMLElement>()
 const timelineViewportWidth = ref(900)
 const isPanning = ref(false)
 const isScrubbing = ref(false)
@@ -938,14 +939,11 @@ function onDurationChange(value: number) {
 }
 
 /** Where a library drag would land, and how wide the clip would be, in seconds. */
-const assetDrop = ref<{ trackId: string | null; time: number; duration: number } | null>(null)
+const assetDrop = ref<{ trackId: string | null; time: number; duration: number; insertTop: number | null } | null>(null)
 
 const draggingAsset = computed(() => (draggingAssetId.value
   ? store.assets.find((asset) => asset.id === draggingAssetId.value) ?? null
   : null))
-
-/** The phantom occupies its own row when the drop would create a track rather than join one. */
-const assetDropIsNewTrack = computed(() => Boolean(assetDrop.value && !assetDrop.value.trackId))
 
 const assetGhostStyle = computed(() => {
   const drop = assetDrop.value
@@ -980,13 +978,33 @@ function updateAssetDrop(event: DragEvent) {
   const kind = asset.kind === 'composition' ? 'image' : asset.kind
   const duration = Math.min(asset.duration ?? 6, Math.max(1 / project.value.frameRate, project.value.duration - time))
 
-  const row = (event.target as Element | null)?.closest('[data-track-id]')?.getAttribute('data-track-id') ?? null
-  const track = row ? timelineTracks.value.find((item) => item.id === row) ?? null : null
-  assetDrop.value = {
-    trackId: track && trackAcceptsAsset(track, time, duration, kind) ? track.id : null,
-    time,
-    duration,
+  /*
+   * The target is found by geometry rather than from the event's target element. Reading the element
+   * under the pointer sounds equivalent, but the preview is drawn into that same layout: a phantom
+   * row inserted in the flow moves every row below it, which changes what the pointer is over, which
+   * removes the phantom, which moves them back. Measuring rows instead breaks that loop, and the
+   * preview below is an overlay so it cannot displace anything either.
+   */
+  const container = tracksScroll.value
+  const rows = [...(container?.querySelectorAll<HTMLElement>('.track-row[data-track-id]') ?? [])]
+  const hovered = rows.find((row) => {
+    const rect = row.getBoundingClientRect()
+    return event.clientY >= rect.top && event.clientY <= rect.bottom
+  })
+  const track = hovered?.dataset.trackId
+    ? timelineTracks.value.find((item) => item.id === hovered.dataset.trackId) ?? null
+    : null
+  const joins = Boolean(track && trackAcceptsAsset(track, time, duration, kind))
+
+  // Where the new track would appear, as an offset inside the scroller, when the drop cannot join one.
+  let insertTop: number | null = null
+  if (!joins && container) {
+    const box = container.getBoundingClientRect()
+    const anchor = kind === 'audio' ? rows.at(-1) : rows[0]
+    const rect = anchor?.getBoundingClientRect()
+    insertTop = rect ? (kind === 'audio' ? rect.bottom : rect.top) - box.top : 0
   }
+  assetDrop.value = { trackId: joins ? track!.id : null, time, duration, insertTop }
 }
 
 /**
@@ -1157,12 +1175,11 @@ onBeforeUnmount(() => {
           </div>
         </div>
 
-        <div class="tracks-scroll">
+        <div ref="tracksScroll" class="tracks-scroll">
+          <div v-if="assetDrop && assetDrop.insertTop !== null" class="asset-insert-line" :style="{ top: `${assetDrop.insertTop}px` }"><div class="asset-ghost" :style="assetGhostStyle"><span>{{ draggingAsset?.name }}</span></div></div>
           <template v-for="(track, index) in timelineTracks" :key="track.id">
             <div v-if="index === 0" class="track-section-label"><span>Visual layers</span><button type="button" title="Add empty visual track" aria-label="Add empty visual track" @click.stop="store.addEmptyTrack('visual')"><Plus :size="10" /><span>Add track</span></button><small>{{ visualTrackCount }}</small></div>
-            <div v-if="assetDropIsNewTrack && draggingAsset && draggingAsset.kind !== 'audio' && index === 0" class="asset-phantom-row"><div class="asset-ghost" :style="assetGhostStyle"><span>{{ draggingAsset.name }}</span></div></div>
             <div v-if="index === 0 && newTrackDropCategory === 'visual'" class="new-track-zone active" data-category="visual" @pointerup.stop="commitNewTrackDrop('visual')"><Plus :size="10" /><span>Drop into new visual layer</span></div>
-            <div v-if="assetDropIsNewTrack && draggingAsset?.kind === 'audio' && index === visualTrackCount" class="asset-phantom-row"><div class="asset-ghost" :style="assetGhostStyle"><span>{{ draggingAsset.name }}</span></div></div>
             <div v-if="index === visualTrackCount" class="track-section-label audio"><span>Audio layers</span><button type="button" title="Add empty audio track" aria-label="Add empty audio track" @click.stop="store.addEmptyTrack('audio')"><Plus :size="10" /><span>Add track</span></button><small>{{ timelineTracks.length - visualTrackCount }}</small></div>
             <div
               class="track-row"
@@ -1313,7 +1330,10 @@ onBeforeUnmount(() => {
 .timeline-clip.clip-drag-source { opacity: .16; }.clip-drag-ghost { position: absolute; z-index: 28; display: flex; height: 25px; min-width: 10px; align-items: center; gap: 4px; padding: 0 6px; overflow: hidden; color: #f4f6ff; border: 1px dashed rgb(218 224 255 / .72); border-radius: 3px; box-shadow: 0 5px 14px rgb(0 0 0 / .42); opacity: .72; pointer-events: none; }.clip-drag-ghost.valid { border-style: solid; border-color: #b5c0ff; box-shadow: 0 0 0 1px rgb(140 155 255 / .35), 0 5px 14px rgb(0 0 0 / .42); opacity: .92; }.clip-drag-ghost.invalid { background: #7f3540 !important; border-color: #ff8796; box-shadow: 0 0 0 1px rgb(255 117 135 / .32), 0 5px 14px rgb(0 0 0 / .42); opacity: .9; }.clip-drag-ghost span { min-width: 0; overflow: hidden; font-size: 8px; font-weight: 560; text-overflow: ellipsis; text-shadow: 0 1px 2px #090a0e; white-space: nowrap; }
 .razor-cursor-head { left: -5px; width: 10px; height: 9px; }.razor-guide { box-shadow: none; opacity: .3; }.razor-horizontal { box-shadow: none; }.razor-crosshair { top: calc(var(--level-y) - 2px); left: -2px; width: 5px; height: 5px; box-shadow: none; }.razor-ghost small { left: 6px; padding: 1px 3px; font-size: 7px; }
 .track-row.multi-selected .track-header { outline: 1px solid rgb(165 180 252 / .42); outline-offset: -1px; }.cluster-count { padding: 1px 4px; color: #c3cafd; background: rgb(127 143 226 / .13); border: 1px solid rgb(165 180 252 / .3); border-radius: 3px; font-size: 7px; white-space: nowrap; }.timeline-clip.cluster { background-image: repeating-linear-gradient(135deg, rgb(255 255 255 / .08) 0 4px, transparent 4px 8px); }
-.asset-phantom-row { position: relative; height: 30px; margin: 1px 0 1px 220px; border: 1px dashed var(--accent-border); border-radius: 3px; background: rgb(140 155 255 / .06); }
+.tracks-scroll { position: relative; }
+/* An overlay, never in the flow: a preview that displaced the rows would change what the pointer is over. */
+.asset-insert-line { position: absolute; z-index: 8; right: 0; left: 220px; height: 0; border-top: 2px solid #a5b4fc; pointer-events: none; }
+.asset-insert-line .asset-ghost { top: -13px; height: 26px; bottom: auto; }
 .asset-ghost { position: absolute; top: 3px; bottom: 3px; z-index: 6; display: flex; align-items: center; overflow: hidden; padding: 0 5px; background: rgb(140 155 255 / .3); border: 1px solid #a5b4fc; border-radius: 3px; pointer-events: none; }
 .asset-ghost span { overflow: hidden; color: #eef1ff; font-size: 7.5px; text-overflow: ellipsis; white-space: nowrap; }
 .track-row.asset-drop-target { background: rgb(140 155 255 / .08); box-shadow: inset 0 0 0 1px var(--accent-border); }
