@@ -36,7 +36,14 @@ function normalizeNodeGraph(nodes: unknown, connections: unknown, layers: Editor
   restored.forEach((node) => {
     node.muted = Boolean(node.muted)
     if (node.kind === 'mask') {
-      node.maskEdgeFeather = Array.from({ length: 32 }, (_, index) => Math.max(0, Math.min(1, node.maskEdgeFeather?.[index] ?? 1)))
+      /*
+       * Projects saved before per-segment feather carried 32 normalised brush samples, which cannot
+       * be mapped onto segment widths in pixels. They are dropped, and the segment list is filled in
+       * from the node's own feather socket once the connected shape reveals how many segments exist.
+       */
+      delete (node as { maskEdgeFeather?: number[] }).maskEdgeFeather
+      node.maskSegmentFeather = (node.maskSegmentFeather ?? [])
+        .map((value) => (Number.isFinite(value) ? Math.max(0, value) : 0))
     }
     const definition = NODE_DEFINITIONS[node.kind]
     node.properties = Object.fromEntries(definition.properties.map((property) => [

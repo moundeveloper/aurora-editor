@@ -61,6 +61,8 @@ export const useEditorStore = defineStore('editor', () => {
   const ripple = ref(false)
   const selectedLayerId = ref('layer-title')
   const selectedKeyframeId = ref<string | null>(null)
+  /** Which mask segment the edge editor is focused on; null selects the whole outline. */
+  const selectedMaskSegment = ref<number | null>(null)
   const selectedNodeId = ref('node-blur')
   const selectedSceneId = ref('scene-aurora-3d')
   const selectedSceneEntityId = ref('object-aurora-cube')
@@ -1584,10 +1586,37 @@ export const useEditorStore = defineStore('editor', () => {
     markChanged()
   }
 
-  function setNodeMaskEdgeFeather(nodeId: string, values: number[]) {
+  /**
+   * Sizes a mask node's segment list to the shape it is masking. Segments that have never been given
+   * a width inherit the node's own Feather socket, so connecting a shape behaves like the single
+   * global feather it replaced until an individual segment is edited.
+   */
+  function ensureMaskSegments(nodeId: string, segmentCount: number) {
     const node = nodes.value.find((item) => item.id === nodeId && item.kind === 'mask')
-    if (!node) return
-    node.maskEdgeFeather = values.map((value) => Math.max(0, Math.min(1, value)))
+    if (!node || segmentCount < 1) return
+    const fallback = Math.max(0, node.inputs[2]?.value ?? 0)
+    const current = node.maskSegmentFeather ?? []
+    if (current.length === segmentCount) return
+    node.maskSegmentFeather = Array.from({ length: segmentCount }, (_, index) => current[index] ?? fallback)
+    markChanged()
+  }
+
+  /** Feather is a per-segment width in project pixels. Negative widths are not meaningful. */
+  function setMaskSegmentFeather(nodeId: string, segmentIndex: number, feather: number) {
+    const node = nodes.value.find((item) => item.id === nodeId && item.kind === 'mask')
+    const values = node?.maskSegmentFeather
+    if (!values || segmentIndex < 0 || segmentIndex >= values.length) return
+    const next = Number.isFinite(feather) ? Math.max(0, feather) : 0
+    if (values[segmentIndex] === next) return
+    values[segmentIndex] = next
+    markChanged()
+  }
+
+  function setMaskSegmentFeatherAll(nodeId: string, feather: number) {
+    const node = nodes.value.find((item) => item.id === nodeId && item.kind === 'mask')
+    if (!node?.maskSegmentFeather) return
+    const next = Number.isFinite(feather) ? Math.max(0, feather) : 0
+    node.maskSegmentFeather = node.maskSegmentFeather.map(() => next)
     markChanged()
   }
 
@@ -1618,7 +1647,8 @@ export const useEditorStore = defineStore('editor', () => {
     selectedNodeId, selectedSceneId, selectedSceneEntityId, zoom, saveStatus, exportProgress, assets, layers, scenes3D,
     nodes, nodeConnections, selectedConnectionId, renderRootNodeId,
     selectNode, selectNodeConnection, addNode, moveNode, deleteNode, connectNodes, disconnectNodes,
-    setNodeSource, setNodeSocketValue, setNodeProperty, setNodeMaskEdgeFeather, toggleNodeMuted, setRenderRootNode,
+    setNodeSource, setNodeSocketValue, setNodeProperty, toggleNodeMuted, setRenderRootNode,
+    ensureMaskSegments, setMaskSegmentFeather, setMaskSegmentFeatherAll, selectedMaskSegment,
     selectedLayer, selectedScene, selectedSceneEntity,
     togglePlayback, setTime, stepFrame, setProjectDuration, addKeyframe, setLayerValue, addFiles,
     addAssetToTimeline, addGeneratedLayer, addPathLayer, addTimelineLayer, reorderTrack, moveSegmentToTrack, moveSegmentToNewTrack, addEmptyTrack,

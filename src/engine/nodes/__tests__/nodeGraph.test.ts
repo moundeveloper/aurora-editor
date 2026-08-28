@@ -239,7 +239,7 @@ describe('node graph', () => {
     shape.sourceId = 'layer-title'
     mask.inputs[2]!.value = 36
     mask.properties.invert = 'outside'
-    mask.maskEdgeFeather = Array.from({ length: 32 }, (_, index) => index < 8 ? 0 : 1)
+    mask.maskSegmentFeather = [0, 40, 0, 18]
     const nodes = [content, shape, mask, output]
     const connections = [
       link(content, mask, 0, 'content-mask'),
@@ -251,7 +251,7 @@ describe('node graph', () => {
     expect(passes).toHaveLength(1)
     expect(passes[0]!.layerId).toBe('layer-video')
     expect(passes[0]!.effects.mask).toEqual({
-      layerId: 'layer-title', feather: 36, inverted: true, edgeFeather: mask.maskEdgeFeather,
+      layerId: 'layer-title', feather: 36, inverted: true, segmentFeather: [0, 40, 0, 18],
     })
   })
 

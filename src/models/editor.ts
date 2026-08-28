@@ -249,8 +249,12 @@ export interface EditorNode {
   sourceId?: string
   /** Enum choices shown as dropdowns on the node body, such as a blend mode. */
   properties: Record<string, string>
-  /** Perimeter samples painted by the mask edge brush: 0 is hard, 1 receives the node feather. */
-  maskEdgeFeather?: number[]
+  /**
+   * Feather width in project pixels, one entry per segment of the connected mask shape. Zero is a
+   * hard cut; a positive value fades the alpha from the edge inward over that many pixels. Segments
+   * are addressed by index, so this survives a segment later becoming a Bézier span.
+   */
+  maskSegmentFeather?: number[]
   inputs: EditorNodeSocket[]
   outputs: EditorNodeSocket[]
 }

@@ -243,7 +243,7 @@ export function createNode(kind: EditorNodeKind, x: number, y: number, id: strin
     properties: Object.fromEntries(definition.properties.map((property) => [property.key, property.value])),
     inputs: makeSockets(definition.inputs, `${id}-in`),
     outputs: makeSockets(definition.outputs, `${id}-out`),
-    ...(kind === 'mask' ? { maskEdgeFeather: Array.from({ length: 32 }, () => 1) } : {}),
+    ...(kind === 'mask' ? { maskSegmentFeather: [] } : {}),
   }
 }
 

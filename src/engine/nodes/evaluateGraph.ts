@@ -20,7 +20,8 @@ export interface GraphEffects {
   greyscale: number
   vignetteAmount: number
   vignetteSoftness: number
-  mask: { layerId: string; feather: number; edgeFeather: number[]; inverted: boolean } | null
+  /** `segmentFeather` is per mask segment, in project pixels; `feather` is the default for unset segments. */
+  mask: { layerId: string; feather: number; segmentFeather: number[]; inverted: boolean } | null
 }
 
 export interface GraphPass {
@@ -177,7 +178,7 @@ export function evaluateNodeGraph(
         mask: {
           layerId: shapePass.layerId,
           feather,
-          edgeFeather: node.maskEdgeFeather?.length ? [...node.maskEdgeFeather] : Array.from({ length: 32 }, () => 1),
+          segmentFeather: [...(node.maskSegmentFeather ?? [])],
           inverted: node.properties.invert === 'outside',
         },
       } : effects

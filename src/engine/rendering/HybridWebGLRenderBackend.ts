@@ -264,7 +264,7 @@ export class HybridWebGLRenderBackend implements RenderBackend {
       geometryEntry = { key: geometryKey, geometry }
       this.maskGeometryCache.set(layer.id, geometryEntry)
     }
-    const key = `${geometryKey}|${effect.feather}|${effect.inverted ? 1 : 0}|${effect.edgeFeather.join(',')}`
+    const key = `${geometryKey}|${effect.feather}|${effect.inverted ? 1 : 0}|${effect.segmentFeather.join(',')}`
     const cached = this.maskRasterCache.get(layer.id)
     if (cached?.key === key) return cached
     cached?.pixiTexture?.destroy(true)
