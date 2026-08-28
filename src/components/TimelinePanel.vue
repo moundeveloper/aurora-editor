@@ -976,7 +976,9 @@ onMounted(() => {
   observeTimeline()
   window.addEventListener('pointermove', onPointerMove)
   window.addEventListener('pointerup', endPointerInteraction)
-  window.addEventListener('pointerdown', onWindowPointerDown)
+  // Capture phase: clips, grips and the playhead all stop pointerdown from bubbling, so a bubble-phase
+  // listener never sees a click that lands on one and the menu would sit there open.
+  window.addEventListener('pointerdown', onWindowPointerDown, true)
   window.addEventListener('keydown', onKeyDown)
 })
 
@@ -984,7 +986,7 @@ onBeforeUnmount(() => {
   resizeObserver?.disconnect()
   window.removeEventListener('pointermove', onPointerMove)
   window.removeEventListener('pointerup', endPointerInteraction)
-  window.removeEventListener('pointerdown', onWindowPointerDown)
+  window.removeEventListener('pointerdown', onWindowPointerDown, true)
   window.removeEventListener('keydown', onKeyDown)
 })
 </script>

@@ -19,6 +19,7 @@ function choose(value: string) {
   open.value = false
 }
 
+/** Capture phase, so a click inside a panel that stops pointerdown still dismisses the menu. */
 function onDocumentPointerDown(event: PointerEvent) {
   if (!root.value?.contains(event.target as Node)) open.value = false
 }
@@ -28,11 +29,11 @@ function onKeydown(event: KeyboardEvent) {
 }
 
 onMounted(() => {
-  document.addEventListener('pointerdown', onDocumentPointerDown)
+  document.addEventListener('pointerdown', onDocumentPointerDown, true)
   window.addEventListener('keydown', onKeydown)
 })
 onBeforeUnmount(() => {
-  document.removeEventListener('pointerdown', onDocumentPointerDown)
+  document.removeEventListener('pointerdown', onDocumentPointerDown, true)
   window.removeEventListener('keydown', onKeydown)
 })
 </script>
