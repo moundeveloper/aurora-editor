@@ -74,9 +74,22 @@ describe('selective per-segment mask feather', () => {
     expect(at(640, 493)).toBe(0)
   })
 
-  it('never lets alpha escape the shape, however wide the feather', () => {
+  it('straddles the edge, reaching half the feather to either side', () => {
+    // Left edge sits at x=440, so a 60px feather runs from 410 to 470 and is half opaque on the line.
+    const { at } = evaluate(polygonLayer(RECTANGLE), [60, 60, 60, 60])
+    expect(at(440, 360)).toBeGreaterThan(112)
+    expect(at(440, 360)).toBeLessThan(142)
+    expect(at(425, 360)).toBeGreaterThan(0)
+    expect(at(468, 360)).toBeLessThan(255)
+    // Beyond half the width, nothing.
+    expect(at(405, 360)).toBe(0)
+    expect(at(478, 360)).toBe(255)
+  })
+
+  it('bounds the fade by the feather even when it is far wider than the shape', () => {
     const { at } = evaluate(polygonLayer(RECTANGLE), [400, 400, 400, 400])
-    for (const [x, y] of [[430, 360], [850, 360], [640, 220], [640, 500], [80, 80], [1200, 650]]) {
+    // Reach is half of 400, so 250px clear of the outline must be untouched in every direction.
+    for (const [x, y] of [[180, 360], [1110, 360], [640, 15], [80, 80], [1200, 650]]) {
       expect(at(x!, y!), `outside at ${x},${y}`).toBe(0)
     }
   })

@@ -1,4 +1,4 @@
-import type { EditorLayer } from '@/models/editor'
+import type { EditorLayer, ShapePathPoint } from '@/models/editor'
 
 export type ShapePoint = [number, number]
 
@@ -26,6 +26,29 @@ export function cubicShapePoint(start: ShapePoint, controlA: ShapePoint, control
   ]
 }
 
+/** How far a control point strays from the chord — zero when the span is really a straight line. */
+function chordDeviation(point: ShapePoint, start: ShapePoint, end: ShapePoint) {
+  const deltaX = end[0] - start[0]
+  const deltaY = end[1] - start[1]
+  const length = Math.hypot(deltaX, deltaY)
+  if (!length) return Math.hypot(point[0] - start[0], point[1] - start[1])
+  return Math.abs((point[0] - start[0]) * deltaY - (point[1] - start[1]) * deltaX) / length
+}
+
+/**
+ * Steps needed to flatten one span without the result reading as straight runs joined by corners.
+ * Driven by curvature rather than a fixed count: a span whose handles sit on its anchors is a line
+ * and needs one step, while a tight curve earns as many as the quality hint allows. Cost then tracks
+ * how curved a shape actually is instead of how many points someone drew.
+ */
+function spanSteps(start: ShapePathPoint, end: ShapePathPoint, maximum: number) {
+  const deviation = Math.max(
+    chordDeviation(start.handleOut, start.position, end.position),
+    chordDeviation(end.handleIn, start.position, end.position),
+  )
+  return Math.max(1, Math.min(maximum, Math.ceil(Math.sqrt(deviation) * 2.5)))
+}
+
 /** Flattened in stable clockwise/path order so rendering and edge painting address identical regions. */
 export function shapeOutline(layer: EditorLayer, curveSteps = 16): ShapeOutline {
   if (layer.shapeKind === 'path') {
@@ -37,8 +60,9 @@ export function shapeOutline(layer: EditorLayer, curveSteps = 16): ShapeOutline 
     for (let index = 0; index < segmentCount; index += 1) {
       const start = path.points[index]!
       const end = path.points[(index + 1) % path.points.length]!
-      for (let step = 0; step < curveSteps; step += 1) {
-        flattened.push(cubicShapePoint(start.position, start.handleOut, end.handleIn, end.position, step / curveSteps))
+      const steps = spanSteps(start, end, curveSteps)
+      for (let step = 0; step < steps; step += 1) {
+        flattened.push(cubicShapePoint(start.position, start.handleOut, end.handleIn, end.position, step / steps))
         segmentIndex.push(index)
       }
     }

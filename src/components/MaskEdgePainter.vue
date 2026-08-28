@@ -54,13 +54,16 @@ const fillPath = computed(() => {
 
 const featherOf = (segment: number) => Math.max(0, props.segmentFeather[segment] ?? 0)
 
-/** The inward feather boundary, drawn by pushing each point along the segment's inward normal. */
-function featherGuide(segment: number) {
+/**
+ * One edge of the feather band, offset along the segment's normal. The fade straddles the outline,
+ * so the band runs half a width to either side and `side` picks which one to draw.
+ */
+function featherGuide(segment: number, side: 1 | -1) {
   const data = outline.value
   const entry = segments.value.find((item) => item.segment === segment)
   if (!data || !entry) return ''
-  const offset = featherOf(segment) * data.scale
-  if (offset < .5) return ''
+  const offset = featherOf(segment) * data.scale / 2 * side
+  if (Math.abs(offset) < .5) return ''
   const centerX = data.points.reduce((total, point) => total + point.x, 0) / data.points.length
   const centerY = data.points.reduce((total, point) => total + point.y, 0) / data.points.length
   return entry.points.map((point, index) => {
@@ -139,8 +142,8 @@ function onPointerMove(event: PointerEvent) {
   if (!entry || !data) return
   event.preventDefault()
   const { x, y } = viewPoint(event)
-  // Distance from the segment is the feather width, so dragging away from an edge widens its fade.
-  emit('feather', dragging, Math.round(distanceToSegment(x, y, entry) / data.scale))
+  // The pointer tracks the edge of the band, which sits half a width out, so the width is twice it.
+  emit('feather', dragging, Math.round(distanceToSegment(x, y, entry) / data.scale * 2))
 }
 
 function onPointerUp(event: PointerEvent) {
@@ -174,10 +177,12 @@ function strokeWidth(segment: number) {
       <path v-if="outline?.closed" class="shape-fill" :d="fillPath" />
       <template v-for="entry in segments" :key="entry.segment">
         <path
-          v-if="featherOf(entry.segment) >= .5"
+          v-for="side in ([1, -1] as const)"
+          v-show="featherOf(entry.segment) >= .5"
+          :key="`${entry.segment}-${side}`"
           class="feather-guide"
           :class="{ active: selected === entry.segment }"
-          :d="featherGuide(entry.segment)"
+          :d="featherGuide(entry.segment, side)"
         />
       </template>
       <path

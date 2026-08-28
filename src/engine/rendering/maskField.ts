@@ -32,10 +32,21 @@ export const MASK_RASTER_RESOLUTION = 1024
  *
  * Without this the feather is piecewise constant per segment, and the pixels nearest a vertex flip
  * between two widths across the bisector that splits them — a straight seam radiating out of every
- * corner. Blending toward `min(own, neighbour)` also gives the behaviour a hard corner needs: a hard
- * segment stays hard along its whole length, and the feather emerges gradually along the soft side.
+ * corner.
  */
 const VERTEX_BLEND = .25
+
+/**
+ * The width where two segments meet.
+ *
+ * A hard neighbour pins the corner to a cut, so a hard segment is never softened by association and
+ * the feather emerges along the soft side instead. Two feathered segments meet at their average,
+ * which interpolates the width along the outline rather than dipping to the smaller of the two —
+ * dipping at every vertex is what scallops an otherwise even fade around a curve.
+ */
+function vertexFeather(own: number, neighbour: number) {
+  return own < .5 || neighbour < .5 ? Math.min(own, neighbour) : (own + neighbour) / 2
+}
 
 export function transformPerimeter(layer: EditorLayer, time: number, width: number, height: number, projectWidth: number, projectHeight: number) {
   const scaleX = evaluateNumericProperty(layer.transform.scaleX, time) / 100
@@ -45,7 +56,13 @@ export function transformPerimeter(layer: EditorLayer, time: number, width: numb
   const sine = Math.sin(rotation)
   const positionX = evaluateNumericProperty(layer.transform.x, time)
   const positionY = evaluateNumericProperty(layer.transform.y, time)
-  const outline = shapeOutline(layer, 12)
+  /*
+   * A Bézier span is flattened this finely before distances are taken. Too few steps and the fade
+   * follows the chords rather than the curve, which shows as flat runs with a corner at every join —
+   * the wider the feather, the further from the outline those corners sit and the more obvious they
+   * get. The field is cached per shape and transform, so the cost lands once per edit, not per frame.
+   */
+  const outline = shapeOutline(layer, 24)
   if (!outline.closed) return null
   return {
     segmentIndex: outline.segmentIndex,
@@ -147,6 +164,14 @@ export interface MaskGeometryField {
   segmentCount: number
   /** Shape bounds in render pixels, before any feather is added. */
   bounds: { left: number; top: number; right: number; bottom: number }
+  /**
+   * The field cells actually evaluated. Everything beyond is far enough outside that no feather can
+   * reach it, so it is left at a large negative distance rather than measured — the perimeter walk is
+   * the expensive part of a mask and most of a frame is nowhere near the shape.
+   */
+  region: { firstX: number; lastX: number; firstY: number; lastY: number }
+  /** How far past the outline the field is valid, in render pixels. */
+  margin: number
 }
 
 export function createMaskGeometry(layer: EditorLayer, time: number, width: number, height: number, projectWidth: number, projectHeight: number): MaskGeometryField | null {
@@ -174,9 +199,22 @@ export function createMaskGeometry(layer: EditorLayer, time: number, width: numb
   const ys = polygon.map((point) => point[1])
   const bounds = { left: Math.min(...xs), top: Math.min(...ys), right: Math.max(...xs), bottom: Math.max(...ys) }
 
-  for (let fieldY = 0; fieldY < fieldHeight; fieldY += 1) {
+  /*
+   * A centred feather reaches half its width outward, and the editor caps a segment at half the
+   * shape's short side, so this covers any width the UI can produce with room to spare.
+   */
+  const margin = Math.min(bounds.right - bounds.left, bounds.bottom - bounds.top) * .5 + 32
+  signedDistance.fill(-1e9)
+  const region = {
+    firstX: Math.max(0, Math.floor((bounds.left - margin) * fieldScale)),
+    lastX: Math.min(fieldWidth - 1, Math.ceil((bounds.right + margin) * fieldScale)),
+    firstY: Math.max(0, Math.floor((bounds.top - margin) * fieldScale)),
+    lastY: Math.min(fieldHeight - 1, Math.ceil((bounds.bottom + margin) * fieldScale)),
+  }
+
+  for (let fieldY = region.firstY; fieldY <= region.lastY; fieldY += 1) {
     const y = (fieldY + .5) / fieldScale
-    for (let fieldX = 0; fieldX < fieldWidth; fieldX += 1) {
+    for (let fieldX = region.firstX; fieldX <= region.lastX; fieldX += 1) {
       const x = (fieldX + .5) / fieldScale
       // Closest approach per segment, so the runner-up is the true second-nearest segment rather
       // than whichever step happened to be displaced by the winner.
@@ -249,6 +287,8 @@ export function createMaskGeometry(layer: EditorLayer, time: number, width: numb
     secondWeight,
     segmentCount: Math.max(1, perimeter.segmentCount),
     bounds,
+    region,
+    margin,
   }
 }
 
@@ -260,13 +300,11 @@ export function createMaskGeometry(layer: EditorLayer, time: number, width: numb
 export function featherAt(segmentFeather: number[], segmentCount: number, segment: number, param: number) {
   const own = Math.max(0, segmentFeather[segment] ?? 0)
   if (param < VERTEX_BLEND) {
-    const previous = Math.max(0, segmentFeather[(segment - 1 + segmentCount) % segmentCount] ?? 0)
-    const start = Math.min(own, previous)
+    const start = vertexFeather(own, Math.max(0, segmentFeather[(segment - 1 + segmentCount) % segmentCount] ?? 0))
     return start + (own - start) * smoothstep(param / VERTEX_BLEND)
   }
   if (param > 1 - VERTEX_BLEND) {
-    const next = Math.max(0, segmentFeather[(segment + 1) % segmentCount] ?? 0)
-    const end = Math.min(own, next)
+    const end = vertexFeather(own, Math.max(0, segmentFeather[(segment + 1) % segmentCount] ?? 0))
     return end + (own - end) * smoothstep((1 - param) / VERTEX_BLEND)
   }
   return own
@@ -345,7 +383,8 @@ export function maskAlphaField(geometry: MaskGeometryField, effect: MaskEffectIn
    */
   smoothScalarField(fieldFeather, geometry.width, geometry.height)
 
-  const margin = Math.max(...feathers, 0) + hardRamp * 2
+  // Half a width outward, and never past where the field was actually measured.
+  const margin = Math.min(Math.max(...feathers, 0) / 2 + hardRamp * 2, geometry.margin)
   const outsideAlpha = effect.inverted ? 255 : 0
   if (outsideAlpha) alpha.fill(255)
   const firstX = Math.max(0, Math.floor((geometry.bounds.left - margin) * rasterScale))
@@ -379,12 +418,14 @@ export function maskAlphaField(geometry: MaskGeometryField, effect: MaskEffectIn
       const feather = featherTop * (1 - weightY) + featherBottom * weightY
 
       /*
-       * A hard segment collapses to a single antialiased pixel centred on the edge. A feathered one
-       * runs from the edge inward over its own width, so the fade never reaches outside the shape and
-       * a wide feather can not bleed across whatever the mask is applied to.
+       * The fade straddles the edge, half its width either side, which is how a compositor's mask
+       * feather is defined. Running it purely inward instead erodes the shape: the opaque core
+       * becomes an inward offset of the outline, so the mask visibly shrinks and every vertex turns
+       * into a hard corner of that offset. A hard segment collapses to one antialiased pixel, still
+       * centred, so it lands exactly on the outline like every other width.
        */
       const width = Math.max(feather, hardRamp)
-      let value = smoothstep((signed + hardRamp * .5) / width)
+      let value = smoothstep(.5 + signed / width)
       if (effect.inverted) value = 1 - value
       const rasterIndex = rasterY * rasterWidth + rasterX
       alpha[rasterIndex] = Math.round(value * 255)
