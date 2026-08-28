@@ -139,6 +139,8 @@ export const useEditorStore = defineStore('editor', () => {
     assets.value = state.assets
     nodes.value = state.nodes
     nodeConnections.value = state.nodeConnections
+    // Repair before filling gaps, or a duplicate about to be folded away could be re-published.
+    dedupeCompositionAssets()
     ensureClusterAssets()
     /*
      * The default selection is a layer id from the starter project. A restored project usually has
@@ -811,6 +813,52 @@ export const useEditorStore = defineStore('editor', () => {
     asset.layerTemplate = structuredClone(rawLayerTree(cluster))
     assets.value.unshift(asset)
     return asset
+  }
+
+  /**
+   * What a composition contains, independent of the identities inside it. Times are measured from
+   * the root so that the same cluster dropped at two different points still reads as the same thing.
+   */
+  function templateSignature(layer: EditorLayer, rootStart: number): string {
+    return [
+      layer.name, layer.type, layer.shapeKind ?? '',
+      (layer.start - rootStart).toFixed(3), layer.duration.toFixed(3),
+      (layer.children ?? []).map((child) => templateSignature(child, rootStart)).join('|'),
+    ].join('~')
+  }
+
+  /**
+   * Folds Library entries describing identical compositions back into one.
+   *
+   * Copies dropped before the template carried its own link each earned an entry, so a project can
+   * open with a row per copy. Repairing that here means an affected project heals on load instead of
+   * having to be rebuilt. Two entries that describe the same content are the same entry, so the
+   * layers pointing at the ones being dropped are moved onto the survivor rather than orphaned.
+   */
+  function dedupeCompositionAssets() {
+    const keepers = new Map<string, MediaAsset>()
+    const remap = new Map<string, string>()
+    // Oldest first, so the entry that has been around longest is the one that survives.
+    for (const asset of [...assets.value].reverse()) {
+      if (asset.kind !== 'composition' || !asset.layerTemplate) continue
+      const signature = templateSignature(asset.layerTemplate, asset.layerTemplate.start)
+      const keeper = keepers.get(signature)
+      if (keeper) remap.set(asset.id, keeper.id)
+      else keepers.set(signature, asset)
+    }
+    for (const keeper of keepers.values()) {
+      if (keeper.layerTemplate) keeper.layerTemplate.assetId = keeper.id
+    }
+    if (!remap.size) return 0
+
+    const repoint = (list: EditorLayer[]) => list.forEach((layer) => {
+      const next = layer.assetId ? remap.get(layer.assetId) : undefined
+      if (next) layer.assetId = next
+      if (layer.children?.length) repoint(layer.children)
+    })
+    repoint(layers.value)
+    assets.value = assets.value.filter((asset) => !remap.has(asset.id))
+    return remap.size
   }
 
   /** Keeps the Library entries of the clusters being edited in step with their contents. */
@@ -1754,7 +1802,7 @@ export const useEditorStore = defineStore('editor', () => {
     renameTimelineLayers, setTimelineLayersVisible, deleteTimelineLayers,
     createCluster, releaseCluster, createEmptyCluster,
     openClusterTabs, activeClusterId, activeCluster, timelineLayers, clusterTabs,
-    enterCluster, activateTimelineTab, closeClusterTab, fitClusterToChildren, publishClusterAsset, ensureClusterAssets,
+    enterCluster, activateTimelineTab, closeClusterTab, fitClusterToChildren, publishClusterAsset, ensureClusterAssets, dedupeCompositionAssets,
     splitLayerAt, splitSelectedLayer, markChanged, saveProjectNow, flushProjectSave, initializePersistence, setWorkspace, startExport,
     selectSceneEntity, select3DLayer, markSceneChanged, add3DPrimitive, add3DLight, add3DCamera, set3DEntityTransform,
     rename3DEntity, set3DEntityVisible, delete3DEntity,

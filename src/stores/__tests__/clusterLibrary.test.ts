@@ -42,6 +42,37 @@ describe('cluster library entries', () => {
     expect(compositions(store)).toHaveLength(baseline + 1)
   })
 
+  it('folds duplicate entries a damaged project already carries back into one', () => {
+    const { store, cluster, baseline } = makeCluster()
+    const entry = store.assets.find((asset) => asset.id === cluster.assetId)!
+    // Reproduce the damage: templates with no link, so every drop earned its own entry.
+    delete entry.layerTemplate!.assetId
+    const copies = [0, 2, 4].map((time) => {
+      const copy = store.addAssetToTimeline(entry.id, time)!
+      delete copy.assetId
+      return copy
+    })
+    store.ensureClusterAssets()
+    expect(store.assets.filter((asset) => asset.kind === 'composition')).toHaveLength(baseline + 4)
+
+    expect(store.dedupeCompositionAssets()).toBe(3)
+    expect(compositions(store)).toHaveLength(baseline + 1)
+    // Every copy still points at a Library entry that exists.
+    for (const copy of copies) {
+      expect(store.assets.some((asset) => asset.id === copy.assetId), copy.id).toBe(true)
+    }
+  })
+
+  it('leaves genuinely different compositions alone', () => {
+    const { store, baseline } = makeCluster()
+    const other = store.addGeneratedLayer('text', 400, 400)
+    const second = store.createCluster([other!.id])!
+    expect(compositions(store)).toHaveLength(baseline + 2)
+    expect(store.dedupeCompositionAssets()).toBe(0)
+    expect(compositions(store)).toHaveLength(baseline + 2)
+    expect(second.assetId).toBeTruthy()
+  })
+
   it('still links a copy made from a template saved before the link existed', () => {
     const { store, cluster, baseline } = makeCluster()
     const entry = store.assets.find((asset) => asset.id === cluster.assetId)!

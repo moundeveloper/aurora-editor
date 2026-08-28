@@ -13,7 +13,7 @@ import type { EditorLayer, ShapePathPoint } from '@/models/editor'
 import IconButton from './common/IconButton.vue'
 
 const store = useEditorStore()
-const { project, currentTime, playing, loop, snap, zoom, layers, assets, scenes3D, nodes, nodeConnections, renderRootNodeId, selectedLayer, selectedLayerId, selectedKeyframeId } = storeToRefs(store)
+const { project, currentTime, playing, loop, snap, zoom, layers, timelineLayers, assets, scenes3D, nodes, nodeConnections, renderRootNodeId, selectedLayer, selectedLayerId, selectedKeyframeId } = storeToRefs(store)
 const canvas = ref<HTMLCanvasElement>()
 const canvasWrap = ref<HTMLElement>()
 const transformBox = ref<HTMLElement>()
@@ -118,11 +118,15 @@ function layerOverlayStyle(layer: EditorLayer) {
 }
 
 /**
- * Nothing selected means no box. The store's `selectedLayer` falls back to the first layer when the
- * id resolves to nothing, which the inspector wants and the viewport must not have — a box drawn
- * around a fallback is a selection the user never made. Only an exact match counts.
+ * The box may only describe a layer of the timeline currently being edited.
+ *
+ * `selectedLayer` resolves an id anywhere in the tree and falls back to the first layer when it
+ * resolves to nothing — right for the inspector, wrong here. Either would put a box around something
+ * the viewport is not showing: a fallback nobody selected, or a layer that has since been folded
+ * into a cluster and now lives outside this timeline. Matching against the active context's own
+ * layers rules out both.
  */
-const activeSelection = computed(() => (selectedLayer.value?.id === selectedLayerId.value ? selectedLayer.value : null))
+const activeSelection = computed(() => timelineLayers.value.find((layer) => layer.id === selectedLayerId.value && !layer.isPlaceholder) ?? null)
 
 const selectionStyle = computed(() => {
   const layer = activeSelection.value
