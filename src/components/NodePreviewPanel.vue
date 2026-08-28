@@ -8,7 +8,7 @@ import type { HybridWebGLRenderBackend } from '@/engine/rendering/HybridWebGLRen
 
 const store = useEditorStore()
 const {
-  project, currentTime, layers, scenes3D, nodes, nodeConnections, renderRootNodeId, selectedNodeId,
+  project, currentTime, layers, assets, scenes3D, nodes, nodeConnections, renderRootNodeId, selectedNodeId,
 } = storeToRefs(store)
 const canvas = ref<HTMLCanvasElement>()
 const initializing = ref(true)
@@ -66,6 +66,7 @@ async function drawNow() {
       project: project.value,
       layers: layers.value,
       scenes3D: scenes3D.value,
+      assets: assets.value,
       nodes: selectedNodeHasImage.value ? nodes.value : [],
       nodeConnections: selectedNodeHasImage.value ? nodeConnections.value : [],
       renderRootNodeId: selectedNodeHasImage.value ? previewRootNodeId.value : null,

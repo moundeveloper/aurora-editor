@@ -4,12 +4,14 @@ import { evaluateNumericProperty } from '@/engine/animation/evaluateProperty'
 import { ThreeSceneRuntimeRegistry } from '@/engine/scene3d/ThreeSceneRuntime'
 import type { GraphEffects, NodeBlendMode } from '@/engine/nodes/evaluateGraph'
 import {
-  createRenderPlan, HYBRID_ALPHA_CONTRACT, resolveRenderSize,
+  createRenderPlan, HYBRID_ALPHA_CONTRACT, resolveRenderSize, type RenderPlan,
   type RenderBackend, type RenderFrameRequest, type RendererInitializationOptions, type RenderSurface,
 } from '@/engine/rendering/contracts'
-import type { EditorLayer } from '@/models/editor'
+import type { EditorLayer, MediaAsset } from '@/models/editor'
 import { cameraIdAtTime } from '@/engine/scene3d/cameraCuts'
 import { createMaskGeometry, maskAlphaField, maskGeometryKey, type MaskGeometryField } from '@/engine/rendering/maskField'
+import { MediaTextureCache } from '@/engine/rendering/mediaTextures'
+import { mediaUrl } from '#shared/contracts.ts'
 
 /** Colour nodes fold into one matrix so a chain of them still costs a single filter pass. */
 function colorFilterFor(effects: GraphEffects) {
@@ -121,6 +123,9 @@ export class HybridWebGLRenderBackend implements RenderBackend {
   private readonly maskGeometryCache = new Map<string, MaskGeometryCacheEntry>()
   private sourceImage: HTMLImageElement | null = null
   private sourceTexture: Texture | null = null
+  private readonly mediaTextures = new MediaTextureCache()
+  /** Resolved once per frame, so layer creation stays synchronous while decoding does not. */
+  private readonly frameTextures = new Map<string, Texture>()
   private pixelRatio = 1
   private initialized = false
   private initialization: Promise<void> | null = null
@@ -209,6 +214,7 @@ export class HybridWebGLRenderBackend implements RenderBackend {
     const plan = createRenderPlan({ ...request, width: size.width, height: size.height })
     const layerMap = new Map(request.layers.map((layer) => [layer.id, layer]))
     const sceneMap = new Map(request.scenes3D.map((scene) => [scene.id, scene]))
+    await this.resolveFrameTextures(plan, layerMap, request.assets ?? [], request.time)
 
     this.threeRenderer.resetState()
     this.threeRenderer.setRenderTarget(null)
@@ -246,6 +252,29 @@ export class HybridWebGLRenderBackend implements RenderBackend {
 
   getStats(): HybridRendererStats {
     return { ...this.lastStats }
+  }
+
+  /**
+   * Decodes whatever media this frame's passes need before any of them draw.
+   *
+   * Layer creation is synchronous, so the awaiting happens here instead: one pass over the plan,
+   * resolving each layer to a texture the cache already holds or is about to. A video is seeked to
+   * its own local time, since a clip trimmed to start later in the timeline still begins at zero.
+   */
+  private async resolveFrameTextures(plan: RenderPlan, layerMap: Map<string, EditorLayer>, assets: MediaAsset[], time: number) {
+    this.frameTextures.clear()
+    const assetMap = new Map(assets.map((asset) => [asset.id, asset]))
+    await Promise.all(plan.passes.map(async (pass) => {
+      const layer = layerMap.get(pass.layerId)
+      if (!layer || (layer.type !== 'video' && layer.type !== 'image')) return
+      const asset = layer.assetId ? assetMap.get(layer.assetId) : undefined
+      if (!asset?.hash) return
+      const url = mediaUrl(asset.hash)
+      const texture = layer.type === 'video'
+        ? await this.mediaTextures.videoFrame(url, Math.max(0, time - layer.start))
+        : await this.mediaTextures.image(url)
+      if (texture) this.frameTextures.set(layer.id, texture)
+    }))
   }
 
   private maskRasterFor(layer: EditorLayer, effect: MaskEffect, time: number, width: number, height: number, projectWidth: number, projectHeight: number) {
@@ -348,14 +377,16 @@ export class HybridWebGLRenderBackend implements RenderBackend {
       return container
     }
     if (layer.type === 'video' || layer.type === 'image') {
-      if (!this.sourceTexture) {
+      // Vault media when the layer has any, and the demo still only while it does not.
+      const texture = this.frameTextures.get(layer.id) ?? this.sourceTexture
+      if (!texture) {
         container.destroy()
         return null
       }
-      const sprite = new Sprite(this.sourceTexture)
+      const sprite = new Sprite(texture)
       sprite.anchor.set(.5)
       if (layer.type === 'video') {
-        const sourceRatio = this.sourceTexture.width / this.sourceTexture.height
+        const sourceRatio = texture.width / texture.height
         const canvasRatio = width / height
         sprite.width = sourceRatio > canvasRatio ? height * sourceRatio : width
         sprite.height = sourceRatio > canvasRatio ? height : width / sourceRatio
@@ -530,6 +561,8 @@ export class HybridWebGLRenderBackend implements RenderBackend {
     })
     this.maskRasterCache.clear()
     this.maskGeometryCache.clear()
+    this.mediaTextures.dispose()
+    this.frameTextures.clear()
     this.sourceTexture?.destroy(true)
     this.sourceTexture = null
     this.sourceImage = null

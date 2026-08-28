@@ -209,6 +209,13 @@ export interface MediaAsset {
   id: string
   name: string
   kind: 'video' | 'image' | 'audio' | 'composition' | 'model3d' | 'hdr' | 'texture'
+  /**
+   * Content address of the bytes in the media vault. Absent for assets that have none — a saved
+   * composition, or an import made while the media server was unreachable.
+   */
+  hash?: string
+  mimeType?: string
+  sizeBytes?: number
   /** Reusable timeline composition, captured when a cluster is created. */
   layerTemplate?: EditorLayer
   duration?: number

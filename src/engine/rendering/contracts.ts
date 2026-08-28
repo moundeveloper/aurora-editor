@@ -1,4 +1,4 @@
-import type { Aurora3DScene, EditorLayer, EditorNode, EditorNodeConnection, EditorProject } from '@/models/editor'
+import type { Aurora3DScene, EditorLayer, EditorNode, EditorNodeConnection, EditorProject, MediaAsset } from '@/models/editor'
 import { evaluateNodeGraph, NEUTRAL_EFFECTS, type GraphEffects, type NodeBlendMode } from '@/engine/nodes/evaluateGraph'
 
 export type RenderBackendId = 'pixi-webgl' | 'three-webgl' | 'canvas2d'
@@ -34,6 +34,8 @@ export interface RenderFrameRequest {
   project: EditorProject
   layers: EditorLayer[]
   scenes3D: Aurora3DScene[]
+  /** Library entries, so a layer's assetId resolves to the media the vault is serving. */
+  assets?: MediaAsset[]
   nodes?: EditorNode[]
   nodeConnections?: EditorNodeConnection[]
   /** A Viewer node takes over the frame when one is active; otherwise the Composite node is the root. */

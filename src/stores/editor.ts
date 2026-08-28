@@ -10,6 +10,8 @@ import { evaluateNumericProperty } from '@/engine/animation/evaluateProperty'
 import { ensureNumericKeyframe, setNumericPropertyAtTime, toggleNumericKeyframe } from '@/engine/animation/editNumericProperty'
 import { deserializeEditorState, serializeEditorState } from '@/engine/project/serialization'
 import { auroraProjectDatabase } from '@/engine/project/AuroraProjectDatabase'
+import { importAsset, mediaUrl } from '@/services/mediaLibrary'
+import { kindForFile } from '#shared/contracts.ts'
 import { create3DPath, createCameraPathConstraint, createDemo3DScene, createEmpty3DScene, createPrimitiveObject, makeTransform3D, numericProperty } from '@/engine/scene3d/sceneFactory'
 import {
   appendPathPoint, insertPathPoint, movePathHandle, movePathPoint, prependPathPoint, setPathPointMode,
@@ -39,6 +41,11 @@ const makeTransform = (prefix: string) => ({
 
 export type TimelineLayerPreset = 'adjustment' | 'cinematic-grade' | '3d-scene' | 'text' | 'rectangle' | 'ellipse' | 'image' | 'video' | 'audio'
 
+
+/** Library kind for a dropped file, from its extension first and the browser's MIME type second. */
+function libraryKind(file: File): MediaAsset['kind'] {
+  return kindForFile(file.name, file.type)
+}
 export const useEditorStore = defineStore('editor', () => {
   const project = ref<EditorProject>({
     id: 'aurora-demo',
@@ -63,6 +70,8 @@ export const useEditorStore = defineStore('editor', () => {
   const selectedKeyframeId = ref<string | null>(null)
   /** Which mask segment the edge editor is focused on; null selects the whole outline. */
   const selectedMaskSegment = ref<number | null>(null)
+  /** Imports the media server refused or never received, surfaced in the Library rather than swallowed. */
+  const importFailures = ref<{ assetId: string; name: string; reason: string }[]>([])
   const selectedNodeId = ref('node-blur')
   const selectedSceneId = ref('scene-aurora-3d')
   const selectedSceneEntityId = ref('object-aurora-cube')
@@ -368,23 +377,49 @@ export const useEditorStore = defineStore('editor', () => {
     markChanged()
   }
 
-  function addFiles(files: FileList | File[]) {
-    Array.from(files).forEach((file) => {
-      const major = file.type.split('/')[0]
-      const extension = file.name.split('.').at(-1)?.toLowerCase()
-      const kind: MediaAsset['kind'] = extension === 'glb' || extension === 'gltf'
-        ? 'model3d'
-        : extension === 'hdr' || extension === 'exr'
-          ? 'hdr'
-          : major === 'audio' ? 'audio' : major === 'image' ? 'image' : 'video'
-      assets.value.unshift({
+  /**
+   * Imports files into the media vault and adds them to the library.
+   *
+   * The entry appears immediately with an object URL so the Library is not blank while bytes are
+   * copied, then adopts the content address the server returns. If the server is unreachable the
+   * entry survives without a hash — usable for the session, and visibly missing its media after a
+   * reload, which is the honest outcome rather than a silent blank.
+   */
+  async function addFiles(files: FileList | File[]) {
+    const pending = Array.from(files).map((file) => {
+      const asset: MediaAsset = {
         id: crypto.randomUUID(),
         name: file.name,
-        kind,
-        thumbnail: kind === 'image' || kind === 'video' ? URL.createObjectURL(file) : undefined,
+        kind: libraryKind(file),
+        mimeType: file.type || undefined,
+        sizeBytes: file.size,
+        thumbnail: file.type.startsWith('image/') || file.type.startsWith('video/') ? URL.createObjectURL(file) : undefined,
         sizeLabel: `${(file.size / 1024 / 1024).toFixed(1)} MB`,
-      })
+      }
+      assets.value.unshift(asset)
+      return { asset, file }
     })
+    markChanged()
+
+    for (const { asset, file } of pending) {
+      try {
+        const { asset: stored } = await importAsset(file)
+        const entry = assets.value.find((item) => item.id === asset.id)
+        if (!entry) continue
+        entry.hash = stored.hash
+        entry.mimeType = stored.mimeType
+        entry.sizeBytes = stored.sizeBytes
+        // The object URL was a stand-in; the vault copy outlives the tab, so release the blob.
+        if (entry.thumbnail?.startsWith('blob:')) URL.revokeObjectURL(entry.thumbnail)
+        entry.thumbnail = stored.kind === 'image' || stored.kind === 'video' ? mediaUrl(stored.hash) : undefined
+      } catch (error) {
+        importFailures.value = [...importFailures.value.filter((item) => item.assetId !== asset.id), {
+          assetId: asset.id,
+          name: asset.name,
+          reason: error instanceof Error ? error.message : 'import failed',
+        }]
+      }
+    }
     markChanged()
   }
 
@@ -1673,7 +1708,7 @@ export const useEditorStore = defineStore('editor', () => {
     ensureMaskSegments, setMaskSegmentFeather, setMaskSegmentFeatherAll, selectedMaskSegment,
     selectedLayer, selectedScene, selectedSceneEntity,
     togglePlayback, setTime, stepFrame, setProjectDuration, addKeyframe, setLayerValue, addFiles,
-    addAssetToTimeline, addGeneratedLayer, addPathLayer, addTimelineLayer, reorderTrack, moveSegmentToTrack, moveSegmentToNewTrack, addEmptyTrack,
+    importFailures, addAssetToTimeline, addGeneratedLayer, addPathLayer, addTimelineLayer, reorderTrack, moveSegmentToTrack, moveSegmentToNewTrack, addEmptyTrack,
     renameTimelineLayers, setTimelineLayersVisible, deleteTimelineLayers,
     createCluster, releaseCluster, createEmptyCluster,
     openClusterTabs, activeClusterId, activeCluster, timelineLayers, clusterTabs,

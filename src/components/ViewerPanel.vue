@@ -13,7 +13,7 @@ import type { EditorLayer, ShapePathPoint } from '@/models/editor'
 import IconButton from './common/IconButton.vue'
 
 const store = useEditorStore()
-const { project, currentTime, playing, loop, snap, zoom, layers, scenes3D, nodes, nodeConnections, renderRootNodeId, selectedLayer, selectedLayerId, selectedKeyframeId } = storeToRefs(store)
+const { project, currentTime, playing, loop, snap, zoom, layers, assets, scenes3D, nodes, nodeConnections, renderRootNodeId, selectedLayer, selectedLayerId, selectedKeyframeId } = storeToRefs(store)
 const canvas = ref<HTMLCanvasElement>()
 const canvasWrap = ref<HTMLElement>()
 const transformBox = ref<HTMLElement>()
@@ -145,6 +145,7 @@ async function drawNow() {
       project: project.value,
       layers: layers.value,
       scenes3D: scenes3D.value,
+      assets: assets.value,
       nodes: nodes.value,
       nodeConnections: nodeConnections.value,
       renderRootNodeId: renderRootNodeId.value,
