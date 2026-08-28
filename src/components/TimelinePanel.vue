@@ -16,7 +16,7 @@ import NumberField from './common/NumberField.vue'
 const store = useEditorStore()
 const {
   project, currentTime, layers, timelineLayers, clusterTabs, activeClusterId,
-  selectedLayer, selectedLayerId, selectedKeyframeId, autoKey, snap, ripple, workspace,
+  selectedLayer, selectedLayerId, selectedKeyframeId, autoKey, snap, ripple, workspace, draggingAssetId,
 } = storeToRefs(store)
 const activeBottomTab = ref('Timeline')
 const timelineZoom = ref(100)
@@ -420,6 +420,12 @@ function beginTrackDrag(event: DragEvent, track: TimelineTrack) {
 }
 
 function updateTrackDrop(event: DragEvent, track: TimelineTrack) {
+  // This handler stops propagation so track reordering does not fight the lane beneath it, which
+  // means a library drag would never reach the timeline's own handler. Hand it over explicitly.
+  if (draggingAssetId.value) {
+    updateAssetDrop(event)
+    return
+  }
   const source = timelineTracks.value.find((item) => item.id === draggedTrackId.value)
   if (!source || source.id === track.id || (source.segments[0]?.type === 'audio') !== (track.segments[0]?.type === 'audio')) {
     trackDropTarget.value = null
@@ -431,6 +437,10 @@ function updateTrackDrop(event: DragEvent, track: TimelineTrack) {
 
 function dropTrack(event: DragEvent, track: TimelineTrack) {
   event.preventDefault()
+  if (draggingAssetId.value) {
+    dropAsset(event)
+    return
+  }
   const sourceId = event.dataTransfer?.getData('application/x-aurora-track') || draggedTrackId.value
   if (sourceId && trackDropTarget.value?.id === track.id) store.reorderTrack(sourceId, track.id, trackDropTarget.value.before)
   endTrackDrag()
@@ -927,12 +937,90 @@ function onDurationChange(value: number) {
   store.setProjectDuration(value)
 }
 
+/** Where a library drag would land, and how wide the clip would be, in seconds. */
+const assetDrop = ref<{ trackId: string | null; time: number; duration: number } | null>(null)
+
+const draggingAsset = computed(() => (draggingAssetId.value
+  ? store.assets.find((asset) => asset.id === draggingAssetId.value) ?? null
+  : null))
+
+/** The phantom occupies its own row when the drop would create a track rather than join one. */
+const assetDropIsNewTrack = computed(() => Boolean(assetDrop.value && !assetDrop.value.trackId))
+
+const assetGhostStyle = computed(() => {
+  const drop = assetDrop.value
+  if (!drop) return { display: 'none' }
+  return {
+    left: `${(drop.time / project.value.duration) * timelineLaneWidth.value}px`,
+    width: `${Math.max(6, (drop.duration / project.value.duration) * timelineLaneWidth.value)}px`,
+  }
+})
+
+function trackAcceptsAsset(track: TimelineTrack, time: number, duration: number, kind: string) {
+  const isAudioTrack = track.segments[0]?.type === 'audio'
+  if (isAudioTrack !== (kind === 'audio')) return false
+  return !track.segments.some((segment) => !segment.isPlaceholder
+    && time < segment.start + segment.duration && segment.start < time + duration)
+}
+
+/**
+ * Previews a library drag: the clip is shown where it would land, on the track it would join, or in
+ * a phantom row of its own when it would make a new one. Dropping blind and finding out afterwards
+ * is the part that felt wrong.
+ */
+function updateAssetDrop(event: DragEvent) {
+  const asset = draggingAsset.value
+  if (!asset) return
+  event.preventDefault()
+  if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy'
+
+  const bounds = timelineRef.value?.getBoundingClientRect()
+  const overLane = bounds ? event.clientX - bounds.left + (timelineRef.value?.scrollLeft ?? 0) > 220 : false
+  const time = overLane ? timeAtClientX(event.clientX) : currentTime.value
+  const kind = asset.kind === 'composition' ? 'image' : asset.kind
+  const duration = Math.min(asset.duration ?? 6, Math.max(1 / project.value.frameRate, project.value.duration - time))
+
+  const row = (event.target as Element | null)?.closest('[data-track-id]')?.getAttribute('data-track-id') ?? null
+  const track = row ? timelineTracks.value.find((item) => item.id === row) ?? null : null
+  assetDrop.value = {
+    trackId: track && trackAcceptsAsset(track, time, duration, kind) ? track.id : null,
+    time,
+    duration,
+  }
+}
+
+/**
+ * dragleave fires for every child the pointer crosses, so it cannot be trusted on its own — the
+ * preview would flicker off each time the drag passed between two clips. The pointer has only really
+ * left once it is outside the timeline's own rectangle.
+ */
+function onTimelineDragLeave(event: DragEvent) {
+  const bounds = timelineRef.value?.getBoundingClientRect()
+  if (!bounds) return clearAssetDrop()
+  const inside = event.clientX >= bounds.left && event.clientX <= bounds.right
+    && event.clientY >= bounds.top && event.clientY <= bounds.bottom
+  if (!inside) clearAssetDrop()
+}
+
+function clearAssetDrop() {
+  assetDrop.value = null
+}
+
+/** A drag cancelled with Escape or released outside the window still has to clear the preview. */
+function onDragEnd() {
+  clearAssetDrop()
+  draggingAssetId.value = null
+}
+
 function dropAsset(event: DragEvent) {
-  const assetId = event.dataTransfer?.getData('application/x-aurora-asset')
+  const assetId = event.dataTransfer?.getData('application/x-aurora-asset') || draggingAssetId.value
+  const drop = assetDrop.value
+  clearAssetDrop()
+  draggingAssetId.value = null
   if (!assetId) return
   // Land the clip where it was released rather than at the playhead.
   const overLane = event.clientX - (timelineRef.value?.getBoundingClientRect().left ?? 0) + (timelineRef.value?.scrollLeft ?? 0) > 220
-  store.addAssetToTimeline(assetId, overLane ? timeAtClientX(event.clientX) : undefined)
+  store.addAssetToTimeline(assetId, drop?.time ?? (overLane ? timeAtClientX(event.clientX) : undefined), drop?.trackId ?? null)
 }
 
 function observeTimeline() {
@@ -980,6 +1068,7 @@ onMounted(() => {
   // listener never sees a click that lands on one and the menu would sit there open.
   window.addEventListener('pointerdown', onWindowPointerDown, true)
   window.addEventListener('keydown', onKeyDown)
+  window.addEventListener('dragend', onDragEnd)
 })
 
 onBeforeUnmount(() => {
@@ -988,6 +1077,7 @@ onBeforeUnmount(() => {
   window.removeEventListener('pointerup', endPointerInteraction)
   window.removeEventListener('pointerdown', onWindowPointerDown, true)
   window.removeEventListener('keydown', onKeyDown)
+  window.removeEventListener('dragend', onDragEnd)
 })
 </script>
 
@@ -1051,7 +1141,8 @@ onBeforeUnmount(() => {
         @pointerdown="onTimelinePointerDown"
         @auxclick.prevent
         @wheel="onWheel"
-        @dragover.prevent
+        @dragover="updateAssetDrop"
+        @dragleave="onTimelineDragLeave"
         @drop.prevent="dropAsset"
       >
         <div class="timeline-content" :style="timelineContentStyle">
@@ -1069,11 +1160,14 @@ onBeforeUnmount(() => {
         <div class="tracks-scroll">
           <template v-for="(track, index) in timelineTracks" :key="track.id">
             <div v-if="index === 0" class="track-section-label"><span>Visual layers</span><button type="button" title="Add empty visual track" aria-label="Add empty visual track" @click.stop="store.addEmptyTrack('visual')"><Plus :size="10" /><span>Add track</span></button><small>{{ visualTrackCount }}</small></div>
+            <div v-if="assetDropIsNewTrack && draggingAsset && draggingAsset.kind !== 'audio' && index === 0" class="asset-phantom-row"><div class="asset-ghost" :style="assetGhostStyle"><span>{{ draggingAsset.name }}</span></div></div>
             <div v-if="index === 0 && newTrackDropCategory === 'visual'" class="new-track-zone active" data-category="visual" @pointerup.stop="commitNewTrackDrop('visual')"><Plus :size="10" /><span>Drop into new visual layer</span></div>
+            <div v-if="assetDropIsNewTrack && draggingAsset?.kind === 'audio' && index === visualTrackCount" class="asset-phantom-row"><div class="asset-ghost" :style="assetGhostStyle"><span>{{ draggingAsset.name }}</span></div></div>
             <div v-if="index === visualTrackCount" class="track-section-label audio"><span>Audio layers</span><button type="button" title="Add empty audio track" aria-label="Add empty audio track" @click.stop="store.addEmptyTrack('audio')"><Plus :size="10" /><span>Add track</span></button><small>{{ timelineTracks.length - visualTrackCount }}</small></div>
             <div
               class="track-row"
               :class="{
+                'asset-drop-target': assetDrop?.trackId === track.id,
                 selected: track.segments.some((segment) => segment.id === selectedLayerId),
                 'multi-selected': selectedTrackIds.includes(track.id),
                 'cut-target': isCutMode && cutGhost.trackId === track.id,
@@ -1103,6 +1197,7 @@ onBeforeUnmount(() => {
                 <button type="button" :class="{ active: trackDisplayLayer(track).muted }" title="Mute track" @click="toggleTrackMuted(track, $event)"><VolumeX :size="10" /></button>
               </div>
               <div class="track-lane" @pointerdown="beginLayerMarquee">
+              <div v-if="assetDrop?.trackId === track.id" class="asset-ghost" :style="assetGhostStyle"><span>{{ draggingAsset?.name }}</span></div>
                 <template v-for="segment in track.segments" :key="segment.id">
                 <button v-if="!segment.isPlaceholder" class="timeline-clip" :class="[segment.type, { 'selected-clip': selectedLayerIds.includes(segment.id), 'clip-drag-source': draggingClipId === segment.id }]" type="button" :data-layer-id="segment.id" :aria-pressed="selectedLayerIds.includes(segment.id)" :style="clipStyle(segment)" @pointerdown="onClipPointerDown($event, segment)" @click.stop @dblclick.stop="store.enterCluster(segment.id)">
                   <span class="clip-grip left" @pointerdown="beginClipDrag($event, segment, 'trim-start')" />
@@ -1218,4 +1313,8 @@ onBeforeUnmount(() => {
 .timeline-clip.clip-drag-source { opacity: .16; }.clip-drag-ghost { position: absolute; z-index: 28; display: flex; height: 25px; min-width: 10px; align-items: center; gap: 4px; padding: 0 6px; overflow: hidden; color: #f4f6ff; border: 1px dashed rgb(218 224 255 / .72); border-radius: 3px; box-shadow: 0 5px 14px rgb(0 0 0 / .42); opacity: .72; pointer-events: none; }.clip-drag-ghost.valid { border-style: solid; border-color: #b5c0ff; box-shadow: 0 0 0 1px rgb(140 155 255 / .35), 0 5px 14px rgb(0 0 0 / .42); opacity: .92; }.clip-drag-ghost.invalid { background: #7f3540 !important; border-color: #ff8796; box-shadow: 0 0 0 1px rgb(255 117 135 / .32), 0 5px 14px rgb(0 0 0 / .42); opacity: .9; }.clip-drag-ghost span { min-width: 0; overflow: hidden; font-size: 8px; font-weight: 560; text-overflow: ellipsis; text-shadow: 0 1px 2px #090a0e; white-space: nowrap; }
 .razor-cursor-head { left: -5px; width: 10px; height: 9px; }.razor-guide { box-shadow: none; opacity: .3; }.razor-horizontal { box-shadow: none; }.razor-crosshair { top: calc(var(--level-y) - 2px); left: -2px; width: 5px; height: 5px; box-shadow: none; }.razor-ghost small { left: 6px; padding: 1px 3px; font-size: 7px; }
 .track-row.multi-selected .track-header { outline: 1px solid rgb(165 180 252 / .42); outline-offset: -1px; }.cluster-count { padding: 1px 4px; color: #c3cafd; background: rgb(127 143 226 / .13); border: 1px solid rgb(165 180 252 / .3); border-radius: 3px; font-size: 7px; white-space: nowrap; }.timeline-clip.cluster { background-image: repeating-linear-gradient(135deg, rgb(255 255 255 / .08) 0 4px, transparent 4px 8px); }
+.asset-phantom-row { position: relative; height: 30px; margin: 1px 0 1px 220px; border: 1px dashed var(--accent-border); border-radius: 3px; background: rgb(140 155 255 / .06); }
+.asset-ghost { position: absolute; top: 3px; bottom: 3px; z-index: 6; display: flex; align-items: center; overflow: hidden; padding: 0 5px; background: rgb(140 155 255 / .3); border: 1px solid #a5b4fc; border-radius: 3px; pointer-events: none; }
+.asset-ghost span { overflow: hidden; color: #eef1ff; font-size: 7.5px; text-overflow: ellipsis; white-space: nowrap; }
+.track-row.asset-drop-target { background: rgb(140 155 255 / .08); box-shadow: inset 0 0 0 1px var(--accent-border); }
 </style>

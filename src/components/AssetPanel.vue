@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { storeToRefs } from 'pinia'
 import {
   AudioLines, Box, ChevronDown, ChevronRight, Film, FolderClosed, Grid2X2,
@@ -50,19 +50,66 @@ function onFiles(files: FileList | null) {
   if (files?.length) store.addFiles(files)
 }
 
-function onDrop(event: DragEvent) {
+/**
+ * Only a drag carrying files from outside the app is an import. Dragging a library entry out to the
+ * timeline passes over this panel on its way, and inviting the user to drop it back where it came
+ * from is noise. `types` is the only part of the payload readable during a drag.
+ */
+const carriesFiles = (event: DragEvent) => event.dataTransfer?.types.includes('Files') ?? false
+
+/*
+ * dragenter and dragleave fire for every child crossed, so leaving one child for another reads as a
+ * leave. Counting depth means the overlay only closes once the pointer has actually left the panel.
+ */
+let dragDepth = 0
+
+function onDragEnter(event: DragEvent) {
+  if (!carriesFiles(event)) return
+  dragDepth += 1
+  dragging.value = true
+}
+
+function onDragOver(event: DragEvent) {
+  if (!carriesFiles(event)) return
+  // Claiming the drop is what makes the browser offer a copy cursor rather than refuse it.
+  event.preventDefault()
+  if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy'
+}
+
+function onDragLeave() {
+  dragDepth = Math.max(0, dragDepth - 1)
+  if (!dragDepth) dragging.value = false
+}
+
+function endDrag() {
+  dragDepth = 0
   dragging.value = false
+}
+
+function onDrop(event: DragEvent) {
+  endDrag()
   if (event.dataTransfer?.files.length) store.addFiles(event.dataTransfer.files)
 }
 
 function startDrag(event: DragEvent, id: string) {
   event.dataTransfer?.setData('application/x-aurora-asset', id)
   if (event.dataTransfer) event.dataTransfer.effectAllowed = 'copy'
+  store.draggingAssetId = id
 }
+
+function endAssetDrag() {
+  store.draggingAssetId = null
+  endDrag()
+}
+
+// A drag that ends anywhere — dropped, cancelled with Escape, released outside the window — has to
+// clear the overlay, and no element-level handler sees all of those.
+onMounted(() => window.addEventListener('dragend', endDrag))
+onBeforeUnmount(() => window.removeEventListener('dragend', endDrag))
 </script>
 
 <template>
-  <aside class="asset-panel" @dragover.prevent="dragging = true" @dragleave.self="dragging = false" @drop.prevent="onDrop">
+  <aside class="asset-panel" @dragenter="onDragEnter" @dragover="onDragOver" @dragleave="onDragLeave" @drop.prevent="onDrop">
     <PanelHeader title="Library" subtitle="Project assets">
       <template #actions><IconButton :icon="Plus" label="Import media" :size="13" @click="fileInput?.click()" /></template>
     </PanelHeader>
@@ -102,6 +149,7 @@ function startDrag(event: DragEvent, id: string) {
             draggable="true"
             :title="`${asset.name}\nDrag to timeline`"
             @dragstart="startDrag($event, asset.id)"
+            @dragend="endAssetDrag"
             @dblclick="store.addAssetToTimeline(asset.id)"
           >
             <span class="asset-thumbnail" :class="asset.kind">

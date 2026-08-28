@@ -72,6 +72,11 @@ export const useEditorStore = defineStore('editor', () => {
   const selectedMaskSegment = ref<number | null>(null)
   /** Imports the media server refused or never received, surfaced in the Library rather than swallowed. */
   const importFailures = ref<{ assetId: string; name: string; reason: string }[]>([])
+  /**
+   * The library entry currently being dragged. dataTransfer only exposes its `types` during a drag,
+   * never the payload, so the timeline needs this to preview what is about to land.
+   */
+  const draggingAssetId = ref<string | null>(null)
   const selectedNodeId = ref('node-blur')
   const selectedSceneId = ref('scene-aurora-3d')
   const selectedSceneEntityId = ref('object-aurora-cube')
@@ -433,7 +438,7 @@ export const useEditorStore = defineStore('editor', () => {
   }
 
   /** `atTime` lands the layer where it was dropped on the timeline; without it, at the playhead. */
-  function addAssetToTimeline(assetId: string, atTime?: number) {
+  function addAssetToTimeline(assetId: string, atTime?: number, trackId?: string | null) {
     const asset = assets.value.find((item) => item.id === assetId)
     if (!asset || asset.kind === 'model3d' || asset.kind === 'hdr' || asset.kind === 'texture') return
     const dropTime = Math.max(0, Math.min(project.value.duration, atTime ?? currentTime.value))
@@ -465,12 +470,31 @@ export const useEditorStore = defineStore('editor', () => {
     const type = asset.kind === 'composition' ? 'image' : asset.kind
     const layer: EditorLayer = {
       id: crypto.randomUUID(), name: asset.name.replace(/\.[^.]+$/, ''), type,
+      // The link back to the library entry, and through it to the media the vault serves.
+      assetId: asset.id,
       start: dropTime, duration: Math.min(asset.duration ?? 6, Math.max(1 / project.value.frameRate, project.value.duration - dropTime)),
       color: type === 'audio' ? '#5c9b82' : type === 'image' ? '#6b99d5' : '#5477a8',
       visible: true, locked: false, muted: false, expanded: false,
       transform: makeTransform(crypto.randomUUID()), effects: [],
     }
-    layerList().splice(type === 'audio' ? layerList().length : 0, 0, layer)
+
+    /*
+     * Dropping onto an existing track joins it, provided the clip fits in the gap it was aimed at.
+     * Anything else — an occupied stretch, or a drop past the ends — becomes a track of its own,
+     * which is what the timeline previews while the drag is in flight.
+     */
+    const list = layerList()
+    const target = trackId ? list.filter((item) => (item.trackId ?? item.id) === trackId) : []
+    const occupant = target.find((item) => !item.isPlaceholder
+      && dropTime < item.start + item.duration && item.start < dropTime + layer.duration)
+    if (trackId && target.length && !occupant && (target[0]!.type === 'audio') === (type === 'audio')) {
+      layer.trackId = trackId
+      const placeholder = target.findIndex((item) => item.isPlaceholder)
+      if (placeholder >= 0) list.splice(list.indexOf(target[placeholder]!), 1)
+      list.splice(list.indexOf(target.at(-1)!) + 1, 0, layer)
+    } else {
+      list.splice(type === 'audio' ? list.length : 0, 0, layer)
+    }
     selectedLayerId.value = layer.id
     markChanged()
     return layer
@@ -1708,7 +1732,7 @@ export const useEditorStore = defineStore('editor', () => {
     ensureMaskSegments, setMaskSegmentFeather, setMaskSegmentFeatherAll, selectedMaskSegment,
     selectedLayer, selectedScene, selectedSceneEntity,
     togglePlayback, setTime, stepFrame, setProjectDuration, addKeyframe, setLayerValue, addFiles,
-    importFailures, addAssetToTimeline, addGeneratedLayer, addPathLayer, addTimelineLayer, reorderTrack, moveSegmentToTrack, moveSegmentToNewTrack, addEmptyTrack,
+    importFailures, draggingAssetId, addAssetToTimeline, addGeneratedLayer, addPathLayer, addTimelineLayer, reorderTrack, moveSegmentToTrack, moveSegmentToNewTrack, addEmptyTrack,
     renameTimelineLayers, setTimelineLayersVisible, deleteTimelineLayers,
     createCluster, releaseCluster, createEmptyCluster,
     openClusterTabs, activeClusterId, activeCluster, timelineLayers, clusterTabs,
