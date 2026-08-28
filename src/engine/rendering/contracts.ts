@@ -102,8 +102,21 @@ export function createRenderPlan(request: RenderFrameRequest): RenderPlan {
   const passes = graphPasses
     ? graphPasses.flatMap((pass) => {
       const layer = layerMap.get(pass.layerId)
-      return layer && isLayerLive(layer, request.time)
-        ? [makePass(`pass-${pass.nodeId}`, layer, pass.effects, pass.blendMode)]
+      if (!layer || !isLayerLive(layer, request.time)) return []
+      const mask = pass.effects.mask
+      if (!mask) return [makePass(`pass-${pass.nodeId}`, layer, pass.effects, pass.blendMode)]
+      /*
+       * A mask shape is a clip on the timeline, so it only exists inside its own range. Outside it
+       * there is no shape to keep anything, and a mask that keeps nothing shows nothing — the layer
+       * drops out rather than appearing unmasked before its shape arrives. Inverted is the mirror of
+       * that: with nothing to cut away, the whole layer comes through.
+       */
+      const maskLayer = layerMap.get(mask.layerId)
+      if (maskLayer && isLayerLive(maskLayer, request.time)) {
+        return [makePass(`pass-${pass.nodeId}`, layer, pass.effects, pass.blendMode)]
+      }
+      return mask.inverted
+        ? [makePass(`pass-${pass.nodeId}`, layer, { ...pass.effects, mask: null }, pass.blendMode)]
         : []
     })
     : request.layers
