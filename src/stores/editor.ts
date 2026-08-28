@@ -1,8 +1,8 @@
 import { computed, ref, toRaw } from 'vue'
 import { defineStore } from 'pinia'
 import type {
-  AnimatableProperty, Aurora3DScene, AuroraCamera, AuroraInfluenceType, AuroraLight,
-  AuroraPathOrientation, AuroraPathPointMode,
+  AnimatableProperty, Aurora3DObject, Aurora3DScene, AuroraCamera, AuroraInfluenceType, AuroraLight, AuroraRig, AuroraRigBone,
+  AuroraObjectFollowOrientation, AuroraPathOrientation, AuroraPathPointMode,
   AuroraCameraCut, EditorLayer, EditorNode, EditorNodeConnection, EditorNodeKind, EditorProject,
   MediaAsset, SerializedEditorState, ShapePathPoint, WorkspaceId,
 } from '@/models/editor'
@@ -12,7 +12,9 @@ import { CURRENT_PROJECT_VERSION, deserializeEditorState, serializeEditorState }
 import { auroraProjectDatabase } from '@/engine/project/AuroraProjectDatabase'
 import { importAsset, mediaUrl } from '@/services/mediaLibrary'
 import { kindForFile } from '#shared/contracts.ts'
-import { create3DPath, createCameraPathConstraint, createDemo3DScene, createEmpty3DScene, createPrimitiveObject, makeTransform3D, numericProperty } from '@/engine/scene3d/sceneFactory'
+import { create3DPath, createCameraObjectConstraint, createCameraPathConstraint, createDemo3DScene, createEmpty3DScene, createPrimitiveObject, makeTransform3D, numericProperty } from '@/engine/scene3d/sceneFactory'
+import { createRig, createRigBone, type RigBoneChannelKey } from '@/engine/rig/rigFactory'
+import { MAX_RIG_CELLS, MIN_RIG_CELLS } from '@/engine/rig/rigMesh'
 import {
   appendPathPoint, insertPathPoint, movePathHandle, movePathPoint, prependPathPoint, setPathPointMode,
   type PathHandleKey, type PathVector,
@@ -59,6 +61,18 @@ export interface ClusterSettings {
 function libraryKind(file: File): MediaAsset['kind'] {
   return kindForFile(file.name, file.type)
 }
+/** Hands a rendered file to the browser; the object URL outlives the click so the download can start. */
+function downloadBlob(blob: Blob, filename: string) {
+  const url = URL.createObjectURL(blob)
+  const anchor = document.createElement('a')
+  anchor.href = url
+  anchor.download = filename
+  document.body.appendChild(anchor)
+  anchor.click()
+  anchor.remove()
+  window.setTimeout(() => URL.revokeObjectURL(url), 10_000)
+}
+
 export const useEditorStore = defineStore('editor', () => {
   const project = ref<EditorProject>({
     id: 'aurora-demo',
@@ -100,6 +114,10 @@ export const useEditorStore = defineStore('editor', () => {
   const zoom = ref(100)
   const saveStatus = ref<'Saved' | 'Saving…' | 'Save failed'>('Saved')
   const exportProgress = ref(0)
+  const exportStatus = ref<'idle' | 'rendering' | 'done' | 'error'>('idle')
+  /** Result line under the progress bar: the finished size, or why the render stopped. */
+  const exportMessage = ref('')
+  let exportAbort: AbortController | null = null
   let clusterCounter = 1
   let visualTrackCounter = 1
   let audioTrackCounter = 1
@@ -123,6 +141,9 @@ export const useEditorStore = defineStore('editor', () => {
   const demoGraph = createDemoNodeGraph(layers.value)
   const nodes = ref<EditorNode[]>(demoGraph.nodes)
   const nodeConnections = ref<EditorNodeConnection[]>(demoGraph.connections)
+  /** Deformation skeletons, shared project-wide so one rig can drive a layer and a 3D plane alike. */
+  const rigs = ref<AuroraRig[]>([])
+  const selectedRigBoneId = ref<string | null>(null)
   const selectedConnectionId = ref<string | null>(null)
   const renderRootNodeId = ref<string | null>(null)
 
@@ -157,6 +178,8 @@ export const useEditorStore = defineStore('editor', () => {
     assets.value = state.assets
     nodes.value = state.nodes
     nodeConnections.value = state.nodeConnections
+    rigs.value = state.rigs ?? []
+    selectedRigBoneId.value = null
     if (!layers.value.length) layers.value = [makeEmptyTrack('visual'), makeEmptyTrack('audio')]
     // Repair before filling gaps, or a duplicate about to be folded away could be re-published.
     dedupeCompositionAssets()
@@ -205,6 +228,7 @@ export const useEditorStore = defineStore('editor', () => {
       assets: assets.value,
       nodes: nodes.value,
       nodeConnections: nodeConnections.value,
+      rigs: rigs.value,
     }
   }
 
@@ -283,7 +307,7 @@ export const useEditorStore = defineStore('editor', () => {
         version: CURRENT_PROJECT_VERSION,
       }
       const graph = createDemoNodeGraph([])
-      applyLoadedState({ project: nextProject, layers: [], scenes3D: [], assets: [], nodes: graph.nodes, nodeConnections: graph.connections })
+      applyLoadedState({ project: nextProject, layers: [], scenes3D: [], assets: [], nodes: graph.nodes, nodeConnections: graph.connections, rigs: [] })
       changeRevision += 1
       await saveProjectNow()
       await refreshProjects()
@@ -329,6 +353,14 @@ export const useEditorStore = defineStore('editor', () => {
   const canRedo = computed(() => redoStack.value.length > 0)
   let historyPresent: EditorHistorySnapshot | null = null
   let restoringHistory = false
+  /**
+   * Depth of in-flight viewport drags.
+   *
+   * A drag writes to a property on every pointer move, which would otherwise leave one undo step per
+   * frame and make the gesture impossible to take back. History stands down while one is running,
+   * and the whole drag lands as a single entry when it ends.
+   */
+  let interactiveEdits = 0
 
   function captureHistorySnapshot(): EditorHistorySnapshot {
     return {
@@ -361,7 +393,7 @@ export const useEditorStore = defineStore('editor', () => {
   }
 
   function recordHistoryChange() {
-    if (restoringHistory) return
+    if (restoringHistory || interactiveEdits > 0) return
     const current = captureHistorySnapshot()
     if (historyPresent && historySignature(historyPresent) === historySignature(current)) return
     if (historyPresent) {
@@ -370,6 +402,17 @@ export const useEditorStore = defineStore('editor', () => {
     }
     historyPresent = current
     redoStack.value = []
+  }
+
+  /** Opens a viewport gesture; every edit until the matching end lands as one undo step. */
+  function beginInteractiveEdit() {
+    interactiveEdits += 1
+  }
+
+  function endInteractiveEdit() {
+    if (!interactiveEdits) return
+    interactiveEdits -= 1
+    if (!interactiveEdits) markChanged()
   }
 
   function restoreHistorySnapshot(snapshot: EditorHistorySnapshot) {
@@ -381,6 +424,8 @@ export const useEditorStore = defineStore('editor', () => {
     assets.value = state.assets
     nodes.value = state.nodes
     nodeConnections.value = state.nodeConnections
+    rigs.value = state.rigs ?? []
+    if (!rigs.value.some((rig) => rig.bones.some((bone) => bone.id === selectedRigBoneId.value))) selectedRigBoneId.value = null
     workspace.value = snapshot.workspace
     currentTime.value = Math.max(0, Math.min(project.value.duration, snapshot.currentTime))
     selectedLayerId.value = findLayerDeep(layers.value, snapshot.selectedLayerId ?? '')?.id ?? layers.value[0]?.id ?? null
@@ -615,9 +660,14 @@ export const useEditorStore = defineStore('editor', () => {
     setTime(currentTime.value + direction / project.value.frameRate)
   }
 
+  /**
+   * The composition length is the author's call, not a function of what is on the timeline. Clips
+   * are free to run past the end — they simply never play — the same way every other editor treats
+   * a work area. Only a single frame is a hard floor, since a zero-length composition has no frames.
+   */
   function setProjectDuration(value: number) {
-    const longestLayer = layers.value.reduce((end, layer) => Math.max(end, layer.start + layer.duration), 1)
-    project.value.duration = Math.max(longestLayer, Math.min(86400, Number.isFinite(value) ? value : project.value.duration))
+    const minimum = 1 / project.value.frameRate
+    project.value.duration = Math.max(minimum, Math.min(86400, Number.isFinite(value) ? value : project.value.duration))
     currentTime.value = Math.min(currentTime.value, project.value.duration)
     markChanged()
   }
@@ -1645,7 +1695,14 @@ export const useEditorStore = defineStore('editor', () => {
       const constraintProperties = constraint
         ? [constraint.progress, constraint.bank, constraint.offset.x, constraint.offset.y, constraint.offset.z]
         : []
-      return [...transformProperties, entity.value.fov, ...constraintProperties]
+      const objectConstraint = entity.value.objectConstraint
+      const objectConstraintProperties = objectConstraint
+        ? [
+            objectConstraint.positionOffset.x, objectConstraint.positionOffset.y, objectConstraint.positionOffset.z,
+            objectConstraint.rotationOffset.x, objectConstraint.rotationOffset.y, objectConstraint.rotationOffset.z,
+          ]
+        : []
+      return [...transformProperties, entity.value.fov, ...constraintProperties, ...objectConstraintProperties]
     }
     if (entity.kind === 'path') return transformProperties
     return [...transformProperties, entity.value.intensity]
@@ -1815,6 +1872,8 @@ export const useEditorStore = defineStore('editor', () => {
       scene.objects.forEach((object) => { if (object.parentId === entityId) delete object.parentId })
       scene.cameras.forEach((camera) => {
         if (camera.pathConstraint?.lookAtEntityId === entityId) delete camera.pathConstraint.lookAtEntityId
+        if (camera.objectConstraint?.objectId === entityId) delete camera.objectConstraint
+        else if (camera.objectConstraint?.lookAtEntityId === entityId) delete camera.objectConstraint.lookAtEntityId
       })
     } else if (cameraIndex >= 0) {
       if (scene.cameras.length <= 1) return false
@@ -1922,8 +1981,11 @@ export const useEditorStore = defineStore('editor', () => {
     const camera = selectedCamera()
     if (!camera) return
     if (!pathId) delete camera.pathConstraint
-    else if (camera.pathConstraint) camera.pathConstraint.pathId = pathId
-    else camera.pathConstraint = createCameraPathConstraint(camera.id, pathId)
+    else {
+      delete camera.objectConstraint
+      if (camera.pathConstraint) camera.pathConstraint.pathId = pathId
+      else camera.pathConstraint = createCameraPathConstraint(camera.id, pathId)
+    }
     markSceneChanged()
   }
 
@@ -1965,6 +2027,47 @@ export const useEditorStore = defineStore('editor', () => {
     if (!constraint) return
     let changed = false
     ;(['x', 'y', 'z'] as const).forEach((axis) => { changed = apply3DPropertyValue(constraint.offset[axis], 0) || changed })
+    if (changed) markSceneChanged()
+  }
+
+  function setCameraObjectConstraint(objectId: string | null) {
+    const camera = selectedCamera()
+    if (!camera) return
+    if (!objectId) delete camera.objectConstraint
+    else {
+      delete camera.pathConstraint
+      if (camera.objectConstraint) camera.objectConstraint.objectId = objectId
+      else camera.objectConstraint = createCameraObjectConstraint(camera.id, objectId)
+    }
+    markSceneChanged()
+  }
+
+  function setCameraObjectOrientation(orientation: AuroraObjectFollowOrientation) {
+    const constraint = selectedCamera()?.objectConstraint
+    if (!constraint) return
+    constraint.orientation = orientation
+    markSceneChanged()
+  }
+
+  function setCameraObjectLookAtTarget(entityId: string | null) {
+    const constraint = selectedCamera()?.objectConstraint
+    if (!constraint) return
+    if (entityId) constraint.lookAtEntityId = entityId
+    else delete constraint.lookAtEntityId
+    markSceneChanged()
+  }
+
+  function setCameraObjectOffset(group: 'positionOffset' | 'rotationOffset', axis: 'x' | 'y' | 'z', value: number) {
+    const constraint = selectedCamera()?.objectConstraint
+    if (!constraint || !Number.isFinite(value)) return
+    if (apply3DPropertyValue(constraint[group][axis], value)) markSceneChanged()
+  }
+
+  function resetCameraObjectOffset(group: 'positionOffset' | 'rotationOffset') {
+    const constraint = selectedCamera()?.objectConstraint
+    if (!constraint) return
+    let changed = false
+    ;(['x', 'y', 'z'] as const).forEach((axis) => { changed = apply3DPropertyValue(constraint[group][axis], 0) || changed })
     if (changed) markSceneChanged()
   }
 
@@ -2236,6 +2339,181 @@ export const useEditorStore = defineStore('editor', () => {
     markChanged()
   }
 
+  const selectedLayerRig = computed(() => rigs.value.find((rig) => rig.id === selectedLayer.value?.rigId) ?? null)
+  const selected3DObjectRig = computed(() => {
+    const entity = selectedSceneEntity.value
+    return entity?.kind === 'object' ? rigs.value.find((rig) => rig.id === entity.value.rigId) ?? null : null
+  })
+  const selectedRigBone = computed(() => {
+    const rig = selectedLayerRig.value ?? selected3DObjectRig.value
+    return rig?.bones.find((bone) => bone.id === selectedRigBoneId.value) ?? null
+  })
+
+  const findRig = (rigId: string | null | undefined) => rigs.value.find((rig) => rig.id === rigId) ?? null
+  const findRigBone = (rigId: string, boneId: string) => findRig(rigId)?.bones.find((bone) => bone.id === boneId) ?? null
+
+  function addRig(name?: string) {
+    const rig = createRig(name?.trim() || `Rig ${rigs.value.length + 1}`)
+    rigs.value = [...rigs.value, rig]
+    markChanged()
+    return rig
+  }
+
+  function renameRig(rigId: string, name: string) {
+    const rig = findRig(rigId)
+    if (!rig || !name.trim()) return
+    rig.name = name.trim()
+    markChanged()
+  }
+
+  /** Removing a rig also releases whatever it was bending, so nothing is left claiming a missing rig. */
+  function deleteRig(rigId: string) {
+    if (!findRig(rigId)) return
+    rigs.value = rigs.value.filter((rig) => rig.id !== rigId)
+    const release = (list: EditorLayer[]) => list.forEach((layer) => {
+      if (layer.rigId === rigId) delete layer.rigId
+      if (layer.children) release(layer.children)
+    })
+    release(layers.value)
+    scenes3D.value.forEach((scene) => {
+      let touched = false
+      scene.objects.forEach((object) => {
+        if (object.rigId !== rigId) return
+        delete object.rigId
+        touched = true
+      })
+      if (touched) scene.revision += 1
+    })
+    if (selectedRigBoneId.value) selectedRigBoneId.value = null
+    markChanged()
+  }
+
+  function setRigGrid(rigId: string, columns: number, rows: number) {
+    const rig = findRig(rigId)
+    if (!rig) return
+    const clamp = (value: number, fallback: number) => Math.max(MIN_RIG_CELLS, Math.min(MAX_RIG_CELLS, Math.round(Number.isFinite(value) ? value : fallback)))
+    rig.columns = clamp(columns, rig.columns)
+    rig.rows = clamp(rows, rig.rows)
+    markChanged()
+  }
+
+  /** Attaching is exclusive per target: a layer or object bends under one skeleton at a time. */
+  function attachRigToLayer(rigId: string | null) {
+    const layer = selectedLayer.value
+    if (!layer) return
+    if (rigId && findRig(rigId)) layer.rigId = rigId
+    else delete layer.rigId
+    selectedRigBoneId.value = null
+    markChanged()
+  }
+
+  function attachRigToObject(rigId: string | null) {
+    const entity = selectedSceneEntity.value
+    if (entity?.kind !== 'object') return
+    if (rigId && findRig(rigId)) entity.value.rigId = rigId
+    else delete entity.value.rigId
+    selectedRigBoneId.value = null
+    markSceneChanged()
+  }
+
+  function addRigBone(rigId: string, seed: Parameters<typeof createRigBone>[1] = {}) {
+    const rig = findRig(rigId)
+    if (!rig) return null
+    const bone = createRigBone(rig.bones.length + 1, seed)
+    rig.bones = [...rig.bones, bone]
+    selectedRigBoneId.value = bone.id
+    markChanged()
+    return bone
+  }
+
+  /** A deleted bone hands its children to its own parent, so a limb never detaches from the chain. */
+  function deleteRigBone(rigId: string, boneId: string) {
+    const rig = findRig(rigId)
+    const bone = rig?.bones.find((item) => item.id === boneId)
+    if (!rig || !bone) return
+    rig.bones = rig.bones.filter((item) => item.id !== boneId)
+    rig.bones.forEach((item) => {
+      if (item.parentId !== boneId) return
+      if (bone.parentId) item.parentId = bone.parentId
+      else delete item.parentId
+    })
+    if (selectedRigBoneId.value === boneId) selectedRigBoneId.value = rig.bones[0]?.id ?? null
+    markChanged()
+  }
+
+  function renameRigBone(rigId: string, boneId: string, name: string) {
+    const bone = findRigBone(rigId, boneId)
+    if (!bone || !name.trim()) return
+    bone.name = name.trim()
+    markChanged()
+  }
+
+  /** Refuses a parent that is already downstream, which would otherwise make the chain unposable. */
+  function setRigBoneParent(rigId: string, boneId: string, parentId: string | null) {
+    const rig = findRig(rigId)
+    const bone = rig?.bones.find((item) => item.id === boneId)
+    if (!rig || !bone) return
+    if (!parentId) {
+      delete bone.parentId
+      markChanged()
+      return
+    }
+    if (parentId === boneId) return
+    const byId = new Map(rig.bones.map((item) => [item.id, item]))
+    for (let ancestor = byId.get(parentId); ancestor; ancestor = ancestor.parentId ? byId.get(ancestor.parentId) : undefined) {
+      if (ancestor.id === boneId) return
+    }
+    bone.parentId = parentId
+    markChanged()
+  }
+
+  function setRigBoneRest(rigId: string, boneId: string, patch: Partial<Pick<AuroraRigBone, 'x' | 'y' | 'angle' | 'length' | 'falloff'>>) {
+    const bone = findRigBone(rigId, boneId)
+    if (!bone) return
+    let changed = false
+    ;(Object.entries(patch) as Array<[keyof typeof patch, number | undefined]>).forEach(([key, value]) => {
+      if (value === undefined || !Number.isFinite(value)) return
+      const next = key === 'length' || key === 'falloff' ? Math.max(0, value) : value
+      if (bone[key] === next) return
+      bone[key] = next
+      changed = true
+    })
+    if (changed) markChanged()
+  }
+
+  function setRigBonePose(rigId: string, boneId: string, channel: RigBoneChannelKey, value: number) {
+    const bone = findRigBone(rigId, boneId)
+    if (!bone || !Number.isFinite(value)) return
+    if (apply3DPropertyValue(bone[channel], channel === 'stretch' ? Math.max(.01, value) : value)) markChanged()
+  }
+
+  function resetRigBonePose(rigId: string, boneId: string) {
+    const bone = findRigBone(rigId, boneId)
+    if (!bone) return
+    let changed = false
+    ;([['rotation', 0], ['offsetX', 0], ['offsetY', 0], ['stretch', 1]] as Array<[RigBoneChannelKey, number]>)
+      .forEach(([channel, value]) => { changed = apply3DPropertyValue(bone[channel], value) || changed })
+    if (changed) markChanged()
+  }
+
+  /** Bones the given one can legally hang from: anything that is not itself or one of its descendants. */
+  function rigParentCandidates(rigId: string, boneId: string) {
+    const rig = findRig(rigId)
+    if (!rig) return []
+    const descendants = new Set([boneId])
+    let grew = true
+    while (grew) {
+      grew = false
+      rig.bones.forEach((bone) => {
+        if (bone.parentId && descendants.has(bone.parentId) && !descendants.has(bone.id)) {
+          descendants.add(bone.id)
+          grew = true
+        }
+      })
+    }
+    return rig.bones.filter((bone) => !descendants.has(bone.id))
+  }
+
   function startExport() {
     exportProgress.value = 1
     const interval = window.setInterval(() => {
@@ -2244,14 +2522,68 @@ export const useEditorStore = defineStore('editor', () => {
     }, 90)
   }
 
+  /**
+   * Renders every frame of the composition into an animated GIF and downloads it. Unlike the video
+   * placeholder above, the progress here tracks frames that have actually been encoded.
+   */
+  async function exportGif(options: { filename: string; maxWidth: number; frameRate: number; colors: number; loop: boolean }) {
+    if (exportStatus.value === 'rendering') return
+    const controller = new AbortController()
+    exportAbort = controller
+    exportStatus.value = 'rendering'
+    exportMessage.value = ''
+    exportProgress.value = 1
+    try {
+      const { exportProjectGif } = await import('@/engine/rendering/gifExport')
+      const blob = await exportProjectGif({
+        composition: {
+          project: toRaw(project.value),
+          layers: toRaw(layers.value),
+          scenes3D: toRaw(scenes3D.value),
+          assets: toRaw(assets.value),
+          nodes: toRaw(nodes.value),
+          nodeConnections: toRaw(nodeConnections.value),
+          renderRootNodeId: renderRootNodeId.value,
+          rigs: toRaw(rigs.value),
+        },
+        maxWidth: options.maxWidth,
+        frameRate: options.frameRate,
+        colors: options.colors,
+        loop: options.loop,
+        signal: controller.signal,
+        onProgress: (frame, total) => { exportProgress.value = Math.max(1, Math.round((frame / total) * 100)) },
+      })
+      const name = options.filename.trim() || project.value.name
+      downloadBlob(blob, name.toLowerCase().endsWith('.gif') ? name : `${name}.gif`)
+      exportProgress.value = 100
+      exportStatus.value = 'done'
+      exportMessage.value = `${(blob.size / 1024 / 1024).toFixed(1)} MB written`
+    } catch (error) {
+      const cancelled = error instanceof DOMException && error.name === 'AbortError'
+      exportProgress.value = 0
+      exportStatus.value = cancelled ? 'idle' : 'error'
+      exportMessage.value = cancelled ? '' : error instanceof Error ? error.message : 'The GIF render failed.'
+    } finally {
+      exportAbort = null
+    }
+  }
+
+  function cancelExport() {
+    exportAbort?.abort()
+  }
+
   resetEditorHistory()
 
   return {
     project, availableProjects, projectBrowserBusy, projectBrowserError,
     workspace, currentTime, playing, loop, autoKey, snap, ripple, selectedLayerId, selectedKeyframeId,
-    canUndo, canRedo, undo, redo,
-    selectedNodeId, selectedSceneId, selectedSceneEntityId, zoom, saveStatus, exportProgress, assets, layers, scenes3D,
+    canUndo, canRedo, undo, redo, beginInteractiveEdit, endInteractiveEdit,
+    selectedNodeId, selectedSceneId, selectedSceneEntityId, zoom, saveStatus, exportProgress, exportStatus, exportMessage, assets, layers, scenes3D,
     nodes, nodeConnections, selectedConnectionId, renderRootNodeId,
+    rigs, selectedRigBoneId, selectedLayerRig, selected3DObjectRig, selectedRigBone,
+    addRig, renameRig, deleteRig, setRigGrid, attachRigToLayer, attachRigToObject,
+    addRigBone, deleteRigBone, renameRigBone, setRigBoneParent, setRigBoneRest, setRigBonePose, resetRigBonePose,
+    rigParentCandidates, findRig,
     selectNode, selectNodeConnection, addNode, moveNode, deleteNode, connectNodes, disconnectNodes,
     setNodeSource, setNodeSocketValue, setNodeProperty, toggleNodeMuted, setRenderRootNode,
     ensureMaskSegments, setMaskSegmentFeather, setMaskSegmentFeatherAll, selectedMaskSegment,
@@ -2264,7 +2596,7 @@ export const useEditorStore = defineStore('editor', () => {
     openClusterTabs, activeClusterId, activeCluster, timelineLayers, clusterTabs,
     enterCluster, activateTimelineTab, closeClusterTab, fitClusterToChildren, publishClusterAsset, ensureClusterAssets, dedupeCompositionAssets,
     splitLayerAt, splitSelectedLayer, markChanged, saveProjectNow, flushProjectSave, initializePersistence,
-    refreshProjects, openProject, createEmptyProject, setProjectFormat, setWorkspace, create3DSceneFromWorkspace, startExport,
+    refreshProjects, openProject, createEmptyProject, setProjectFormat, setWorkspace, create3DSceneFromWorkspace, startExport, exportGif, cancelExport,
     publish3DSceneAsset, ensure3DSceneAssets,
     selectSceneEntity, select3DLayer, markSceneChanged, add3DPrimitive, add3DImagePlane, add3DLight, add3DCamera, set3DEntityTransform,
     rename3DEntity, set3DEntityVisible, delete3DEntity,
@@ -2275,6 +2607,7 @@ export const useEditorStore = defineStore('editor', () => {
     add3DPathPoint, add3DPathEndpoint, delete3DPathPoint, toggle3DPathClosed, set3DPathColor, set3DPathLocked,
     setCameraPathConstraint, setCameraPathOrientation, setCameraPathTarget, setCameraPathProgress, setCameraPathBank,
     setCameraPathOffset, resetCameraPathOffset,
+    setCameraObjectConstraint, setCameraObjectOrientation, setCameraObjectLookAtTarget, setCameraObjectOffset, resetCameraObjectOffset,
     toggleLayerPropertyKeyframe, toggle3DPropertyKeyframe, stepToAdjacentKeyframe, hasAdjacentKeyframe, isKeyedAtPlayhead,
     add3DInfluence, remove3DInfluence, toggle3DInfluence, move3DInfluence, set3DInfluenceParameter,
   }

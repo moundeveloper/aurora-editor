@@ -1192,7 +1192,7 @@ onBeforeUnmount(() => {
         <button class="toggle-control" type="button" :class="{ active: ripple }" title="Shift later clips when trimming a clip end or deleting clips" @click="ripple = !ripple"><Link2 :size="12" /> Ripple</button>
         <span class="divider" />
         <button class="timecode-button" type="button">00:00:{{ String(Math.floor(currentTime)).padStart(2, '0') }}:{{ String(Math.floor(currentTime % 1 * project.frameRate)).padStart(2, '0') }}</button>
-        <label class="duration-control" title="Composition duration in seconds"><span>Duration</span><NumberField :model-value="project.duration" :min="1" :max="86400" :step=".5" label="Composition duration" @update:model-value="onDurationChange" /><small>s</small></label>
+        <label class="duration-control" title="Composition duration in seconds"><span>Duration</span><NumberField :model-value="project.duration" :min="1 / project.frameRate" :max="86400" :step=".5" label="Composition duration" @update:model-value="onDurationChange" /><small>s</small></label>
         <span class="toolbar-spacer" />
         <IconButton :icon="Search" label="Search layers" />
         <IconButton :icon="Minus" label="Zoom out timeline" @click="setZoom(timelineZoom - 10)" />

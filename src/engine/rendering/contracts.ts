@@ -1,4 +1,4 @@
-import type { Aurora3DScene, EditorLayer, EditorNode, EditorNodeConnection, EditorProject, MediaAsset } from '@/models/editor'
+import type { Aurora3DScene, AuroraRig, EditorLayer, EditorNode, EditorNodeConnection, EditorProject, MediaAsset } from '@/models/editor'
 import { evaluateNodeGraph, NEUTRAL_EFFECTS, type GraphEffects, type NodeBlendMode } from '@/engine/nodes/evaluateGraph'
 
 export type RenderBackendId = 'pixi-webgl' | 'three-webgl' | 'canvas2d'
@@ -38,6 +38,8 @@ export interface RenderFrameRequest {
   assets?: MediaAsset[]
   nodes?: EditorNode[]
   nodeConnections?: EditorNodeConnection[]
+  /** Deformation skeletons a layer or 3D object may be attached to. */
+  rigs?: AuroraRig[]
   /** A Viewer node takes over the frame when one is active; otherwise the Composite node is the root. */
   renderRootNodeId?: string | null
   time: number

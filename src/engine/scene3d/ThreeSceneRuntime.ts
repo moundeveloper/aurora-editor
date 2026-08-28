@@ -2,8 +2,10 @@ import * as THREE from 'three'
 import { evaluateNumericProperty } from '@/engine/animation/evaluateProperty'
 import { evaluate3DPath } from '@/engine/scene3d/pathEvaluation'
 import { applyInfluences, influenceSignature } from '@/engine/scene3d/influences'
+import { deformRig } from '@/engine/rig/rigMesh'
+import { bonePoseMatrices, rigIsActive, rigPoseSignature, rigRestSignature } from '@/engine/rig/skeleton'
 import { mediaUrl } from '@/services/mediaLibrary'
-import type { Aurora3DObject, Aurora3DScene, AuroraCamera, AuroraLight, MediaAsset, Transform3D } from '@/models/editor'
+import type { Aurora3DObject, Aurora3DScene, AuroraCamera, AuroraLight, AuroraRig, MediaAsset, Transform3D } from '@/models/editor'
 
 export interface Scene3DRuntime {
   sceneId: string
@@ -50,11 +52,17 @@ function imageAspect(asset: MediaAsset | undefined) {
   return width > 0 && height > 0 ? width / height : 1
 }
 
+/** Half-extents of an image plane, shared by the geometry it builds and the editor handles drawn on it. */
+export function planeHalfExtents(object: Aurora3DObject, assets: Map<string, MediaAsset>) {
+  const aspect = imageAspect(imageAssetFor(object, assets))
+  return { halfWidth: (aspect >= 1 ? 2 : 2 * aspect) / 2, halfHeight: (aspect >= 1 ? 2 / aspect : 2) / 2 }
+}
+
 function makeGeometry(object: Aurora3DObject, assets: Map<string, MediaAsset>): THREE.BufferGeometry {
   if (object.primitive === 'sphere') return new THREE.SphereGeometry(1.15, 48, 32)
   if (object.primitive === 'plane') {
-    const aspect = imageAspect(imageAssetFor(object, assets))
-    return new THREE.PlaneGeometry(aspect >= 1 ? 2 : 2 * aspect, aspect >= 1 ? 2 / aspect : 2)
+    const { halfWidth, halfHeight } = planeHalfExtents(object, assets)
+    return new THREE.PlaneGeometry(halfWidth * 2, halfHeight * 2)
   }
   return new THREE.BoxGeometry(2, 2, 2, 2, 2, 2)
 }
@@ -87,18 +95,61 @@ function makeLight(definition: AuroraLight): THREE.Light {
 }
 
 /**
- * Rebuilds the influence stack only when an evaluated parameter actually changes. The untouched
- * primitive is kept on the mesh so the stack always starts from the same source geometry.
+ * Builds the plane a rig bends, as a grid the skeleton has already deformed.
+ *
+ * The rig's own square runs from -1 to 1, so the same skeleton fits any plane: only the half-extents
+ * change. Normals stay flat because a rigged plane is still a flat card, however far it is bent.
+ *
+ * The rig mesh carries image-style UVs with V growing downward, which is what the 2D renderer wants.
+ * Three's own plane counts V upward, so V is flipped here — without it the rigged plane would show
+ * its texture upside down the moment the first bone appeared.
  */
-function syncInfluences(mesh: THREE.Mesh, definition: Aurora3DObject, time: number) {
-  const signature = influenceSignature(definition.influences, time)
-  if (mesh.userData.influenceSignature === signature) return
+function makeRiggedPlaneGeometry(definition: Aurora3DObject, rig: AuroraRig, assets: Map<string, MediaAsset>, time: number) {
+  const { halfWidth, halfHeight } = planeHalfExtents(definition, assets)
+  const { mesh, positions } = deformRig(rig, bonePoseMatrices(rig, time), time)
+  const count = mesh.points.length
+  const position = new Float32Array(count * 3)
+  const normal = new Float32Array(count * 3)
+  for (let index = 0; index < count; index += 1) {
+    position[index * 3] = positions[index * 2]! * halfWidth
+    position[index * 3 + 1] = positions[index * 2 + 1]! * halfHeight
+    normal[index * 3 + 2] = 1
+  }
+  const uv = new Float32Array(count * 2)
+  for (let index = 0; index < count; index += 1) {
+    uv[index * 2] = mesh.uvs[index * 2]!
+    uv[index * 2 + 1] = 1 - mesh.uvs[index * 2 + 1]!
+  }
+  const geometry = new THREE.BufferGeometry()
+  geometry.setAttribute('position', new THREE.BufferAttribute(position, 3))
+  geometry.setAttribute('normal', new THREE.BufferAttribute(normal, 3))
+  geometry.setAttribute('uv', new THREE.BufferAttribute(uv, 2))
+  geometry.setIndex(new THREE.BufferAttribute(mesh.indices.slice(), 1))
+  return geometry
+}
+
+/**
+ * Rebuilds geometry only when what drives it actually changes, keeping the untouched primitive on
+ * the mesh so every rebuild starts from the same source.
+ *
+ * A rigged plane is generated wholesale from the skeleton's grid, so it takes over from the
+ * influence stack rather than stacking on top of it: an influence chain expects to reshape the
+ * primitive, and there is no primitive left once the rig has replaced it.
+ */
+function syncGeometry(mesh: THREE.Mesh, definition: Aurora3DObject, rig: AuroraRig | undefined, assets: Map<string, MediaAsset>, time: number) {
+  const rigged = definition.primitive === 'plane' && rigIsActive(rig)
+  const signature = rigged
+    ? `rig:${rigRestSignature(rig)}#${rigPoseSignature(rig, time)}`
+    : `influence:${influenceSignature(definition.influences, time)}`
+  if (mesh.userData.geometrySignature === signature) return
   const base = (mesh.userData.baseGeometry as THREE.BufferGeometry | undefined) ?? mesh.geometry
   mesh.userData.baseGeometry = base
-  const next = applyInfluences(base, definition.influences, time)
+  const next = rigged && rig
+    ? makeRiggedPlaneGeometry(definition, rig, assets, time)
+    : applyInfluences(base, definition.influences, time)
   if (mesh.geometry !== base && mesh.geometry !== next) mesh.geometry.dispose()
   mesh.geometry = next
-  mesh.userData.influenceSignature = signature
+  mesh.userData.geometrySignature = signature
 }
 
 function entityWorldPosition(runtime: Scene3DRuntime, entityId: string) {
@@ -145,6 +196,41 @@ function applyCameraPathConstraint(runtime: Scene3DRuntime, camera: THREE.Camera
   return true
 }
 
+/** Follows an object's evaluated world transform, with offsets authored in the object's local axes. */
+function applyCameraObjectConstraint(runtime: Scene3DRuntime, camera: THREE.Camera, definition: AuroraCamera, time: number) {
+  const constraint = definition.objectConstraint
+  const target = constraint ? runtime.objects.get(constraint.objectId) : undefined
+  if (!constraint || !target) return false
+
+  const targetPosition = target.getWorldPosition(new THREE.Vector3())
+  const targetQuaternion = target.getWorldQuaternion(new THREE.Quaternion())
+  const localOffset = new THREE.Vector3(
+    evaluateNumericProperty(constraint.positionOffset.x, time),
+    evaluateNumericProperty(constraint.positionOffset.y, time),
+    evaluateNumericProperty(constraint.positionOffset.z, time),
+  ).applyQuaternion(targetQuaternion)
+  const rotationOffset = new THREE.Euler(
+    THREE.MathUtils.degToRad(evaluateNumericProperty(constraint.rotationOffset.x, time)),
+    THREE.MathUtils.degToRad(evaluateNumericProperty(constraint.rotationOffset.y, time)),
+    THREE.MathUtils.degToRad(evaluateNumericProperty(constraint.rotationOffset.z, time)),
+    'XYZ',
+  )
+
+  camera.position.copy(targetPosition).add(localOffset)
+  if (constraint.orientation === 'look-at') {
+    const lookTarget = constraint.lookAtEntityId
+      ? entityWorldPosition(runtime, constraint.lookAtEntityId) ?? targetPosition
+      : targetPosition
+    camera.up.set(0, 1, 0)
+    camera.lookAt(lookTarget)
+    camera.quaternion.multiply(new THREE.Quaternion().setFromEuler(rotationOffset))
+  } else {
+    camera.quaternion.copy(targetQuaternion).multiply(new THREE.Quaternion().setFromEuler(rotationOffset))
+  }
+  camera.updateMatrixWorld(true)
+  return true
+}
+
 export class ThreeSceneRuntimeRegistry {
   private runtimes = new Map<string, Scene3DRuntime>()
   private texturePromises = new Map<string, Promise<THREE.Texture | null>>()
@@ -153,16 +239,17 @@ export class ThreeSceneRuntimeRegistry {
 
   constructor(private readonly onInvalidate?: () => void) {}
 
-  get(sceneDefinition: Aurora3DScene, width: number, height: number, time: number, assets: readonly MediaAsset[] = []): Scene3DRuntime {
+  get(sceneDefinition: Aurora3DScene, width: number, height: number, time: number, assets: readonly MediaAsset[] = [], rigs: readonly AuroraRig[] = []): Scene3DRuntime {
     this.disposed = false
     const assetMap = new Map(assets.map((asset) => [asset.id, asset]))
+    const rigMap = new Map(rigs.map((rig) => [rig.id, rig]))
     let runtime = this.runtimes.get(sceneDefinition.id)
     if (!runtime || runtime.revision !== sceneDefinition.revision) {
       if (runtime) this.disposeRuntime(runtime)
       runtime = this.create(sceneDefinition, width / Math.max(1, height), assetMap)
       this.runtimes.set(sceneDefinition.id, runtime)
     }
-    this.update(runtime, sceneDefinition, width / Math.max(1, height), time, assetMap)
+    this.update(runtime, sceneDefinition, width / Math.max(1, height), time, assetMap, rigMap)
     return runtime
   }
 
@@ -266,7 +353,7 @@ export class ThreeSceneRuntimeRegistry {
     return runtime
   }
 
-  private update(runtime: Scene3DRuntime, definition: Aurora3DScene, aspect: number, time: number, assets: Map<string, MediaAsset>) {
+  private update(runtime: Scene3DRuntime, definition: Aurora3DScene, aspect: number, time: number, assets: Map<string, MediaAsset>, rigs: Map<string, AuroraRig> = new Map()) {
     runtime.revision = definition.revision
     runtime.scene.background = definition.settings.backgroundColor ? new THREE.Color(definition.settings.backgroundColor) : null
     definition.objects.forEach((item) => {
@@ -274,7 +361,7 @@ export class ThreeSceneRuntimeRegistry {
       if (!object) return
       object.visible = item.visible
       applyTransform(object, item.transform, time)
-      if (object instanceof THREE.Mesh) syncInfluences(object, item, time)
+      if (object instanceof THREE.Mesh) syncGeometry(object, item, item.rigId ? rigs.get(item.rigId) : undefined, assets, time)
       if (object instanceof THREE.Mesh && object.material instanceof THREE.MeshStandardMaterial) {
         this.syncImageMap(object.material, item, assets)
         object.material.color.set(item.material.baseColor)
@@ -292,7 +379,7 @@ export class ThreeSceneRuntimeRegistry {
       if (!camera) return
       camera.visible = item.visible
       applyTransform(camera, item.transform, time)
-      applyCameraPathConstraint(runtime, camera, item, definition, time)
+      if (!applyCameraObjectConstraint(runtime, camera, item, time)) applyCameraPathConstraint(runtime, camera, item, definition, time)
       if (camera instanceof THREE.PerspectiveCamera) {
         camera.aspect = aspect
         camera.fov = evaluateNumericProperty(item.fov, time)

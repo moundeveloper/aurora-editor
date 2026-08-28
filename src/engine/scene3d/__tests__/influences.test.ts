@@ -32,6 +32,33 @@ describe('influences', () => {
     expect(vertices(source)).toBe(vertices(box()))
   })
 
+  it('sweeps copies around the authored centre with the radial array', () => {
+    const source = box()
+    const influence = withParameters(createInfluence('radial-array', 1), { count: 4, centerX: 0, centerY: 0, centerZ: 2.5, axis: 1, angle: 360, orient: 1 })
+    const result = applyInfluences(source, [influence], 0)
+    expect(vertices(result)).toBe(vertices(source) * 4)
+    result.computeBoundingBox()
+    // A quarter turn about (0, 0, 2.5) puts the far copy at z = 5 and the side copies at x = ±2.5.
+    expect(result.boundingBox!.max.z).toBeCloseTo(6)
+    expect(result.boundingBox!.min.z).toBeCloseTo(-1)
+    expect(result.boundingBox!.max.x).toBeCloseTo(3.5)
+
+    const single = applyInfluences(source, [withParameters(createInfluence('radial-array', 1), { count: 1 })], 0)
+    expect(single).toBe(source)
+  })
+
+  it('keeps copy orientation when the radial array is told not to rotate them', () => {
+    const source = new THREE.BoxGeometry(2, 1, 1)
+    const values = { count: 4, centerX: 0, centerY: 0, centerZ: 2.5, axis: 1, angle: 360 }
+    const rotated = applyInfluences(source, [withParameters(createInfluence('radial-array', 1), { ...values, orient: 1 })], 0)
+    const parallel = applyInfluences(source, [withParameters(createInfluence('radial-array', 1), { ...values, orient: 0 })], 0)
+    rotated.computeBoundingBox()
+    parallel.computeBoundingBox()
+    // The side copies turn with the sweep, so their 2-unit width lies along Z rather than X.
+    expect(rotated.boundingBox!.min.x).toBeCloseTo(-3)
+    expect(parallel.boundingBox!.min.x).toBeCloseTo(-3.5)
+  })
+
   it('mirrors across the chosen axes and keeps the original half', () => {
     const source = box()
     const influence = withParameters(createInfluence('mirror', 1), { axisX: 1, axisY: 0, axisZ: 0 })

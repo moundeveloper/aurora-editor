@@ -10,10 +10,11 @@ import type { AnimatableProperty, Keyframe } from '@/models/editor'
 import IconButton from './common/IconButton.vue'
 import MSelect, { type MSelectOption } from './common/MSelect.vue'
 import CurveEditor from './CurveEditor.vue'
+import { rigBoneChannels } from '@/engine/rig/rigFactory'
 
 const LABEL_WIDTH = 220
 const store = useEditorStore()
-const { project, currentTime, playing, autoKey, snap, selectedScene, selectedSceneEntity, selectedSceneEntityId, selectedKeyframeId } = storeToRefs(store)
+const { project, currentTime, playing, autoKey, snap, selectedScene, selectedSceneEntity, selectedSceneEntityId, selectedKeyframeId, rigs } = storeToRefs(store)
 const timelineZoom = ref(100)
 const viewport = ref<HTMLElement>()
 const rulerLane = ref<HTMLElement>()
@@ -87,6 +88,16 @@ const channels = computed<ChannelRow[]>(() => {
         groupStart: index === 0,
       }))
     })
+    const rig = rigs.value.find((item) => item.id === selected.value.rigId)
+    rig?.bones.forEach((bone) => rigBoneChannels(bone).forEach((channel, index) => rows.push({
+      id: channel.property.id,
+      group: `rig-${bone.id}`,
+      label: `${bone.name} · ${channel.label}`,
+      suffix: channel.suffix,
+      color: '#c79ae0',
+      property: channel.property,
+      groupStart: index === 0,
+    })))
   } else if (selected.kind === 'camera') {
     rows.push({ id: selected.value.fov.id, group: 'camera', label: 'Field of view', suffix: '°', color: '#8ca9e8', property: selected.value.fov, groupStart: true })
     const constraint = selected.value.pathConstraint
@@ -101,6 +112,17 @@ const channels = computed<ChannelRow[]>(() => {
         color: colors[axis],
         property: constraint.offset[axis],
         groupStart: false,
+      }))
+    }
+    const objectConstraint = selected.value.objectConstraint
+    if (objectConstraint) {
+      ;(['x', 'y', 'z'] as const).forEach((axis, index) => rows.push({
+        id: objectConstraint.positionOffset[axis].id, group: 'object-follow-position', label: `Follow position ${axis.toUpperCase()}`,
+        suffix: '', color: colors[axis], property: objectConstraint.positionOffset[axis], groupStart: index === 0,
+      }))
+      ;(['x', 'y', 'z'] as const).forEach((axis, index) => rows.push({
+        id: objectConstraint.rotationOffset[axis].id, group: 'object-follow-rotation', label: `Follow rotation ${axis.toUpperCase()}`,
+        suffix: '°', color: colors[axis], property: objectConstraint.rotationOffset[axis], groupStart: index === 0,
       }))
     }
   } else if (selected.kind === 'light') {

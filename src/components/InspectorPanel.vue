@@ -12,6 +12,7 @@ import IconButton from './common/IconButton.vue'
 import KeyframeControl from './common/KeyframeControl.vue'
 import NumberField from './common/NumberField.vue'
 import PanelHeader from './common/PanelHeader.vue'
+import RigPanel from './common/RigPanel.vue'
 
 const store = useEditorStore()
 const { selectedLayer, selectedKeyframeId, currentTime, project } = storeToRefs(store)
@@ -20,6 +21,8 @@ const scaleLinked = ref(true)
 const collapsed = ref<Record<string, boolean>>({})
 const blendMode = ref('Normal')
 const tabs = ['Inspector', 'Effects', 'Metadata']
+/** Only textured quads have a surface a skeleton can bend. */
+const riggable = computed(() => selectedLayer.value?.type === 'image' || selectedLayer.value?.type === 'video')
 
 type TransformKey = keyof EditorLayer['transform']
 interface PropertyConfig { key: TransformKey; label: string; suffix?: string; min?: number; max?: number; step?: number }
@@ -103,6 +106,12 @@ function toggleGroup(group: string) { collapsed.value[group] = !collapsed.value[
             <div class="property-row"><span class="row-indent" /><label>Speed</label><div class="numeric-field time">100 %</div></div>
           </div>
         </section>
+
+        <RigPanel
+          :rig-id="selectedLayer.rigId"
+          scope="layer"
+          :unavailable="riggable ? undefined : 'Rigs bend a texture, so they attach to image and video layers.'"
+        />
 
         <section class="property-section effects-section">
           <div class="section-header static"><ChevronDown :size="13" /><span>Effects</span><small>{{ selectedEffects.length }}</small><button type="button" title="Add effect"><Plus :size="12" /></button></div>

@@ -54,7 +54,7 @@ export interface AuroraPBRMaterial {
 
 export type Aurora3DPrimitive = 'box' | 'sphere' | 'plane' | 'model'
 
-export type AuroraInfluenceType = 'array' | 'mirror' | 'subdivide' | 'displace' | 'twist'
+export type AuroraInfluenceType = 'array' | 'radial-array' | 'mirror' | 'subdivide' | 'displace' | 'twist'
 
 /** A non-destructive geometry operation, evaluated in stack order on top of the primitive. */
 export interface AuroraInfluence {
@@ -63,6 +63,44 @@ export interface AuroraInfluence {
   name: string
   enabled: boolean
   parameters: Record<string, AnimatableProperty<number>>
+}
+
+/**
+ * A bone of a 2D deformation rig.
+ *
+ * Rest pose is absolute in rig space — a square running from -1 to 1 on both axes, centred on the
+ * image, with Y pointing up — so the same skeleton fits a timeline image layer and a 3D image plane
+ * without either of them having to know the other's units. Parenting only chains the *pose*: a bone
+ * inherits what its parent was posed into, never where its parent rests.
+ */
+export interface AuroraRigBone {
+  id: string
+  name: string
+  parentId?: string
+  /** Rest pivot in rig space. */
+  x: number
+  y: number
+  /** Rest direction in degrees, counter-clockwise from +X, and the bone's length in rig units. */
+  angle: number
+  length: number
+  /** How far past its own segment the bone still moves the image, in rig units. */
+  falloff: number
+  /** Pose, layered on the rest pose. Rotation is in degrees, offsets in rig units. */
+  rotation: AnimatableProperty<number>
+  offsetX: AnimatableProperty<number>
+  offsetY: AnimatableProperty<number>
+  /** Stretch along the bone; 1 leaves its length alone. */
+  stretch: AnimatableProperty<number>
+}
+
+/** A skeleton that bends whatever it is attached to. Rigs are project-wide and can be shared. */
+export interface AuroraRig {
+  id: string
+  name: string
+  /** Deformation mesh density. More cells bend more smoothly and cost more per frame. */
+  columns: number
+  rows: number
+  bones: AuroraRigBone[]
 }
 
 export interface Aurora3DObject {
@@ -79,6 +117,8 @@ export interface Aurora3DObject {
   transform: Transform3D
   material: AuroraPBRMaterial
   influences: AuroraInfluence[]
+  /** Deformation rig bending this object's surface. Only image planes are rigged today. */
+  rigId?: string
 }
 
 export interface AuroraCamera {
@@ -91,6 +131,7 @@ export interface AuroraCamera {
   near: number
   far: number
   pathConstraint?: AuroraCameraPathConstraint
+  objectConstraint?: AuroraCameraObjectConstraint
 }
 
 /** A camera edit; it remains active until the next cut marker. */
@@ -130,6 +171,19 @@ export interface AuroraCameraPathConstraint {
   /** Displacement from the curve in the travel frame: X right, Y up, Z backwards along the tangent. */
   offset: AnimatableVector3
   orientation: AuroraPathOrientation
+  lookAtEntityId?: string
+}
+
+export type AuroraObjectFollowOrientation = 'target' | 'look-at'
+
+export interface AuroraCameraObjectConstraint {
+  objectId: string
+  /** Position displacement in the followed object's local axes. */
+  positionOffset: AnimatableVector3
+  /** Euler displacement, in degrees, applied after the inherited or look-at orientation. */
+  rotationOffset: AnimatableVector3
+  orientation: AuroraObjectFollowOrientation
+  /** Defaults to the followed object when omitted in look-at mode. */
   lookAtEntityId?: string
 }
 
@@ -201,6 +255,8 @@ export interface EditorLayer {
   height?: number
   children?: EditorLayer[]
   isPlaceholder?: boolean
+  /** Deformation rig bending this layer. Only image layers are rigged today. */
+  rigId?: string
   color: string
   visible: boolean
   locked: boolean
@@ -302,4 +358,5 @@ export interface SerializedEditorState {
   assets: MediaAsset[]
   nodes: EditorNode[]
   nodeConnections: EditorNodeConnection[]
+  rigs: AuroraRig[]
 }

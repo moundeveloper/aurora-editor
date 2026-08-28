@@ -8,6 +8,7 @@ import { createDemo3DScene } from '@/engine/scene3d/sceneFactory'
 import { ThreeSceneRuntimeRegistry } from '@/engine/scene3d/ThreeSceneRuntime'
 import { CURRENT_PROJECT_VERSION, deserializeEditorState, serializeEditorState } from '@/engine/project/serialization'
 import { createDemoNodeGraph } from '@/engine/nodes/nodeGraph'
+import { createRig, createRigBone } from '@/engine/rig/rigFactory'
 import { AuroraProjectDatabase } from '@/engine/project/AuroraProjectDatabase'
 import type { EditorLayer, EditorProject, SerializedEditorState } from '@/models/editor'
 
@@ -161,5 +162,51 @@ describe('hybrid project architecture', () => {
     expect(await database.scenes3D.count()).toBe(1)
     expect((await database.listProjects()).map((item) => item.id)).toEqual([project.id])
     await database.delete()
+  })
+})
+
+describe('rig persistence', () => {
+  const riggedState = () => {
+    const rig = createRig('Leaf')
+    rig.bones = [createRigBone(1, { x: 0, y: -.6, angle: 90, length: .8 })]
+    rig.bones[0]!.rotation.value = 12
+    const image: EditorLayer = {
+      id: 'leaf', name: 'Leaf', type: 'image', rigId: rig.id, start: 0, duration: 4, color: '#8f8',
+      visible: true, locked: false, muted: false, expanded: false, transform: transform('leaf'), effects: [],
+    }
+    return { project, layers: [image], scenes3D: [], assets: [], rigs: [rig], ...createDemoNodeGraph2() } as SerializedEditorState
+  }
+
+  it('round-trips rigs and the layers attached to them', () => {
+    const state = riggedState()
+    const restored = deserializeEditorState(serializeEditorState(state), { project, layers, scenes3D: [], assets: [] })
+    expect(restored.rigs).toHaveLength(1)
+    expect(restored.rigs[0]!.bones[0]!.rotation.value).toBe(12)
+    expect(restored.layers[0]!.rigId).toBe(restored.rigs[0]!.id)
+  })
+
+  it('releases a layer whose rig did not survive the file', () => {
+    const state = riggedState()
+    const withoutRigs = JSON.parse(serializeEditorState(state)) as SerializedEditorState
+    withoutRigs.rigs = []
+    const restored = deserializeEditorState(JSON.stringify(withoutRigs), { project, layers, scenes3D: [], assets: [] })
+    expect(restored.layers[0]!.rigId).toBeUndefined()
+  })
+
+  it('repairs a rig saved with a broken bone', () => {
+    const state = riggedState()
+    const raw = JSON.parse(serializeEditorState(state)) as Record<string, unknown>
+    const rigs = raw.rigs as Array<Record<string, unknown>>
+    rigs[0]!.columns = 4000
+    const bones = rigs[0]!.bones as Array<Record<string, unknown>>
+    bones[0]!.length = Number.NaN
+    bones[0]!.parentId = 'a-bone-that-never-existed'
+    delete bones[0]!.stretch
+    const restored = deserializeEditorState(JSON.stringify(raw), { project, layers, scenes3D: [], assets: [] })
+    const bone = restored.rigs[0]!.bones[0]!
+    expect(restored.rigs[0]!.columns).toBe(64)
+    expect(bone.length).toBe(.5)
+    expect(bone.parentId).toBeUndefined()
+    expect(bone.stretch.value).toBe(1)
   })
 })

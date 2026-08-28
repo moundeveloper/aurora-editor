@@ -1,6 +1,7 @@
 import Dexie, { type Table } from 'dexie'
 import type {
-  Aurora3DScene, EditorLayer, EditorNode, EditorNodeConnection, EditorProject, MediaAsset, SerializedEditorState,
+  Aurora3DScene, AuroraRig, EditorLayer, EditorNode, EditorNodeConnection, EditorProject, MediaAsset,
+  SerializedEditorState,
 } from '@/models/editor'
 
 interface OrderedProjectRecord<T> {
@@ -22,6 +23,7 @@ export class AuroraProjectDatabase extends Dexie {
   assets!: Table<OrderedProjectRecord<MediaAsset>, string>
   nodes!: Table<OrderedProjectRecord<EditorNode>, string>
   nodeConnections!: Table<OrderedProjectRecord<EditorNodeConnection>, string>
+  rigs!: Table<OrderedProjectRecord<AuroraRig>, string>
   settings!: Table<DatabaseSetting, string>
 
   constructor(name = 'aurora-editor') {
@@ -37,6 +39,9 @@ export class AuroraProjectDatabase extends Dexie {
       nodes: '&key, projectId, [projectId+order]',
       nodeConnections: '&key, projectId, [projectId+order]',
     })
+    this.version(3).stores({
+      rigs: '&key, projectId, [projectId+order]',
+    })
   }
 
   async saveSnapshot(snapshot: SerializedEditorState) {
@@ -47,7 +52,7 @@ export class AuroraProjectDatabase extends Dexie {
       order,
       value,
     }))
-    await this.transaction('rw', [this.projects, this.layers, this.scenes3D, this.assets, this.nodes, this.nodeConnections, this.settings], async () => {
+    await this.transaction('rw', [this.projects, this.layers, this.scenes3D, this.assets, this.nodes, this.nodeConnections, this.rigs, this.settings], async () => {
       await this.projects.put(snapshot.project)
       await Promise.all([
         this.layers.where('projectId').equals(projectId).delete(),
@@ -55,6 +60,7 @@ export class AuroraProjectDatabase extends Dexie {
         this.assets.where('projectId').equals(projectId).delete(),
         this.nodes.where('projectId').equals(projectId).delete(),
         this.nodeConnections.where('projectId').equals(projectId).delete(),
+        this.rigs.where('projectId').equals(projectId).delete(),
       ])
       await Promise.all([
         this.layers.bulkPut(ordered(snapshot.layers)),
@@ -62,21 +68,23 @@ export class AuroraProjectDatabase extends Dexie {
         this.assets.bulkPut(ordered(snapshot.assets)),
         this.nodes.bulkPut(ordered(snapshot.nodes)),
         this.nodeConnections.bulkPut(ordered(snapshot.nodeConnections)),
+        this.rigs.bulkPut(ordered(snapshot.rigs ?? [])),
         this.settings.put({ key: 'active-project-id', value: projectId }),
       ])
     })
   }
 
   async loadSnapshot(projectId: string): Promise<SerializedEditorState | null> {
-    return this.transaction('r', [this.projects, this.layers, this.scenes3D, this.assets, this.nodes, this.nodeConnections], async () => {
+    return this.transaction('r', [this.projects, this.layers, this.scenes3D, this.assets, this.nodes, this.nodeConnections, this.rigs], async () => {
       const project = await this.projects.get(projectId)
       if (!project) return null
-      const [layers, scenes3D, assets, nodes, nodeConnections] = await Promise.all([
+      const [layers, scenes3D, assets, nodes, nodeConnections, rigs] = await Promise.all([
         this.layers.where('projectId').equals(projectId).sortBy('order'),
         this.scenes3D.where('projectId').equals(projectId).sortBy('order'),
         this.assets.where('projectId').equals(projectId).sortBy('order'),
         this.nodes.where('projectId').equals(projectId).sortBy('order'),
         this.nodeConnections.where('projectId').equals(projectId).sortBy('order'),
+        this.rigs.where('projectId').equals(projectId).sortBy('order'),
       ])
       return {
         project,
@@ -85,6 +93,7 @@ export class AuroraProjectDatabase extends Dexie {
         assets: assets.map((record) => record.value),
         nodes: nodes.map((record) => record.value),
         nodeConnections: nodeConnections.map((record) => record.value),
+        rigs: rigs.map((record) => record.value),
       }
     })
   }

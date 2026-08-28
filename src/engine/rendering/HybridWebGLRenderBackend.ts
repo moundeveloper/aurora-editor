@@ -1,4 +1,4 @@
-import { BlurFilter, ColorMatrixFilter, Container, FillGradient, Graphics, Sprite, Text, Texture, WebGLRenderer } from 'pixi.js'
+import { BlurFilter, ColorMatrixFilter, Container, FillGradient, Graphics, Mesh, MeshGeometry, Sprite, Text, Texture, WebGLRenderer } from 'pixi.js'
 import * as THREE from 'three'
 import { evaluateNumericProperty } from '@/engine/animation/evaluateProperty'
 import { ThreeSceneRuntimeRegistry } from '@/engine/scene3d/ThreeSceneRuntime'
@@ -7,7 +7,9 @@ import {
   createRenderPlan, HYBRID_ALPHA_CONTRACT, resolveRenderSize, type RenderPlan,
   type RenderBackend, type RenderFrameRequest, type RendererInitializationOptions, type RenderSurface,
 } from '@/engine/rendering/contracts'
-import type { EditorLayer, MediaAsset } from '@/models/editor'
+import type { AuroraRig, EditorLayer, MediaAsset } from '@/models/editor'
+import { deformRig } from '@/engine/rig/rigMesh'
+import { bonePoseMatrices, rigIsActive } from '@/engine/rig/skeleton'
 import { cameraIdAtTime } from '@/engine/scene3d/cameraCuts'
 import { createMaskGeometry, maskAlphaField, maskGeometryKey, type MaskGeometryField } from '@/engine/rendering/maskField'
 import { MediaTextureCache } from '@/engine/rendering/mediaTextures'
@@ -65,6 +67,24 @@ function vignetteOverlay(effects: GraphEffects, width: number, height: number) {
   overlay.blendMode = 'multiply'
   overlay.alpha = Math.max(0, Math.min(1, effects.vignetteAmount / 100))
   return overlay
+}
+
+/**
+ * The rigged stand-in for a sprite: the same quad, subdivided and bent by the skeleton.
+ *
+ * Rig space runs from -1 to 1 with Y up, while the stage counts Y downward, so the vertical axis is
+ * flipped on the way in. The quad keeps the size the unrigged sprite would have had, which means
+ * attaching a rig never resizes or shifts the layer on its own.
+ */
+function riggedLayerMesh(texture: Texture, rig: AuroraRig, time: number, halfWidth: number, halfHeight: number) {
+  const { mesh, positions } = deformRig(rig, bonePoseMatrices(rig, time), time)
+  const vertices = new Float32Array(positions.length)
+  for (let index = 0; index < positions.length; index += 2) {
+    vertices[index] = positions[index]! * halfWidth
+    vertices[index + 1] = -positions[index + 1]! * halfHeight
+  }
+  const geometry = new MeshGeometry({ positions: vertices, uvs: mesh.uvs.slice(), indices: mesh.indices.slice() })
+  return new Mesh({ geometry, texture })
 }
 
 type MaskEffect = NonNullable<GraphEffects['mask']>
@@ -126,6 +146,8 @@ export class HybridWebGLRenderBackend implements RenderBackend {
   private readonly mediaTextures = new MediaTextureCache()
   /** Resolved once per frame, so layer creation stays synchronous while decoding does not. */
   private readonly frameTextures = new Map<string, Texture>()
+  /** Rigs this frame's passes may be attached to, resolved once instead of per layer. */
+  private readonly frameRigs = new Map<string, AuroraRig>()
   private pixelRatio = 1
   private initialized = false
   private initialization: Promise<void> | null = null
@@ -213,6 +235,8 @@ export class HybridWebGLRenderBackend implements RenderBackend {
     if (this.lastStats.width !== size.width || this.lastStats.height !== size.height) this.resize(size.width, size.height, this.pixelRatio)
     const plan = createRenderPlan({ ...request, width: size.width, height: size.height })
     const layerMap = new Map(request.layers.map((layer) => [layer.id, layer]))
+    this.frameRigs.clear()
+    ;(request.rigs ?? []).forEach((rig) => this.frameRigs.set(rig.id, rig))
     const sceneMap = new Map(request.scenes3D.map((scene) => [scene.id, scene]))
     await this.resolveFrameTextures(plan, layerMap, request.assets ?? [], request.time)
     await this.runtimeRegistry.prepareAssets(request.scenes3D, request.assets ?? [])
@@ -231,7 +255,7 @@ export class HybridWebGLRenderBackend implements RenderBackend {
       if (pass.backend === 'three-webgl') {
         const scene = pass.sceneId ? sceneMap.get(pass.sceneId) : undefined
         if (!scene) return
-        this.renderThreeLayer(layer, scene, request.time, size.width, size.height, request.project.width, request.project.height, pass.effects, layerMap, request.assets ?? [])
+        this.renderThreeLayer(layer, scene, request.time, size.width, size.height, request.project.width, request.project.height, pass.effects, layerMap, request.assets ?? [], request.rigs ?? [])
         threePasses += 1
       } else {
         this.renderPixiLayer(layer, request.time, size.width, size.height, request.project.width, request.project.height, pass.effects, pass.blendMode, layerMap)
@@ -253,6 +277,31 @@ export class HybridWebGLRenderBackend implements RenderBackend {
 
   getStats(): HybridRendererStats {
     return { ...this.lastStats }
+  }
+
+  /**
+   * Reads the frame that was just drawn straight out of the drawing buffer.
+   *
+   * The exporter needs pixels, not a canvas: this backend renders through two libraries sharing one
+   * GL context, and `toDataURL` would depend on the compositor never having cleared the buffer in
+   * between. Rows arrive bottom-up from GL and are flipped here, since every consumer wants top-down.
+   */
+  readPixels(): { width: number; height: number; data: Uint8ClampedArray } | null {
+    const gl = this.threeRenderer?.getContext()
+    if (!gl || this.contextLost) return null
+    const width = gl.drawingBufferWidth
+    const height = gl.drawingBufferHeight
+    if (!width || !height) return null
+    const raw = new Uint8Array(width * height * 4)
+    this.threeRenderer?.resetState()
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null)
+    gl.readPixels(0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, raw)
+    const data = new Uint8ClampedArray(raw.length)
+    const stride = width * 4
+    for (let row = 0; row < height; row += 1) {
+      data.set(raw.subarray((height - row - 1) * stride, (height - row) * stride), row * stride)
+    }
+    return { width, height, data }
   }
 
   /**
@@ -384,18 +433,26 @@ export class HybridWebGLRenderBackend implements RenderBackend {
         container.destroy()
         return null
       }
-      const sprite = new Sprite(texture)
-      sprite.anchor.set(.5)
+      let displayWidth: number
+      let displayHeight: number
       if (layer.type === 'video') {
         const sourceRatio = texture.width / texture.height
         const canvasRatio = width / height
-        sprite.width = sourceRatio > canvasRatio ? height * sourceRatio : width
-        sprite.height = sourceRatio > canvasRatio ? height : width / sourceRatio
+        displayWidth = sourceRatio > canvasRatio ? height * sourceRatio : width
+        displayHeight = sourceRatio > canvasRatio ? height : width / sourceRatio
       } else {
-        const imageSize = 260 * Math.min(scaleX, scaleY)
-        sprite.width = imageSize
-        sprite.height = imageSize
+        displayWidth = 260 * Math.min(scaleX, scaleY)
+        displayHeight = displayWidth
       }
+      const rig = layer.rigId ? this.frameRigs.get(layer.rigId) : undefined
+      if (rigIsActive(rig)) {
+        container.addChild(riggedLayerMesh(texture, rig, time, displayWidth / 2, displayHeight / 2))
+        return container
+      }
+      const sprite = new Sprite(texture)
+      sprite.anchor.set(.5)
+      sprite.width = displayWidth
+      sprite.height = displayHeight
       container.addChild(sprite)
       return container
     }
@@ -464,9 +521,10 @@ export class HybridWebGLRenderBackend implements RenderBackend {
     effects: GraphEffects,
     layerMap: Map<string, EditorLayer>,
     assets: MediaAsset[],
+    rigs: AuroraRig[],
   ) {
     if (!this.threeRenderer) return
-    const runtime = this.runtimeRegistry.get(sceneDefinition, width, height, time, assets)
+    const runtime = this.runtimeRegistry.get(sceneDefinition, width, height, time, assets, rigs)
     const cameraId = cameraIdAtTime(sceneDefinition, time)
     const camera = cameraId ? runtime.cameras.get(cameraId) : undefined
     if (!camera) return
@@ -565,6 +623,7 @@ export class HybridWebGLRenderBackend implements RenderBackend {
     this.maskGeometryCache.clear()
     this.mediaTextures.dispose()
     this.frameTextures.clear()
+    this.frameRigs.clear()
     this.sourceTexture?.destroy(true)
     this.sourceTexture = null
     this.sourceImage = null

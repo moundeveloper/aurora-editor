@@ -6,14 +6,17 @@ import * as THREE from 'three'
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js'
 import { TransformControls, type TransformControlsMode } from 'three/addons/controls/TransformControls.js'
 import { useEditorStore } from '@/stores/editor'
-import { ThreeSceneRuntimeRegistry, type Scene3DRuntime } from '@/engine/scene3d/ThreeSceneRuntime'
+import { planeHalfExtents, ThreeSceneRuntimeRegistry, type Scene3DRuntime } from '@/engine/scene3d/ThreeSceneRuntime'
+import { evaluateNumericProperty } from '@/engine/animation/evaluateProperty'
+import { applyMatrix, boneTransforms } from '@/engine/rig/skeleton'
+import { poseOffsetTowards, poseRotationTowards, restAimTowards } from '@/engine/rig/rigPosing'
 import { pathTransformComponents, sampleLocalPath } from '@/engine/scene3d/pathEvaluation'
 import { movePathHandle, movePathPoint, type PathHandleKey, type PathVector } from '@/engine/scene3d/pathEditing'
-import type { Aurora3DPath, Aurora3DPathPoint, Aurora3DScene } from '@/models/editor'
+import type { Aurora3DObject, Aurora3DPath, Aurora3DPathPoint, Aurora3DScene, AuroraRig } from '@/models/editor'
 import IconButton from './common/IconButton.vue'
 
 const store = useEditorStore()
-const { selectedLayer, selectedScene, selectedSceneEntityId, currentTime, playing, assets } = storeToRefs(store)
+const { selectedLayer, selectedScene, selectedSceneEntityId, currentTime, playing, assets, rigs } = storeToRefs(store)
 const viewport = ref<HTMLElement>()
 const canvas = ref<HTMLCanvasElement>()
 const transformMode = ref<TransformControlsMode>('translate')
@@ -25,6 +28,10 @@ const pathSelection = ref<PathPointSelection | null>(null)
 const activePathPoint = computed(() => pathSelection.value?.pathId === selectedSceneEntityId.value ? pathSelection.value : null)
 
 const PATH_GROUP_PREFIX = 'aurora-editor-path-'
+const RIG_GROUP_PREFIX = 'aurora-editor-rig-'
+const INFLUENCE_GROUP_PREFIX = 'aurora-editor-influence-'
+
+const assetMap = computed(() => new Map(assets.value.map((asset) => [asset.id, asset])))
 
 const runtimeRegistry = new ThreeSceneRuntimeRegistry(() => renderViewport())
 let renderer: THREE.WebGLRenderer | null = null
@@ -53,7 +60,34 @@ interface PathDragState {
 }
 let pathDrag: PathDragState | null = null
 
+/** A direct grab on a rig bone or an influence centre, dragged on a plane facing the camera. */
+interface GizmoDragState {
+  pointerId: number
+  kind: 'rig' | 'influence'
+  objectId: string
+  rigId: string
+  boneId: string
+  target: 'head' | 'tip'
+  influenceId: string
+  /** Shift edits where the skeleton rests instead of how it is posed. */
+  rest: boolean
+  host: THREE.Object3D
+  plane: THREE.Plane
+  grabOffset: THREE.Vector3
+}
+let gizmoDrag: GizmoDragState | null = null
+
 const activeSceneLabel = computed(() => selectedScene.value?.name ?? 'No 3D scene')
+
+const viewportHelp = computed(() => {
+  if (selectedPath.value) return 'Click an anchor or handle to edit it · drag with the gizmo · G/R/S: transform'
+  const object = selectedScene.value?.objects.find((item) => item.id === selectedSceneEntityId.value)
+  const rigged = object?.rigId && rigs.value.some((rig) => rig.id === object.rigId && rig.bones.length)
+  if (rigged) return 'Drag a bone tip to rotate · drag its head to shift · Shift+drag edits the rest pose'
+  if (object && radialInfluences(object).length) return 'Drag the green marker to move the radial array centre · G/R/S: transform'
+  if (selectedCamera.value) return 'Ctrl+Alt+C snaps this camera to the current view · Orbit: left-drag · Zoom: wheel'
+  return 'Orbit: left-drag · Pan: middle-drag · Zoom: wheel · G/R/S: transform'
+})
 
 function makeCameraOutline(id: string) {
   const corners = [[-.65, .4, -1], [.65, .4, -1], [.65, -.4, -1], [-.65, -.4, -1]] as const
@@ -228,6 +262,158 @@ function syncPathHelpers(target: Scene3DRuntime, sceneDefinition: Aurora3DScene)
   })
 }
 
+const rigHelperSignature = (rig: AuroraRig) => rig.bones.map((bone) => bone.id).join(',')
+
+function makeRigHandle(kind: 'head' | 'tip', objectId: string, rigId: string, boneId: string) {
+  const mesh = new THREE.Mesh(
+    new THREE.SphereGeometry(kind === 'head' ? .075 : .055, 12, 8),
+    new THREE.MeshBasicMaterial({ color: kind === 'head' ? '#c79ae0' : '#efd7ff', depthTest: false, transparent: true, opacity: .95 }),
+  )
+  mesh.name = `${kind}-${boneId}`
+  mesh.userData = { editorOnly: true, auroraId: objectId, rigId, rigBoneId: boneId, rigTarget: kind }
+  mesh.renderOrder = 24
+  return mesh
+}
+
+/** Bones are drawn as children of the plane they bend, so they inherit its transform for free. */
+function makeRigHelper(objectId: string, rig: AuroraRig) {
+  const group = new THREE.Group()
+  group.name = `${RIG_GROUP_PREFIX}${objectId}`
+  group.userData = { editorOnly: true, auroraId: objectId, signature: rigHelperSignature(rig) }
+  const shafts = new THREE.LineSegments(
+    new THREE.BufferGeometry(),
+    new THREE.LineBasicMaterial({ color: '#c79ae0', depthTest: false, transparent: true, opacity: .9 }),
+  )
+  shafts.name = 'rig-shafts'
+  shafts.userData = { editorOnly: true }
+  shafts.renderOrder = 23
+  group.add(shafts)
+  rig.bones.forEach((bone) => {
+    group.add(makeRigHandle('head', objectId, rig.id, bone.id))
+    group.add(makeRigHandle('tip', objectId, rig.id, bone.id))
+  })
+  return group
+}
+
+function updateRigHelper(group: THREE.Object3D, object: Aurora3DObject, rig: AuroraRig, time: number) {
+  const { halfWidth, halfHeight } = planeHalfExtents(object, assetMap.value)
+  const transforms = boneTransforms(rig, time)
+  const segments: number[] = []
+  // A hair in front of the card, so the handles never fight the plane for depth.
+  const toLocal = (point: { x: number; y: number }) => new THREE.Vector3(point.x * halfWidth, point.y * halfHeight, .02)
+  rig.bones.forEach((bone) => {
+    const world = transforms.get(bone.id)?.world
+    const head = toLocal(world ? applyMatrix(world, 0, 0) : { x: bone.x, y: bone.y })
+    const tip = toLocal(world ? applyMatrix(world, bone.length, 0) : { x: bone.x, y: bone.y })
+    segments.push(head.x, head.y, head.z, tip.x, tip.y, tip.z)
+    const selected = store.selectedRigBoneId === bone.id
+    ;([['head', head], ['tip', tip]] as const).forEach(([kind, position]) => {
+      const handle = group.getObjectByName(`${kind}-${bone.id}`) as THREE.Mesh | undefined
+      if (!handle) return
+      handle.position.copy(position)
+      handle.scale.setScalar(selected ? 1.45 : 1)
+      ;(handle.material as THREE.MeshBasicMaterial).color.set(selected ? '#ffd9a0' : kind === 'head' ? '#c79ae0' : '#efd7ff')
+    })
+  })
+  const shafts = group.getObjectByName('rig-shafts') as THREE.LineSegments | undefined
+  if (shafts) {
+    shafts.geometry.setAttribute('position', new THREE.Float32BufferAttribute(segments, 3))
+    shafts.geometry.computeBoundingSphere()
+  }
+}
+
+function syncRigHelpers(target: Scene3DRuntime, sceneDefinition: Aurora3DScene) {
+  sceneDefinition.objects.forEach((object) => {
+    const mesh = target.objects.get(object.id)
+    if (!mesh) return
+    const rig = object.rigId ? rigs.value.find((item) => item.id === object.rigId) : undefined
+    const usable = Boolean(rig?.bones.length) && object.primitive === 'plane'
+    let group = mesh.getObjectByName(`${RIG_GROUP_PREFIX}${object.id}`)
+    if (group && (!usable || group.userData.signature !== rigHelperSignature(rig!))) {
+      disposeHelperRoot(group)
+      group = undefined
+    }
+    if (!usable || !rig) return
+    if (!group) {
+      group = makeRigHelper(object.id, rig)
+      mesh.add(group)
+    }
+    // Only the selected plane shows its skeleton; every rig at once would bury the scene.
+    group.visible = selectedSceneEntityId.value === object.id
+    if (group.visible) updateRigHelper(group, object, rig, currentTime.value)
+  })
+}
+
+const radialInfluences = (object: Aurora3DObject) =>
+  (object.influences ?? []).filter((influence) => influence.type === 'radial-array' && influence.enabled)
+
+const influenceParameterValue = (object: Aurora3DObject, influenceId: string, key: string, fallback: number) => {
+  const property = (object.influences ?? []).find((item) => item.id === influenceId)?.parameters[key]
+  return property ? evaluateNumericProperty(property, currentTime.value) : fallback
+}
+
+/** The centre a radial array sweeps around, shown where it actually is and draggable from there. */
+function makeInfluenceHelper(objectId: string, influenceId: string) {
+  const group = new THREE.Group()
+  group.name = `${INFLUENCE_GROUP_PREFIX}${influenceId}`
+  group.userData = { editorOnly: true, auroraId: objectId, influenceId }
+
+  const ring = new THREE.LineLoop(
+    new THREE.BufferGeometry().setFromPoints(Array.from({ length: 48 }, (_, index) => {
+      const angle = (index / 48) * Math.PI * 2
+      return new THREE.Vector3(Math.cos(angle) * .38, 0, Math.sin(angle) * .38)
+    })),
+    new THREE.LineBasicMaterial({ color: '#8fd3b6', depthTest: false, transparent: true, opacity: .85 }),
+  )
+  ring.name = 'influence-ring'
+  ring.userData = { editorOnly: true }
+  ring.renderOrder = 23
+  group.add(ring)
+
+  const knob = new THREE.Mesh(
+    new THREE.OctahedronGeometry(.1),
+    new THREE.MeshBasicMaterial({ color: '#8fd3b6', depthTest: false, transparent: true, opacity: .95 }),
+  )
+  knob.name = 'influence-center'
+  knob.userData = { editorOnly: true, auroraId: objectId, influenceId, influenceTarget: 'center' }
+  knob.renderOrder = 24
+  group.add(knob)
+  return group
+}
+
+function updateInfluenceHelper(group: THREE.Object3D, object: Aurora3DObject, influenceId: string) {
+  group.position.set(
+    influenceParameterValue(object, influenceId, 'centerX', 0),
+    influenceParameterValue(object, influenceId, 'centerY', 0),
+    influenceParameterValue(object, influenceId, 'centerZ', 0),
+  )
+  const ring = group.getObjectByName('influence-ring')
+  if (!ring) return
+  // The ring lies in the plane the copies sweep through, so the axis parameter reads at a glance.
+  const axis = Math.max(0, Math.min(2, Math.round(influenceParameterValue(object, influenceId, 'axis', 1))))
+  ring.rotation.set(axis === 2 ? Math.PI / 2 : 0, 0, axis === 0 ? Math.PI / 2 : 0)
+}
+
+function syncInfluenceHelpers(target: Scene3DRuntime, sceneDefinition: Aurora3DScene) {
+  sceneDefinition.objects.forEach((object) => {
+    const mesh = target.objects.get(object.id)
+    if (!mesh) return
+    const live = selectedSceneEntityId.value === object.id ? radialInfluences(object) : []
+    const liveIds = new Set(live.map((influence) => influence.id))
+    mesh.children
+      .filter((child) => child.name.startsWith(INFLUENCE_GROUP_PREFIX) && !liveIds.has(child.userData.influenceId as string))
+      .forEach(disposeHelperRoot)
+    live.forEach((influence) => {
+      let group = mesh.getObjectByName(`${INFLUENCE_GROUP_PREFIX}${influence.id}`)
+      if (!group) {
+        group = makeInfluenceHelper(object.id, influence.id)
+        mesh.add(group)
+      }
+      updateInfluenceHelper(group, object, influence.id)
+    })
+  })
+}
+
 function ensureEditorHelpers(target: Scene3DRuntime) {
   if (!target.scene.getObjectByName('aurora-editor-grid')) {
     const grid = new THREE.GridHelper(20, 20, '#3d466e', '#242a3b')
@@ -301,7 +487,7 @@ function attachSelection() {
     pathSelection.value = null
   }
   transform.setMode(transformMode.value)
-  const constrainedCamera = selectedScene.value?.cameras.some((camera) => camera.id === id && camera.pathConstraint)
+  const constrainedCamera = selectedScene.value?.cameras.some((camera) => camera.id === id && (camera.pathConstraint || camera.objectConstraint))
   const target = runtime.objects.get(id) ?? runtime.cameras.get(id) ?? runtime.lights.get(id)
     ?? runtime.scene.getObjectByName(`${PATH_GROUP_PREFIX}${id}`)
   if (target && !constrainedCamera) transform.attach(target)
@@ -315,13 +501,15 @@ function renderViewport() {
   const syncScene = !transform?.dragging || !runtime || runtime.sceneId !== sceneDefinition.id
   if (syncScene) {
     if (runtime && (runtime.sceneId !== sceneDefinition.id || runtime.revision !== sceneDefinition.revision)) disposeEditorHelpers(runtime)
-    runtime = runtimeRegistry.get(sceneDefinition, host.clientWidth, host.clientHeight, currentTime.value, assets.value)
+    runtime = runtimeRegistry.get(sceneDefinition, host.clientWidth, host.clientHeight, currentTime.value, assets.value, rigs.value)
   }
   const targetRuntime = runtime
   if (!targetRuntime) return
   ensureEditorHelpers(targetRuntime)
   targetRuntime.root.visible = selectedLayer.value?.visible !== false
   syncPathHelpers(targetRuntime, sceneDefinition)
+  syncRigHelpers(targetRuntime, sceneDefinition)
+  syncInfluenceHelpers(targetRuntime, sceneDefinition)
   if (syncScene) attachSelection()
   updateEditorHelpers(targetRuntime)
   renderer.shadowMap.enabled = sceneDefinition.settings.shadows
@@ -409,6 +597,35 @@ function setCameraView(view: 'Perspective' | 'Front' | 'Right' | 'Top') {
   renderViewport()
 }
 
+const selectedCamera = computed(() => selectedScene.value?.cameras.find((camera) => camera.id === selectedSceneEntityId.value) ?? null)
+const cameraAlignBlocked = computed(() => Boolean(selectedCamera.value?.pathConstraint || selectedCamera.value?.objectConstraint))
+const cameraAlignLabel = computed(() => {
+  const camera = selectedCamera.value
+  if (!camera) return 'Select a scene camera to snap it to this viewport view'
+  if (cameraAlignBlocked.value) return `${camera.name} is driven by a constraint, so its own transform is ignored`
+  return `Move ${camera.name} to this viewport view (Ctrl+Alt+C)`
+})
+
+/**
+ * Drops the selected scene camera exactly where the viewport is looking from.
+ *
+ * Only the transform moves: the lens stays whatever the shot was framed with, so aligning never
+ * silently re-frames the composition behind the user's back.
+ */
+function alignCameraToView() {
+  const camera = selectedCamera.value
+  if (!camera || !editorCamera || cameraAlignBlocked.value) return
+  editorCamera.updateMatrixWorld(true)
+  const position = editorCamera.getWorldPosition(new THREE.Vector3())
+  const euler = new THREE.Euler().setFromQuaternion(editorCamera.getWorldQuaternion(new THREE.Quaternion()), 'XYZ')
+  store.update3DEntityTransform(camera.id, {
+    position: [position.x, position.y, position.z],
+    rotation: [THREE.MathUtils.radToDeg(euler.x), THREE.MathUtils.radToDeg(euler.y), THREE.MathUtils.radToDeg(euler.z)],
+    scale: (['x', 'y', 'z'] as const).map((axis) => evaluateNumericProperty(camera.transform.scale[axis], currentTime.value)) as [number, number, number],
+  })
+  renderViewport()
+}
+
 /** Keeps the axis presets mathematically square after OrbitControls pans or zooms the view. */
 function enforceAxisView() {
   if (!editorCamera || !orbit || cameraView.value === 'Perspective') return
@@ -436,6 +653,7 @@ function rememberPickStart(event: PointerEvent) {
   }
   pickStart = { x: event.clientX, y: event.clientY }
   if (transform && !transform.dragging) transform.axis = null
+  if (beginGizmoDrag(event)) return
   beginPathDrag(event)
 }
 
@@ -495,6 +713,104 @@ function finishPathDrag() {
   if (!pathDrag) return
   if (pathDrag.moved) store.move3DPathPoint(pathDrag.pathId, pathDrag.pointId, pathDrag.target, pathDrag.position)
   pathDrag = null
+  if (orbit) orbit.enabled = true
+  if (transform) transform.enabled = true
+  attachSelection()
+  renderViewport()
+}
+
+/**
+ * Rig bones and influence centres are grabbed the same way path points are: press to select and
+ * drag on a plane facing the camera. They draw with `depthTest: false`, so they get their own hit
+ * pass — what you see in front is what you grab, whatever solid geometry the ray crosses first.
+ */
+function pickGizmoControl(raycaster: THREE.Raycaster) {
+  const groups: THREE.Object3D[] = []
+  runtime?.scene.traverse((object) => {
+    if (object.visible && (object.name.startsWith(RIG_GROUP_PREFIX) || object.name.startsWith(INFLUENCE_GROUP_PREFIX))) groups.push(object)
+  })
+  if (!groups.length) return null
+  const hits = raycaster.intersectObjects(groups, true).filter((item) => item.object.visible)
+  // Tips sit on top of shafts, and a bone handle wins over the wider influence knob beneath it.
+  return hits.find((item) => item.object.userData.rigTarget === 'tip')?.object
+    ?? hits.find((item) => item.object.userData.rigTarget === 'head')?.object
+    ?? hits.find((item) => item.object.userData.influenceTarget === 'center')?.object
+    ?? null
+}
+
+function beginGizmoDrag(event: PointerEvent) {
+  const scene = selectedScene.value
+  const raycaster = raycasterAt(event.clientX, event.clientY)
+  const control = scene && raycaster && !transform?.dragging ? pickGizmoControl(raycaster) : null
+  const host = control?.parent?.parent
+  if (!scene || !control || !host || !editorCamera) return false
+
+  const worldPosition = control.getWorldPosition(new THREE.Vector3())
+  const plane = new THREE.Plane().setFromNormalAndCoplanarPoint(editorCamera.getWorldDirection(new THREE.Vector3()), worldPosition)
+  const grab = raycaster!.ray.intersectPlane(plane, new THREE.Vector3())
+  if (!grab) return false
+
+  const objectId = control.userData.auroraId as string
+  store.selectSceneEntity(scene.id, objectId)
+  if (control.userData.rigBoneId) store.selectedRigBoneId = control.userData.rigBoneId as string
+  gizmoDrag = {
+    pointerId: event.pointerId,
+    kind: control.userData.rigTarget ? 'rig' : 'influence',
+    objectId,
+    rigId: (control.userData.rigId as string) ?? '',
+    boneId: (control.userData.rigBoneId as string) ?? '',
+    target: (control.userData.rigTarget as 'head' | 'tip') ?? 'head',
+    influenceId: (control.userData.influenceId as string) ?? '',
+    rest: event.shiftKey,
+    host,
+    plane,
+    grabOffset: worldPosition.clone().sub(grab),
+  }
+  skipNextPick = true
+  if (orbit) orbit.enabled = false
+  if (transform) transform.enabled = false
+  store.beginInteractiveEdit()
+  attachSelection()
+  renderViewport()
+  return true
+}
+
+function onGizmoDragMove(event: PointerEvent) {
+  const drag = gizmoDrag
+  if (!drag || event.pointerId !== drag.pointerId) return
+  const raycaster = raycasterAt(event.clientX, event.clientY)
+  const hit = raycaster?.ray.intersectPlane(drag.plane, new THREE.Vector3())
+  const object = selectedScene.value?.objects.find((item) => item.id === drag.objectId)
+  if (!hit || !object) return
+  drag.host.updateMatrixWorld(true)
+  const local = drag.host.worldToLocal(hit.add(drag.grabOffset))
+
+  if (drag.kind === 'influence') {
+    ;([['centerX', local.x], ['centerY', local.y], ['centerZ', local.z]] as const)
+      .forEach(([key, value]) => store.set3DInfluenceParameter(drag.influenceId, key, value))
+    renderViewport()
+    return
+  }
+
+  const rig = rigs.value.find((item) => item.id === drag.rigId)
+  const bone = rig?.bones.find((item) => item.id === drag.boneId)
+  if (!rig || !bone) return
+  const { halfWidth, halfHeight } = planeHalfExtents(object, assetMap.value)
+  const point = { x: local.x / Math.max(1e-4, halfWidth), y: local.y / Math.max(1e-4, halfHeight) }
+  if (drag.rest && drag.target === 'head') store.setRigBoneRest(rig.id, bone.id, { x: point.x, y: point.y })
+  else if (drag.rest) store.setRigBoneRest(rig.id, bone.id, restAimTowards({ x: bone.x, y: bone.y }, point, bone.angle))
+  else if (drag.target === 'head') {
+    const offset = poseOffsetTowards(rig, bone, currentTime.value, point)
+    store.setRigBonePose(rig.id, bone.id, 'offsetX', offset.x)
+    store.setRigBonePose(rig.id, bone.id, 'offsetY', offset.y)
+  } else store.setRigBonePose(rig.id, bone.id, 'rotation', poseRotationTowards(rig, bone, currentTime.value, point))
+  renderViewport()
+}
+
+function finishGizmoDrag() {
+  if (!gizmoDrag) return
+  gizmoDrag = null
+  store.endInteractiveEdit()
   if (orbit) orbit.enabled = true
   if (transform) transform.enabled = true
   attachSelection()
@@ -599,6 +915,11 @@ function finishTransformInteraction() {
 }
 
 function onGlobalPointerEnd(event: PointerEvent) {
+  if (gizmoDrag?.pointerId === event.pointerId) {
+    finishGizmoDrag()
+    requestAnimationFrame(() => { skipNextPick = false })
+    return
+  }
   if (pathDrag?.pointerId === event.pointerId) {
     finishPathDrag()
     requestAnimationFrame(() => { skipNextPick = false })
@@ -615,6 +936,7 @@ function onGlobalPointerEnd(event: PointerEvent) {
 
 function onWindowBlur() {
   navigationPointerId = null
+  finishGizmoDrag()
   finishPathDrag()
   if (transform) transform.enabled = true
   finishTransformInteraction()
@@ -623,6 +945,12 @@ function onWindowBlur() {
 
 function onKeydown(event: KeyboardEvent) {
   if ((event.target as HTMLElement)?.matches('input, textarea')) return
+  if (event.ctrlKey && event.altKey && event.key.toLowerCase() === 'c') {
+    event.preventDefault()
+    alignCameraToView()
+    return
+  }
+  if (event.ctrlKey || event.metaKey || event.altKey) return
   if (event.key.toLowerCase() === 'g') setTransformMode('translate')
   if (event.key.toLowerCase() === 'r') setTransformMode('rotate')
   if (event.key.toLowerCase() === 's') setTransformMode('scale')
@@ -664,6 +992,7 @@ onMounted(async () => {
   resizeObserver.observe(viewport.value)
   window.addEventListener('keydown', onKeydown)
   window.addEventListener('pointermove', onPathDragMove)
+  window.addEventListener('pointermove', onGizmoDragMove)
   window.addEventListener('pointerup', onGlobalPointerEnd, true)
   window.addEventListener('pointercancel', onGlobalPointerEnd, true)
   window.addEventListener('blur', onWindowBlur)
@@ -674,6 +1003,7 @@ onBeforeUnmount(() => {
   resizeObserver?.disconnect()
   window.removeEventListener('keydown', onKeydown)
   window.removeEventListener('pointermove', onPathDragMove)
+  window.removeEventListener('pointermove', onGizmoDragMove)
   window.removeEventListener('pointerup', onGlobalPointerEnd, true)
   window.removeEventListener('pointercancel', onGlobalPointerEnd, true)
   window.removeEventListener('blur', onWindowBlur)
@@ -691,7 +1021,7 @@ onBeforeUnmount(() => {
   orthographicCamera = null
 })
 
-watch([selectedLayer, selectedScene, currentTime, selectedSceneEntityId, assets], renderViewport, { deep: true })
+watch([selectedLayer, selectedScene, currentTime, selectedSceneEntityId, assets, rigs], renderViewport, { deep: true })
 </script>
 
 <template>
@@ -702,6 +1032,8 @@ watch([selectedLayer, selectedScene, currentTime, selectedSceneEntityId, assets]
         <IconButton :icon="Rotate3D" label="Rotate (R)" :active="transformMode === 'rotate'" @click="setTransformMode('rotate')" />
         <IconButton :icon="Scaling" label="Scale (S)" :active="transformMode === 'scale'" @click="setTransformMode('scale')" />
       </div>
+      <span class="toolbar-divider" />
+      <IconButton :icon="Camera" :label="cameraAlignLabel" :disabled="!selectedCamera || cameraAlignBlocked" @click="alignCameraToView" />
       <span class="toolbar-divider" />
       <button v-for="view in (['Perspective', 'Front', 'Right', 'Top'] as const)" :key="view" type="button" class="view-button" :title="view === 'Perspective' ? 'Switch to perspective view' : `Switch to exact ${view.toLowerCase()} orthographic view`" @click="setCameraView(view)">{{ view }}</button>
       <template v-if="selectedPath">
@@ -727,7 +1059,7 @@ watch([selectedLayer, selectedScene, currentTime, selectedSceneEntityId, assets]
       </div>
       <div class="viewport-badge"><View :size="10" /> {{ cameraView }}{{ cameraView === 'Perspective' ? '' : ' · Orthographic' }}</div>
       <div class="viewport-axis"><span class="x">X</span><span class="y">Y</span><span class="z">Z</span></div>
-      <div class="viewport-help">{{ selectedPath ? 'Click an anchor or handle to edit it · drag with the gizmo · G/R/S: transform' : 'Orbit: left-drag · Pan: middle-drag · Zoom: wheel · G/R/S: transform' }}</div>
+      <div class="viewport-help">{{ viewportHelp }}</div>
     </div>
 
     <footer class="three-status">

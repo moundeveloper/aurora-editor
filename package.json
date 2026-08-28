@@ -17,6 +17,7 @@
   "dependencies": {
     "@lucide/vue": "^1.33.0",
     "dexie": "^4.4.5",
+    "gifenc": "^1.0.3",
     "pinia": "^4.0.2",
     "pixi.js": "8.20.1",
     "three": "0.185.1",

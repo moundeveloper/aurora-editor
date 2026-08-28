@@ -9,7 +9,7 @@ import { cameraIdAtTime } from '@/engine/scene3d/cameraCuts'
 import MSelect, { type MSelectOption } from './common/MSelect.vue'
 
 const store = useEditorStore()
-const { selectedLayer, selectedScene, currentTime, assets, project } = storeToRefs(store)
+const { selectedLayer, selectedScene, currentTime, assets, project, rigs } = storeToRefs(store)
 const viewport = ref<HTMLElement>()
 const canvas = ref<HTMLCanvasElement>()
 const renderError = ref(false)
@@ -60,7 +60,7 @@ function renderPreview() {
     renderer.setSize(width, height, false)
     renderer.setClearColor(sceneDefinition.settings.backgroundColor ?? '#090b10', 1)
     renderer.shadowMap.enabled = sceneDefinition.settings.shadows
-    const runtime = runtimeRegistry.get(sceneDefinition, width, height, currentTime.value, assets.value)
+    const runtime = runtimeRegistry.get(sceneDefinition, width, height, currentTime.value, assets.value, rigs.value)
     runtime.root.visible = selectedLayer.value?.visible !== false
     const camera = runtime.cameras.get(cameraDefinition.id)
     if (!camera) return
@@ -94,7 +94,7 @@ onBeforeUnmount(() => {
   renderer = null
 })
 
-watch([selectedLayer, selectedScene, currentTime, assets, project], () => {
+watch([selectedLayer, selectedScene, currentTime, assets, project, rigs], () => {
   syncProgramCamera()
   renderPreview()
 }, { deep: true, immediate: true })

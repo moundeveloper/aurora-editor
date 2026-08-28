@@ -1,6 +1,6 @@
 import type {
   AnimatableProperty, AnimatableVector3, Aurora3DObject, Aurora3DPath, Aurora3DScene, AuroraCamera,
-  AuroraCameraPathConstraint, AuroraLight, AuroraPBRMaterial, Transform3D,
+  AuroraCameraObjectConstraint, AuroraCameraPathConstraint, AuroraLight, AuroraPBRMaterial, Transform3D,
 } from '@/models/editor'
 
 export function numericProperty(id: string, value: number): AnimatableProperty<number> {
@@ -221,6 +221,23 @@ export function createCameraPathConstraint(cameraId: string, pathId: string): Au
     bank: numericProperty(`${cameraId}-path-bank`, 0),
     offset: makePathOffset(cameraId),
     orientation: 'tangent',
+  }
+}
+
+function makeObjectFollowVector(cameraId: string, group: 'position' | 'rotation', values: [number, number, number]): AnimatableVector3 {
+  return {
+    x: numericProperty(`${cameraId}-object-${group}-offset-x`, values[0]),
+    y: numericProperty(`${cameraId}-object-${group}-offset-y`, values[1]),
+    z: numericProperty(`${cameraId}-object-${group}-offset-z`, values[2]),
+  }
+}
+
+export function createCameraObjectConstraint(cameraId: string, objectId: string): AuroraCameraObjectConstraint {
+  return {
+    objectId,
+    positionOffset: makeObjectFollowVector(cameraId, 'position', [0, 2, 5]),
+    rotationOffset: makeObjectFollowVector(cameraId, 'rotation', [0, 0, 0]),
+    orientation: 'target',
   }
 }
 

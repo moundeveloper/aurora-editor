@@ -1,11 +1,13 @@
 import type {
-  Aurora3DScene, EditorLayer, EditorNode, EditorNodeConnection, EditorProject, MediaAsset, SerializedEditorState,
+  Aurora3DScene, AuroraRig, AuroraRigBone, EditorLayer, EditorNode, EditorNodeConnection, EditorProject,
+  MediaAsset, SerializedEditorState,
 } from '@/models/editor'
-import { makePathOffset, numericProperty } from '@/engine/scene3d/sceneFactory'
+import { createCameraObjectConstraint, makePathOffset, numericProperty } from '@/engine/scene3d/sceneFactory'
 import { createDemoNodeGraph, NODE_DEFINITIONS } from '@/engine/nodes/nodeGraph'
 import { normalizeCameraCuts } from '@/engine/scene3d/cameraCuts'
+import { MAX_RIG_CELLS, MIN_RIG_CELLS } from '@/engine/rig/rigMesh'
 
-export const CURRENT_PROJECT_VERSION = 9
+export const CURRENT_PROJECT_VERSION = 11
 
 export interface EditorStateFallback {
   project: EditorProject
@@ -14,6 +16,7 @@ export interface EditorStateFallback {
   assets: MediaAsset[]
   nodes?: EditorNode[]
   nodeConnections?: EditorNodeConnection[]
+  rigs?: AuroraRig[]
 }
 
 /**
@@ -88,25 +91,102 @@ function normalizeScene(scene: Aurora3DScene): Aurora3DScene {
   scene.cameras.forEach((camera) => {
     camera.visible = camera.visible !== false
     const constraint = camera.pathConstraint
-    if (!constraint) return
-    if (!scene.paths.some((path) => path.id === constraint.pathId)) {
-      delete camera.pathConstraint
+    if (constraint) {
+      if (!scene.paths.some((path) => path.id === constraint.pathId)) delete camera.pathConstraint
+      else {
+        constraint.orientation = constraint.orientation === 'look-at' ? 'look-at' : 'tangent'
+        constraint.progress ??= numericProperty(`${camera.id}-path-progress`, 0)
+        constraint.bank ??= numericProperty(`${camera.id}-path-bank`, 0)
+        constraint.offset ??= makePathOffset(camera.id)
+        if (constraint.lookAtEntityId && !sceneHasEntity(scene, constraint.lookAtEntityId)) delete constraint.lookAtEntityId
+      }
+    }
+    const objectConstraint = camera.objectConstraint
+    if (!objectConstraint) return
+    if (!scene.objects.some((object) => object.id === objectConstraint.objectId)) {
+      delete camera.objectConstraint
       return
     }
-    constraint.orientation = constraint.orientation === 'look-at' ? 'look-at' : 'tangent'
-    constraint.progress ??= numericProperty(`${camera.id}-path-progress`, 0)
-    constraint.bank ??= numericProperty(`${camera.id}-path-bank`, 0)
-    constraint.offset ??= makePathOffset(camera.id)
-    if (constraint.lookAtEntityId && !sceneHasEntity(scene, constraint.lookAtEntityId)) delete constraint.lookAtEntityId
+    const defaults = createCameraObjectConstraint(camera.id, objectConstraint.objectId)
+    objectConstraint.orientation = objectConstraint.orientation === 'look-at' ? 'look-at' : 'target'
+    objectConstraint.positionOffset ??= defaults.positionOffset
+    objectConstraint.rotationOffset ??= defaults.rotationOffset
+    if (objectConstraint.lookAtEntityId && !sceneHasEntity(scene, objectConstraint.lookAtEntityId)) delete objectConstraint.lookAtEntityId
+    // Older or hand-edited files may contain both; object follow is the newer explicit choice.
+    delete camera.pathConstraint
   })
   scene.lights.forEach((light) => { light.visible = light.visible !== false })
   return scene
 }
 
+const finiteOr = (value: unknown, fallback: number) => (typeof value === 'number' && Number.isFinite(value) ? value : fallback)
+
+function normalizeRigProperty(bone: Partial<AuroraRigBone>, key: 'rotation' | 'offsetX' | 'offsetY' | 'stretch', boneId: string, value: number) {
+  const property = bone[key]
+  if (!property || typeof property !== 'object') {
+    bone[key] = numericProperty(`${boneId}-${key}`, value)
+    return
+  }
+  property.id ||= `${boneId}-${key}`
+  property.value = finiteOr(property.value, value)
+  property.animated = Boolean(property.animated)
+  property.keyframes = Array.isArray(property.keyframes)
+    ? property.keyframes.filter((keyframe) => keyframe && Number.isFinite(keyframe.time) && Number.isFinite(keyframe.value))
+    : []
+}
+
+/**
+ * Rigs arrive from disk, so nothing about them is trusted: a bone missing a pose channel, a grid
+ * wide enough to stall a frame, or a parent that no longer exists all have to survive as something
+ * posable rather than as a crash on the first render.
+ */
+function normalizeRigs(raw: unknown): AuroraRig[] {
+  if (!Array.isArray(raw)) return []
+  return raw
+    .filter((rig): rig is AuroraRig => Boolean(rig?.id) && Array.isArray(rig?.bones))
+    .map((rig) => {
+      rig.name ||= 'Rig'
+      rig.columns = Math.max(MIN_RIG_CELLS, Math.min(MAX_RIG_CELLS, Math.round(finiteOr(rig.columns, 12))))
+      rig.rows = Math.max(MIN_RIG_CELLS, Math.min(MAX_RIG_CELLS, Math.round(finiteOr(rig.rows, 12))))
+      rig.bones = rig.bones.filter((bone) => Boolean(bone?.id))
+      const boneIds = new Set(rig.bones.map((bone) => bone.id))
+      rig.bones.forEach((bone, index) => {
+        bone.name ||= `Bone ${index + 1}`
+        bone.x = finiteOr(bone.x, 0)
+        bone.y = finiteOr(bone.y, 0)
+        bone.angle = finiteOr(bone.angle, 90)
+        bone.length = Math.max(0, finiteOr(bone.length, .5))
+        bone.falloff = Math.max(0, finiteOr(bone.falloff, .8))
+        if (bone.parentId && (!boneIds.has(bone.parentId) || bone.parentId === bone.id)) delete bone.parentId
+        normalizeRigProperty(bone, 'rotation', bone.id, 0)
+        normalizeRigProperty(bone, 'offsetX', bone.id, 0)
+        normalizeRigProperty(bone, 'offsetY', bone.id, 0)
+        normalizeRigProperty(bone, 'stretch', bone.id, 1)
+      })
+      return rig
+    })
+}
+
+/** A rig that no longer exists would otherwise leave a layer permanently claiming to be rigged. */
+function pruneRigReferences(layers: EditorLayer[], scenes: Aurora3DScene[], rigs: AuroraRig[]) {
+  const known = new Set(rigs.map((rig) => rig.id))
+  const walk = (list: EditorLayer[]) => list.forEach((layer) => {
+    if (layer.rigId && !known.has(layer.rigId)) delete layer.rigId
+    if (layer.children) walk(layer.children)
+  })
+  walk(layers)
+  scenes.forEach((scene) => scene.objects.forEach((object) => {
+    if (object.rigId && !known.has(object.rigId)) delete object.rigId
+  }))
+}
+
 function cloneFallback(fallback: EditorStateFallback): SerializedEditorState {
   const state = clone(fallback)
   const graph = normalizeNodeGraph(state.nodes, state.nodeConnections, state.layers)
-  return { ...state, scenes3D: state.scenes3D.map(normalizeScene), nodes: graph.nodes, nodeConnections: graph.connections }
+  const scenes3D = state.scenes3D.map(normalizeScene)
+  const rigs = normalizeRigs(state.rigs)
+  pruneRigReferences(state.layers, scenes3D, rigs)
+  return { ...state, scenes3D, rigs, nodes: graph.nodes, nodeConnections: graph.connections }
 }
 
 function sceneHasEntity(scene: Aurora3DScene, entityId: string) {
@@ -123,6 +203,7 @@ export function serializeEditorState(state: SerializedEditorState): string {
     assets: state.assets.map((asset) => ({ ...asset, thumbnail: asset.thumbnail?.startsWith('blob:') ? undefined : asset.thumbnail })),
     nodes: state.nodes,
     nodeConnections: state.nodeConnections,
+    rigs: state.rigs,
   })
 }
 
@@ -170,6 +251,9 @@ export function deserializeEditorState(raw: string | null, fallback: EditorState
       const demoLayer = fallback.layers.find((layer) => layer.type === '3d-scene')
       if (demoLayer) layers.splice(Math.min(2, layers.length), 0, clone(demoLayer))
     }
+    const normalizedScenes = clone(scenes3D).map(normalizeScene)
+    const rigs = normalizeRigs(clone(parsed.rigs ?? []))
+    pruneRigReferences(layers, normalizedScenes, rigs)
     return {
       project: { ...clone(parsed.project), version: CURRENT_PROJECT_VERSION },
       ...(() => {
@@ -177,8 +261,9 @@ export function deserializeEditorState(raw: string | null, fallback: EditorState
         return { nodes: clone(graph.nodes), nodeConnections: clone(graph.connections) }
       })(),
       layers,
-      scenes3D: clone(scenes3D).map(normalizeScene),
+      scenes3D: normalizedScenes,
       assets: Array.isArray(parsed.assets) ? clone(parsed.assets) : clone(fallback.assets),
+      rigs,
     }
   } catch {
     return cloneFallback(fallback)
