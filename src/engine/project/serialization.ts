@@ -132,7 +132,7 @@ export function deserializeEditorState(raw: string | null, fallback: EditorState
     const parsed = JSON.parse(raw) as Partial<SerializedEditorState>
     if (!parsed.project || !Array.isArray(parsed.layers)) return cloneFallback(fallback)
     const fallbackScene = fallback.scenes3D[0]
-    const scenes3D = Array.isArray(parsed.scenes3D) && parsed.scenes3D.length
+    const scenes3D = Array.isArray(parsed.scenes3D)
       ? parsed.scenes3D
       : fallbackScene ? [clone(fallbackScene)] : []
     if ((parsed.project.version ?? 1) < 3) {
@@ -166,7 +166,7 @@ export function deserializeEditorState(raw: string | null, fallback: EditorState
       }
     }
     const layers = clone(parsed.layers)
-    if (fallbackScene && !layers.some((layer) => layer.type === '3d-scene')) {
+    if ((parsed.project.version ?? 1) < 2 && fallbackScene && !layers.some((layer) => layer.type === '3d-scene')) {
       const demoLayer = fallback.layers.find((layer) => layer.type === '3d-scene')
       if (demoLayer) layers.splice(Math.min(2, layers.length), 0, clone(demoLayer))
     }

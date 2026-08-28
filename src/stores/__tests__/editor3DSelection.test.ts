@@ -57,4 +57,17 @@ describe('3D layer selection', () => {
     expect(store.delete3DEntity(onlyCamera.id)).toBe(false)
     expect(scene.cameras).toHaveLength(1)
   })
+
+  it('adds an image plane and lets the selected media be changed', () => {
+    const store = useEditorStore()
+    const image = store.assets.find((asset) => asset.kind === 'image')!
+
+    const plane = store.add3DImagePlane(image.id)!
+
+    expect(plane).toMatchObject({ primitive: 'plane', assetId: image.id, castShadow: false, receiveShadow: false })
+    expect(plane.material).toMatchObject({ baseColor: '#ffffff' })
+    expect(store.selectedSceneEntityId).toBe(plane.id)
+    expect(store.set3DObjectImage(null)).toBe(true)
+    expect(plane.assetId).toBeUndefined()
+  })
 })

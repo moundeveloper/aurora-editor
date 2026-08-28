@@ -13,7 +13,7 @@ import type { Aurora3DPath, Aurora3DPathPoint, Aurora3DScene } from '@/models/ed
 import IconButton from './common/IconButton.vue'
 
 const store = useEditorStore()
-const { selectedLayer, selectedScene, selectedSceneEntityId, currentTime, playing } = storeToRefs(store)
+const { selectedLayer, selectedScene, selectedSceneEntityId, currentTime, playing, assets } = storeToRefs(store)
 const viewport = ref<HTMLElement>()
 const canvas = ref<HTMLCanvasElement>()
 const transformMode = ref<TransformControlsMode>('translate')
@@ -26,7 +26,7 @@ const activePathPoint = computed(() => pathSelection.value?.pathId === selectedS
 
 const PATH_GROUP_PREFIX = 'aurora-editor-path-'
 
-const runtimeRegistry = new ThreeSceneRuntimeRegistry()
+const runtimeRegistry = new ThreeSceneRuntimeRegistry(() => renderViewport())
 let renderer: THREE.WebGLRenderer | null = null
 let perspectiveCamera: THREE.PerspectiveCamera | null = null
 let orthographicCamera: THREE.OrthographicCamera | null = null
@@ -315,7 +315,7 @@ function renderViewport() {
   const syncScene = !transform?.dragging || !runtime || runtime.sceneId !== sceneDefinition.id
   if (syncScene) {
     if (runtime && (runtime.sceneId !== sceneDefinition.id || runtime.revision !== sceneDefinition.revision)) disposeEditorHelpers(runtime)
-    runtime = runtimeRegistry.get(sceneDefinition, host.clientWidth, host.clientHeight, currentTime.value)
+    runtime = runtimeRegistry.get(sceneDefinition, host.clientWidth, host.clientHeight, currentTime.value, assets.value)
   }
   const targetRuntime = runtime
   if (!targetRuntime) return
@@ -691,7 +691,7 @@ onBeforeUnmount(() => {
   orthographicCamera = null
 })
 
-watch([selectedLayer, selectedScene, currentTime, selectedSceneEntityId], renderViewport, { deep: true })
+watch([selectedLayer, selectedScene, currentTime, selectedSceneEntityId, assets], renderViewport, { deep: true })
 </script>
 
 <template>
@@ -719,6 +719,12 @@ watch([selectedLayer, selectedScene, currentTime, selectedSceneEntityId], render
 
     <div ref="viewport" class="three-viewport">
       <canvas ref="canvas" aria-label="3D scene editor viewport" @pointerdown="rememberPickStart" @click="pickObject" @contextmenu.prevent />
+      <div v-if="!selectedScene" class="scene-empty-state">
+        <span><Box :size="22" /></span>
+        <strong>No 3D scene yet</strong>
+        <small>Create a scene here. It will also be saved in the Library so it can be reused like a cluster.</small>
+        <button type="button" @click="store.create3DSceneFromWorkspace()"><Plus :size="12" /> Create 3D scene</button>
+      </div>
       <div class="viewport-badge"><View :size="10" /> {{ cameraView }}{{ cameraView === 'Perspective' ? '' : ' · Orthographic' }}</div>
       <div class="viewport-axis"><span class="x">X</span><span class="y">Y</span><span class="z">Z</span></div>
       <div class="viewport-help">{{ selectedPath ? 'Click an anchor or handle to edit it · drag with the gizmo · G/R/S: transform' : 'Orbit: left-drag · Pan: middle-drag · Zoom: wheel · G/R/S: transform' }}</div>
@@ -741,5 +747,6 @@ watch([selectedLayer, selectedScene, currentTime, selectedSceneEntityId], render
 .three-workspace { display: flex; height: 100%; min-height: 0; flex-direction: column; overflow: hidden; background: #090b10; }
 .three-toolbar { display: flex; height: 34px; flex: 0 0 auto; align-items: center; gap: 2px; padding: 0 7px; background: var(--bg-panel-alt); border-bottom: 1px solid var(--border-subtle); }.tool-group { display: flex; gap: 1px; }.toolbar-divider { width: 1px; height: 20px; margin: 0 4px; background: var(--border-subtle); }.toolbar-spacer { flex: 1; }.view-button { height: 24px; padding: 0 7px; color: var(--text-muted); background: transparent; border: 1px solid transparent; border-radius: 3px; font: inherit; font-size: 8.5px; cursor: pointer; white-space: nowrap; }.view-button:hover { color: var(--text-primary); background: var(--bg-hover); }.view-button.active { color: #dce2ff; background: var(--bg-selected); border-color: var(--accent-border); }.scene-label, .path-label { display: flex; min-width: 0; align-items: center; gap: 5px; overflow: hidden; color: var(--text-secondary); font-size: 8.5px; text-overflow: ellipsis; white-space: nowrap; }.path-label { max-width: 110px; }
 .three-viewport { position: relative; min-height: 0; flex: 1; overflow: hidden; background: #090b10; }.three-viewport canvas { display: block; width: 100%; height: 100%; outline: none; touch-action: none; }.viewport-badge, .viewport-help { position: absolute; padding: 4px 6px; color: #858b99; background: rgb(12 14 20 / .78); border: 1px solid #292d37; border-radius: 3px; font-size: 7.5px; pointer-events: none; backdrop-filter: blur(4px); }.viewport-badge { top: 8px; left: 9px; display: flex; align-items: center; gap: 4px; }.viewport-help { right: 9px; bottom: 8px; }.viewport-axis { position: absolute; top: 9px; right: 10px; display: flex; gap: 3px; font-size: 7px; font-weight: 700; }.viewport-axis span { display: grid; width: 15px; height: 15px; place-items: center; color: #eef0f8; background: #252a35; border: 1px solid #3a404d; border-radius: 50%; }.viewport-axis .x { color: #ff9ca8; }.viewport-axis .y { color: #8bd5ad; }.viewport-axis .z { color: #91adff; }
+.scene-empty-state { position: absolute; top: 50%; left: 50%; display: flex; width: min(330px, calc(100% - 40px)); flex-direction: column; align-items: center; gap: 7px; padding: 18px; color: var(--text-muted); text-align: center; background: rgb(18 21 29 / .92); border: 1px solid #343948; border-radius: 5px; box-shadow: 0 16px 40px rgb(0 0 0 / .35); transform: translate(-50%, -50%); }.scene-empty-state > span { display: grid; width: 38px; height: 38px; place-items: center; color: #cbd3ff; background: #262d48; border: 1px solid #586593; border-radius: 4px; }.scene-empty-state strong { color: var(--text-primary); font-size: 11px; }.scene-empty-state small { max-width: 260px; font-size: 8.5px; line-height: 1.5; }.scene-empty-state button { display: inline-flex; height: 27px; align-items: center; gap: 5px; margin-top: 2px; padding: 0 9px; color: #11131a; background: var(--button-accent); border: 1px solid #a8b2ff; border-radius: 4px; font: inherit; font-size: 9px; font-weight: 650; cursor: pointer; }.scene-empty-state button:hover { background: var(--button-accent-hover); }
 .three-status { display: flex; height: 27px; flex: 0 0 auto; align-items: center; gap: 10px; padding: 0 8px; color: var(--text-muted); background: #111319; border-top: 1px solid var(--border-subtle); font-size: 7.5px; }.three-status span { display: flex; align-items: center; gap: 4px; white-space: nowrap; }.three-status .status-spacer { flex: 1; }.three-status strong { color: #7eb89f; font-size: 7px; letter-spacing: .08em; }.three-status strong.playing { color: #c3cafd; }
 </style>

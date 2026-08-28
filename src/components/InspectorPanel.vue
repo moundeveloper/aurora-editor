@@ -46,6 +46,12 @@ function valueFor(key: TransformKey) {
   return selectedKeyframe?.value ?? evaluateNumericProperty(channel, currentTime.value)
 }
 function setValue(key: TransformKey, value: number) { store.setLayerValue(key, value) }
+function toggleAnimated(key: TransformKey) {
+  const property = selectedLayer.value?.transform[key]
+  if (!property) return
+  property.animated = !property.animated
+  store.markChanged()
+}
 function toggleGroup(group: string) { collapsed.value[group] = !collapsed.value[group] }
 </script>
 
@@ -70,7 +76,7 @@ function toggleGroup(group: string) { collapsed.value[group] = !collapsed.value[
           <button class="section-header" type="button" @click="toggleGroup('transform')"><ChevronDown :size="13" :class="{ closed: collapsed.transform }" /><span>Transform</span><small>2D</small><RotateCcw :size="11" /></button>
           <div v-if="!collapsed.transform" class="property-list">
             <div v-for="property in transformProperties" :key="property.key" class="property-row">
-              <button class="animate-toggle" type="button" :class="{ active: selectedLayer.transform[property.key].animated }" :title="`Animate ${property.label}`" @click="selectedLayer.transform[property.key].animated = !selectedLayer.transform[property.key].animated">
+              <button class="animate-toggle" type="button" :class="{ active: selectedLayer.transform[property.key].animated }" :title="`Animate ${property.label}`" @click="toggleAnimated(property.key)">
                 <Clock3 :size="11" />
               </button>
               <label :title="property.label">{{ property.label }}</label>
@@ -114,7 +120,7 @@ function toggleGroup(group: string) { collapsed.value[group] = !collapsed.value[
       <button type="button"><Plus :size="12" /> Browse effects</button>
     </div>
     <div v-else class="metadata-list">
-      <div><span>Composition</span><strong>Main Composition</strong></div><div><span>Resolution</span><strong>{{ project.width }} × {{ project.height }}</strong></div><div><span>Frame rate</span><strong>{{ project.frameRate }} fps</strong></div><div><span>Color space</span><strong>Rec. 709</strong></div><div><span>Layer ID</span><strong>{{ selectedLayer?.id }}</strong></div>
+      <div><span>Project</span><strong>{{ project.name }}</strong></div><div><span>Resolution</span><strong>{{ project.width }} × {{ project.height }}</strong></div><div><span>Frame rate</span><strong>{{ project.frameRate }} fps</strong></div><div><span>Color space</span><strong>Rec. 709</strong></div><div><span>Layer ID</span><strong>{{ selectedLayer?.id }}</strong></div>
     </div>
   </aside>
 </template>

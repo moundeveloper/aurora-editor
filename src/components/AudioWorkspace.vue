@@ -1,8 +1,12 @@
 <script setup lang="ts">
 import { ref } from 'vue'
+import { storeToRefs } from 'pinia'
 import { AudioLines, ChevronDown, Headphones, Mic2, MoreHorizontal, Music2, SlidersVertical, Volume2, VolumeX } from '@lucide/vue'
+import { useEditorStore } from '@/stores/editor'
 import IconButton from './common/IconButton.vue'
 
+const store = useEditorStore()
+const { project } = storeToRefs(store)
 const channels = ref([
   { id: 'dialogue', name: 'Dialogue', icon: Mic2, color: '#6e86bb', gain: -2.2, pan: 0, mute: false, solo: false, peak: 72 },
   { id: 'music', name: 'Deep Signal', icon: Music2, color: '#659a84', gain: -5.8, pan: -8, mute: false, solo: false, peak: 58 },
@@ -13,7 +17,7 @@ const channels = ref([
 
 <template>
   <section class="audio-workspace">
-    <div class="audio-toolbar"><SlidersVertical :size="13" /><strong>Audio Mixer</strong><span>Main Composition</span><span class="spacer" /><button type="button">Mix <ChevronDown :size="11" /></button><IconButton :icon="MoreHorizontal" label="Mixer options" /></div>
+    <div class="audio-toolbar"><SlidersVertical :size="13" /><strong>Audio Mixer</strong><span>{{ project.name }}</span><span class="spacer" /><button type="button">Mix <ChevronDown :size="11" /></button><IconButton :icon="MoreHorizontal" label="Mixer options" /></div>
     <div class="mixer-stage">
       <article v-for="channel in channels" :key="channel.id" class="channel-strip" :class="{ master: channel.id === 'master' }">
         <header><span :style="{ background: channel.color }"><component :is="channel.icon" :size="13" /></span><strong>{{ channel.name }}</strong></header>

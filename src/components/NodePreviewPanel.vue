@@ -58,6 +58,15 @@ const passCount = computed(() => selectedNodeHasImage.value
   ? (evaluateNodeGraph(nodes.value, nodeConnections.value, previewRootNodeId.value) ?? [])
     .filter((pass) => liveLayers.value.some((layer) => layer.id === pass.layerId)).length
   : liveLayers.value.length)
+const previewRenderSize = computed(() => {
+  const scale = Math.min(1, 640 / project.value.width, 360 / project.value.height)
+  return { width: Math.max(1, Math.round(project.value.width * scale)), height: Math.max(1, Math.round(project.value.height * scale)) }
+})
+const previewCanvasStyle = computed(() => ({
+  width: project.value.width >= project.value.height ? 'calc(100% - 28px)' : 'auto',
+  height: project.value.width >= project.value.height ? 'auto' : 'calc(100% - 20px)',
+  aspectRatio: `${project.value.width} / ${project.value.height}`,
+}))
 
 async function drawNow() {
   if (!renderer) return
@@ -71,8 +80,8 @@ async function drawNow() {
       nodeConnections: selectedNodeHasImage.value ? nodeConnections.value : [],
       renderRootNodeId: selectedNodeHasImage.value ? previewRootNodeId.value : null,
       time: currentTime.value,
-      width: 640,
-      height: 360,
+      width: previewRenderSize.value.width,
+      height: previewRenderSize.value.height,
       quality: 'preview',
     })
     renderError.value = false
@@ -101,7 +110,7 @@ onMounted(async () => {
   try {
     const { HybridWebGLRenderBackend } = await import('@/engine/rendering/HybridWebGLRenderBackend')
     renderer = new HybridWebGLRenderBackend(canvas.value, '/demo/aurora-ridge.png')
-    await renderer.initialize({ width: 640, height: 360, pixelRatio: 1 })
+    await renderer.initialize({ ...previewRenderSize.value, pixelRatio: 1 })
     await drawNow()
   } catch {
     renderError.value = true
@@ -134,7 +143,7 @@ watch([currentTime, project, layers, scenes3D, nodes, nodeConnections, previewRo
     </header>
 
     <div class="preview-viewport">
-      <canvas ref="canvas" width="640" height="360" aria-label="Live output of the selected node" />
+      <canvas ref="canvas" :width="previewRenderSize.width" :height="previewRenderSize.height" :style="previewCanvasStyle" aria-label="Live output of the selected node" />
       <div v-if="initializing" class="preview-message">Starting viewport…</div>
       <div v-else-if="renderError" class="preview-message error"><ImageOff :size="15" /> Preview unavailable</div>
       <div v-else-if="!passCount" class="preview-message"><ImageOff :size="15" /> No image reaches this node</div>
@@ -151,7 +160,7 @@ watch([currentTime, project, layers, scenes3D, nodes, nodeConnections, previewRo
 .preview-source { display: flex; min-width: 0; align-items: baseline; gap: 6px; overflow: hidden; }.preview-source small { flex: 0 0 auto; color: var(--text-muted); font-size: 7.5px; }.preview-source strong { overflow: hidden; color: var(--text-primary); font-size: 8.5px; font-weight: 550; text-overflow: ellipsis; white-space: nowrap; }
 .preview-spacer { flex: 1; }.preview-status { flex: 0 0 auto; color: var(--success); font-size: 7.5px; white-space: nowrap; }.preview-status.empty { color: var(--text-muted); }
 .preview-viewport { position: relative; display: flex; min-height: 0; flex: 1; align-items: center; justify-content: center; overflow: hidden; background-color: #08090c; background-image: linear-gradient(45deg, #0c0e13 25%, transparent 25%), linear-gradient(-45deg, #0c0e13 25%, transparent 25%), linear-gradient(45deg, transparent 75%, #0c0e13 75%), linear-gradient(-45deg, transparent 75%, #0c0e13 75%); background-position: 0 0, 0 8px, 8px -8px, -8px 0; background-size: 16px 16px; }
-.preview-viewport canvas { display: block; width: calc(100% - 28px); max-width: 960px; height: auto; max-height: calc(100% - 20px); aspect-ratio: 16 / 9; background: #08090c; box-shadow: 0 8px 28px rgb(0 0 0 / .48), 0 0 0 1px #30333d; }
+.preview-viewport canvas { display: block; max-width: calc(100% - 28px); max-height: calc(100% - 20px); background: #08090c; box-shadow: 0 8px 28px rgb(0 0 0 / .48), 0 0 0 1px #30333d; }
 .preview-message { position: absolute; display: flex; align-items: center; gap: 6px; padding: 6px 9px; color: var(--text-muted); background: rgb(12 14 19 / .82); border: 1px solid var(--border-subtle); border-radius: 3px; font-size: 8px; backdrop-filter: blur(4px); }.preview-message.error { color: #c98d8d; }
 .preview-badge { position: absolute; top: 7px; left: 8px; display: flex; max-width: calc(100% - 16px); align-items: center; gap: 5px; overflow: hidden; padding: 4px 7px; color: #9ba0aa; background: rgb(12 14 19 / .74); border: 1px solid #262a32; border-radius: 3px; font-size: 7.5px; text-overflow: ellipsis; white-space: nowrap; backdrop-filter: blur(5px); }.live-dot { width: 5px; height: 5px; flex: 0 0 auto; border-radius: 50%; background: var(--success); }
 </style>

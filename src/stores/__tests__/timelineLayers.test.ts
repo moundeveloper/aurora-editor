@@ -37,6 +37,58 @@ describe('timeline layer creation', () => {
     expect(scene?.cameraCuts[0]?.cameraId).toBe(scene?.cameras[0]?.id)
     expect(store.selectedSceneId).toBe(scene?.id)
     expect(store.selectedSceneEntityId).toBe(scene?.cameras[0]?.id)
+    expect(store.assets.find((asset) => asset.id === layer.assetId)).toMatchObject({
+      kind: 'scene3d',
+      name: scene?.name,
+    })
+  })
+
+  it('keeps a reusable 3D Library scene current and instantiates a new scene when dropped', () => {
+    const store = useEditorStore()
+    const layer = store.addTimelineLayer('3d-scene')
+    const asset = store.assets.find((item) => item.id === layer.assetId)!
+
+    store.add3DPrimitive('box')
+    expect(asset.sceneTemplate?.objects).toHaveLength(1)
+    expect(asset.sceneLayerTemplate?.sceneId).toBe(layer.sceneId)
+
+    const copy = store.addAssetToTimeline(asset.id, 4)!
+    expect(copy.type).toBe('3d-scene')
+    expect(copy.sceneId).not.toBe(layer.sceneId)
+    expect(copy.assetId).toBe(asset.id)
+    expect(store.scenes3D.find((scene) => scene.id === copy.sceneId)?.objects).toHaveLength(1)
+  })
+
+  it('auto-keys a transform channel that was previously static', () => {
+    const store = useEditorStore()
+    const layer = store.addTimelineLayer('rectangle')
+    store.currentTime = 2
+    store.autoKey = true
+
+    store.setLayerValue('x', 420)
+
+    expect(layer.transform.x.animated).toBe(true)
+    expect(layer.transform.x.keyframes).toHaveLength(1)
+    expect(layer.transform.x.keyframes[0]).toMatchObject({ time: 2, value: 420 })
+  })
+
+  it('ripples later clips on trims and closes deleted clip time', () => {
+    const store = useEditorStore()
+    const first = store.addTimelineLayer('image')
+    const second = store.addTimelineLayer('image')
+    first.trackId = 'shared-track'
+    second.trackId = 'shared-track'
+    first.start = 0
+    first.duration = 2
+    second.start = 5
+    second.duration = 2
+    store.ripple = true
+
+    expect(store.rippleTrackSegments('shared-track', 2, 1, [first.id])).toBe(1)
+    expect(second.start).toBe(6)
+
+    store.deleteTimelineLayers([first.id], { keepTracks: true })
+    expect(second.start).toBe(4)
   })
 
   it('creates media and shape layers at the playhead in the correct section', () => {
@@ -49,6 +101,20 @@ describe('timeline layer creation', () => {
     expect(shape).toMatchObject({ type: 'shape', shapeKind: 'ellipse', start: 5 })
     expect(audio).toMatchObject({ type: 'audio', start: 5, effects: ['Gain'] })
     expect(store.layers.at(-1)?.id).toBe(audio.id)
+  })
+
+  it('uses the configured resolution and frame rate for new content', () => {
+    const store = useEditorStore()
+    store.setProjectFormat(1080, 1920, 59.94)
+    store.currentTime = 0
+
+    const shape = store.addTimelineLayer('rectangle')
+
+    expect(store.project).toMatchObject({ width: 1080, height: 1920, frameRate: 59.94 })
+    expect(shape.transform.x.value).toBe(540)
+    expect(shape.transform.y.value).toBe(960)
+    expect(store.stepFrame(1)).toBeUndefined()
+    expect(store.currentTime).toBeCloseTo(1 / 59.94)
   })
 
   it('creates dragged shapes with their requested dimensions', () => {

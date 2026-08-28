@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { computed, defineAsyncComponent, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, defineAsyncComponent, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { storeToRefs } from 'pinia'
+import { useRoute, useRouter } from 'vue-router'
 import { Activity, CircleHelp, HardDrive, PanelBottomClose, PanelLeftClose, PanelRightClose, ShieldCheck } from '@lucide/vue'
 import { useEditorStore } from '@/stores/editor'
 import TopBar from '@/components/TopBar.vue'
@@ -13,6 +14,7 @@ import NodePreviewPanel from '@/components/NodePreviewPanel.vue'
 import MaskEdgePanel from '@/components/MaskEdgePanel.vue'
 import AudioWorkspace from '@/components/AudioWorkspace.vue'
 import ExportWorkspace from '@/components/ExportWorkspace.vue'
+import ProjectBrowser from '@/components/ProjectBrowser.vue'
 
 const ThreeDWorkspace = defineAsyncComponent(() => import('@/components/ThreeDWorkspace.vue'))
 const ThreeDPreviewPanel = defineAsyncComponent(() => import('@/components/ThreeDPreviewPanel.vue'))
@@ -22,6 +24,9 @@ const ThreeDTimelinePanel = defineAsyncComponent(() => import('@/components/Thre
 
 const store = useEditorStore()
 const { workspace, currentTime, project, selectedLayer, nodes, selectedNodeId } = storeToRefs(store)
+const route = useRoute()
+const router = useRouter()
+const homeOpen = computed(() => route.name !== 'project')
 const leftWidth = ref(224)
 const rightWidth = ref(275)
 const bottomHeight = ref(258)
@@ -59,12 +64,18 @@ function stopResize() {
 }
 
 function onKeydown(event: KeyboardEvent) {
+  if (homeOpen.value) return
   if ((event.target as HTMLElement)?.matches('input, textarea')) return
   if (event.code === 'Space') { event.preventDefault(); store.togglePlayback() }
   if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'b') { event.preventDefault(); store.splitSelectedLayer() }
   if (event.key === 'ArrowLeft') store.stepFrame(-1)
   if (event.key === 'ArrowRight') store.stepFrame(1)
 }
+
+watch(() => route.params.projectId, async (projectId) => {
+  if (typeof projectId !== 'string' || projectId === project.value.id) return
+  if (!await store.openProject(projectId)) await router.replace('/')
+}, { immediate: true })
 
 onMounted(() => {
   window.addEventListener('pointermove', resize)
@@ -79,7 +90,8 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div class="app-shell" :style="layoutStyle">
+  <ProjectBrowser v-if="homeOpen" />
+  <div v-else class="app-shell" :style="layoutStyle">
     <TopBar />
 
     <main v-if="workspace !== 'Export'" class="workspace-shell">
@@ -128,7 +140,7 @@ onBeforeUnmount(() => {
       <span>{{ selectedLayer?.name || 'No selection' }}</span>
       <span class="status-divider" />
       <span class="render-stat"><Activity :size="11" /> 16.4 ms</span>
-      <span>{{ Math.round(currentTime * project.frameRate) }} / {{ project.duration * project.frameRate }} frames</span>
+      <span>{{ Math.round(currentTime * project.frameRate) }} / {{ Math.ceil(project.duration * project.frameRate) }} frames</span>
       <button type="button" title="Help and shortcuts"><CircleHelp :size="12" /></button>
     </footer>
   </div>

@@ -2,7 +2,8 @@ import * as THREE from 'three'
 import { evaluateNumericProperty } from '@/engine/animation/evaluateProperty'
 import { evaluate3DPath } from '@/engine/scene3d/pathEvaluation'
 import { applyInfluences, influenceSignature } from '@/engine/scene3d/influences'
-import type { Aurora3DObject, Aurora3DScene, AuroraCamera, AuroraLight, Transform3D } from '@/models/editor'
+import { mediaUrl } from '@/services/mediaLibrary'
+import type { Aurora3DObject, Aurora3DScene, AuroraCamera, AuroraLight, MediaAsset, Transform3D } from '@/models/editor'
 
 export interface Scene3DRuntime {
   sceneId: string
@@ -32,20 +33,40 @@ function applyTransform(target: THREE.Object3D, transform: Transform3D, time: nu
   )
 }
 
-function makeGeometry(object: Aurora3DObject): THREE.BufferGeometry {
+function imageAssetFor(object: Aurora3DObject, assets: Map<string, MediaAsset>) {
+  const asset = object.assetId ? assets.get(object.assetId) : undefined
+  return asset?.kind === 'image' || asset?.kind === 'texture' ? asset : undefined
+}
+
+function imageUrl(asset: MediaAsset | undefined) {
+  return asset?.hash ? mediaUrl(asset.hash) : asset?.thumbnail
+}
+
+function imageAspect(asset: MediaAsset | undefined) {
+  const match = asset?.dimensions?.match(/(\d+)\s*[x×]\s*(\d+)/i)
+  if (!match) return 1
+  const width = Number(match[1])
+  const height = Number(match[2])
+  return width > 0 && height > 0 ? width / height : 1
+}
+
+function makeGeometry(object: Aurora3DObject, assets: Map<string, MediaAsset>): THREE.BufferGeometry {
   if (object.primitive === 'sphere') return new THREE.SphereGeometry(1.15, 48, 32)
-  if (object.primitive === 'plane') return new THREE.PlaneGeometry(2, 2)
+  if (object.primitive === 'plane') {
+    const aspect = imageAspect(imageAssetFor(object, assets))
+    return new THREE.PlaneGeometry(aspect >= 1 ? 2 : 2 * aspect, aspect >= 1 ? 2 / aspect : 2)
+  }
   return new THREE.BoxGeometry(2, 2, 2, 2, 2, 2)
 }
 
-function makeObject(definition: Aurora3DObject): THREE.Object3D {
+function makeObject(definition: Aurora3DObject, assets: Map<string, MediaAsset>): THREE.Object3D {
   if (definition.type !== 'mesh') return new THREE.Group()
   const material = new THREE.MeshStandardMaterial({
     color: definition.material.baseColor,
     emissive: definition.material.emissive,
     transparent: true,
   })
-  const mesh = new THREE.Mesh(makeGeometry(definition), material)
+  const mesh = new THREE.Mesh(makeGeometry(definition, assets), material)
   mesh.castShadow = definition.castShadow
   mesh.receiveShadow = definition.receiveShadow
   return mesh
@@ -126,19 +147,83 @@ function applyCameraPathConstraint(runtime: Scene3DRuntime, camera: THREE.Camera
 
 export class ThreeSceneRuntimeRegistry {
   private runtimes = new Map<string, Scene3DRuntime>()
+  private texturePromises = new Map<string, Promise<THREE.Texture | null>>()
+  private textures = new Map<string, THREE.Texture>()
+  private disposed = false
 
-  get(sceneDefinition: Aurora3DScene, width: number, height: number, time: number): Scene3DRuntime {
+  constructor(private readonly onInvalidate?: () => void) {}
+
+  get(sceneDefinition: Aurora3DScene, width: number, height: number, time: number, assets: readonly MediaAsset[] = []): Scene3DRuntime {
+    this.disposed = false
+    const assetMap = new Map(assets.map((asset) => [asset.id, asset]))
     let runtime = this.runtimes.get(sceneDefinition.id)
     if (!runtime || runtime.revision !== sceneDefinition.revision) {
       if (runtime) this.disposeRuntime(runtime)
-      runtime = this.create(sceneDefinition, width / Math.max(1, height))
+      runtime = this.create(sceneDefinition, width / Math.max(1, height), assetMap)
       this.runtimes.set(sceneDefinition.id, runtime)
     }
-    this.update(runtime, sceneDefinition, width / Math.max(1, height), time)
+    this.update(runtime, sceneDefinition, width / Math.max(1, height), time, assetMap)
     return runtime
   }
 
-  private create(definition: Aurora3DScene, aspect: number): Scene3DRuntime {
+  /** Preloads image-plane maps so offline/export renders do not emit a blank first frame. */
+  async prepareAssets(sceneDefinitions: readonly Aurora3DScene[], assets: readonly MediaAsset[]) {
+    const assetMap = new Map(assets.map((asset) => [asset.id, asset]))
+    const urls = new Set(sceneDefinitions.flatMap((scene) => scene.objects.flatMap((object) => {
+      const url = imageUrl(imageAssetFor(object, assetMap))
+      return object.primitive === 'plane' && url ? [url] : []
+    })))
+    await Promise.all([...urls].map((url) => this.ensureTexture(url)))
+  }
+
+  private ensureTexture(url: string) {
+    const existing = this.texturePromises.get(url)
+    if (existing) return existing
+    const loading = new THREE.TextureLoader().loadAsync(url).then((texture) => {
+      if (this.disposed) {
+        texture.dispose()
+        return null
+      }
+      texture.colorSpace = THREE.SRGBColorSpace
+      texture.wrapS = THREE.ClampToEdgeWrapping
+      texture.wrapT = THREE.ClampToEdgeWrapping
+      texture.needsUpdate = true
+      this.textures.set(url, texture)
+      return texture
+    }).catch(() => null)
+    this.texturePromises.set(url, loading)
+    return loading
+  }
+
+  private syncImageMap(material: THREE.MeshStandardMaterial, definition: Aurora3DObject, assets: Map<string, MediaAsset>) {
+    const url = definition.primitive === 'plane' ? imageUrl(imageAssetFor(definition, assets)) : undefined
+    if (material.userData.auroraImageUrl === url) {
+      const ready = url ? this.textures.get(url) : undefined
+      if (ready && material.map !== ready) {
+        material.map = ready
+        material.needsUpdate = true
+      }
+      return
+    }
+
+    material.userData.auroraImageUrl = url
+    material.map = url ? this.textures.get(url) ?? null : null
+    material.side = url ? THREE.DoubleSide : THREE.FrontSide
+    // Alpha blending preserves soft edges; skipping depth writes stops invisible texels occluding
+    // geometry behind the card. alphaTest discards fully transparent pixels in shadow/depth passes.
+    material.depthWrite = !url
+    material.alphaTest = url ? .001 : 0
+    material.needsUpdate = true
+    if (!url || material.map) return
+    void this.ensureTexture(url).then((texture) => {
+      if (!texture || material.userData.auroraImageUrl !== url) return
+      material.map = texture
+      material.needsUpdate = true
+      this.onInvalidate?.()
+    })
+  }
+
+  private create(definition: Aurora3DScene, aspect: number, assets: Map<string, MediaAsset>): Scene3DRuntime {
     const scene = new THREE.Scene()
     const root = new THREE.Group()
     root.name = definition.name
@@ -153,7 +238,7 @@ export class ThreeSceneRuntimeRegistry {
       lights: new Map(),
     }
     definition.objects.forEach((item) => {
-      const object = makeObject(item)
+      const object = makeObject(item, assets)
       object.name = item.name
       object.userData.auroraId = item.id
       runtime.objects.set(item.id, object)
@@ -181,7 +266,7 @@ export class ThreeSceneRuntimeRegistry {
     return runtime
   }
 
-  private update(runtime: Scene3DRuntime, definition: Aurora3DScene, aspect: number, time: number) {
+  private update(runtime: Scene3DRuntime, definition: Aurora3DScene, aspect: number, time: number, assets: Map<string, MediaAsset>) {
     runtime.revision = definition.revision
     runtime.scene.background = definition.settings.backgroundColor ? new THREE.Color(definition.settings.backgroundColor) : null
     definition.objects.forEach((item) => {
@@ -191,6 +276,7 @@ export class ThreeSceneRuntimeRegistry {
       applyTransform(object, item.transform, time)
       if (object instanceof THREE.Mesh) syncInfluences(object, item, time)
       if (object instanceof THREE.Mesh && object.material instanceof THREE.MeshStandardMaterial) {
+        this.syncImageMap(object.material, item, assets)
         object.material.color.set(item.material.baseColor)
         object.material.emissive.set(item.material.emissive)
         object.material.opacity = evaluateNumericProperty(item.material.opacity, time)
@@ -248,8 +334,12 @@ export class ThreeSceneRuntimeRegistry {
   }
 
   dispose() {
+    this.disposed = true
     this.runtimes.forEach((runtime) => this.disposeRuntime(runtime))
     this.runtimes.clear()
+    this.textures.forEach((texture) => texture.dispose())
+    this.textures.clear()
+    this.texturePromises.clear()
   }
 
   private disposeRuntime(runtime: Scene3DRuntime) {
@@ -264,12 +354,7 @@ export class ThreeSceneRuntimeRegistry {
       if (base && base !== object.geometry) base.dispose()
       object.geometry.dispose()
       const materials = Array.isArray(object.material) ? object.material : [object.material]
-      materials.forEach((material) => {
-        Object.values(material).forEach((value) => {
-          if (value instanceof THREE.Texture) value.dispose()
-        })
-        material.dispose()
-      })
+      materials.forEach((material) => material.dispose())
     })
     runtime.scene.clear()
   }

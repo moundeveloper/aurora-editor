@@ -12,6 +12,8 @@ import IconButton from './common/IconButton.vue'
 import CurveEditor from './CurveEditor.vue'
 import MDialog from './common/MDialog.vue'
 import NumberField from './common/NumberField.vue'
+import ClusterSettingsDialog from './common/ClusterSettingsDialog.vue'
+import type { ClusterSettings } from '@/stores/editor'
 
 const store = useEditorStore()
 const {
@@ -44,6 +46,7 @@ const layerMarqueeRect = ref<{ left: number; top: number; width: number; height:
 const trackContextMenu = ref<{ trackId: string; layerIds: string[]; clipId: string | null; x: number; y: number } | null>(null)
 const trackDialog = ref<{ mode: 'rename' | 'delete'; scope: 'track' | 'clips'; layerIds: string[]; name: string; clipCount: number } | null>(null)
 const trackRenameValue = ref('')
+const clusterDialog = ref<{ mode: 'create' | 'edit'; assetId?: string; name: string; width: number; height: number } | null>(null)
 const tabs = ['Timeline', 'Graph Editor', 'Audio Mixer', 'Scopes']
 
 const layerPresets = [
@@ -304,24 +307,28 @@ function addLayer(preset: TimelineLayerPreset) {
 function toggleTrackExpanded(track: TimelineTrack) {
   const expanded = !trackDisplayLayer(track).expanded
   track.segments.forEach((segment) => { segment.expanded = expanded })
+  store.markChanged()
 }
 
 function toggleTrackVisible(track: TimelineTrack, event: MouseEvent) {
   event.stopPropagation()
   const visible = !trackDisplayLayer(track).visible
   track.segments.forEach((segment) => { segment.visible = visible })
+  store.markChanged()
 }
 
 function toggleTrackLock(track: TimelineTrack, event: MouseEvent) {
   event.stopPropagation()
   const locked = !trackDisplayLayer(track).locked
   track.segments.forEach((segment) => { segment.locked = locked })
+  store.markChanged()
 }
 
 function toggleTrackMuted(track: TimelineTrack, event: MouseEvent) {
   event.stopPropagation()
   const muted = !trackDisplayLayer(track).muted
   track.segments.forEach((segment) => { segment.muted = muted })
+  store.markChanged()
 }
 
 function contextTrack() {
@@ -382,6 +389,36 @@ function renameContextTrack() {
   trackRenameValue.value = name
   trackDialog.value = { mode: 'rename', scope: 'track', layerIds: menu.layerIds, name, clipCount: track.segments.length }
   trackContextMenu.value = null
+}
+
+function openCreateClusterDialog() {
+  clusterDialog.value = {
+    mode: 'create',
+    name: '',
+    width: project.value.width,
+    height: project.value.height,
+  }
+}
+
+function editContextCluster() {
+  const cluster = contextTrack()?.segments.find((segment) => segment.type === 'cluster')
+  if (!cluster?.assetId) return
+  clusterDialog.value = {
+    mode: 'edit',
+    assetId: cluster.assetId,
+    name: cluster.name,
+    width: cluster.width ?? project.value.width,
+    height: cluster.height ?? project.value.height,
+  }
+  trackContextMenu.value = null
+}
+
+function confirmClusterSettings(settings: ClusterSettings) {
+  const dialog = clusterDialog.value
+  if (!dialog) return
+  if (dialog.mode === 'create') store.createEmptyCluster(settings)
+  else if (dialog.assetId) store.updateClusterSettings(dialog.assetId, settings)
+  clusterDialog.value = null
 }
 
 function toggleContextTrackVisible() {
@@ -807,6 +844,11 @@ async function onPointerMove(event: PointerEvent) {
   const collision = Boolean(targetTrack && compatibleCategory && targetTrack.segments.some((segment) => {
     if (segment.id === clipDragState?.layer.id || segment.isPlaceholder) return false
     const frame = 1 / project.value.frameRate
+    const isDownstreamRippleTarget = ripple.value
+      && clipDragState?.mode === 'trim-end'
+      && targetTrack.id === clipDragState.originalTrackId
+      && segment.start >= clipDragState.originalStart + clipDragState.originalDuration - frame / 2
+    if (isDownstreamRippleTarget) return false
     return clipDragState!.layer.start < segment.start + segment.duration - frame / 2
       && clipDragState!.layer.start + clipDragState!.layer.duration > segment.start + frame / 2
   }))
@@ -843,6 +885,15 @@ function endPointerInteraction() {
         }))
       })
     } else {
+      if (clipDragState.mode === 'trim-end') {
+        const originalEnd = clipDragState.originalStart + clipDragState.originalDuration
+        store.rippleTrackSegments(
+          clipDragState.originalTrackId,
+          originalEnd,
+          clipDragState.layer.duration - clipDragState.originalDuration,
+          [clipDragState.layer.id],
+        )
+      }
       // A child dragged past the end of the cluster grows the cluster, not the project.
       store.fitClusterToChildren(activeClusterId.value)
       const movedToTrack = clipDragState.newTrackCategory
@@ -870,7 +921,7 @@ function endPointerInteraction() {
   isScrubbing.value = false
 }
 
-/** Deleting is not undoable yet, so it always goes through the same confirmation the track menu uses. */
+/** Destructive edits still use confirmation even though the project-wide history can restore them. */
 function requestDeleteLayers(layerIds: string[]) {
   const targets = timelineTracks.value.flatMap((track) => track.segments).filter((layer) => layerIds.includes(layer.id) && !layer.isPlaceholder)
   if (!targets.length) return
@@ -1104,8 +1155,6 @@ onBeforeUnmount(() => {
     <div class="timeline-tabbar">
       <button v-for="tab in tabs" :key="tab" type="button" :class="{ active: activeBottomTab === tab }" @click="activeBottomTab = tab">{{ tab }}</button>
       <span class="tab-spacer" />
-      <span class="timeline-status"><span class="status-led" /> Main Composition</span>
-      <IconButton :icon="Plus" label="Open panel" />
     </div>
 
     <template v-if="activeBottomTab === 'Timeline'">
@@ -1135,12 +1184,12 @@ onBeforeUnmount(() => {
         </div>
         <IconButton class="razor-tool" :icon="Scissors" label="Razor tool — click clips to split (Esc to exit)" :active="isCutMode" @click="toggleCutMode" />
         <IconButton :icon="SquareStack" :label="selectedLayer?.type === 'cluster' ? 'Release cluster' : 'Cluster selected clips (Ctrl/Shift-click or drag a selection box)'" :active="selectedLayer?.type === 'cluster'" :disabled="selectedLayer?.type !== 'cluster' && clusterableSelectionCount < 2" @click="toggleCluster" />
-        <IconButton :icon="FolderPlus" label="New empty cluster — opens it as a tab to build inside" @click="store.createEmptyCluster()" />
+        <IconButton :icon="FolderPlus" label="New empty cluster — opens settings first" @click="openCreateClusterDialog" />
         <span v-if="selectedLayerIds.length > 1" class="selection-count">{{ selectedLayerIds.length }} selected</span>
         <span class="divider" />
-        <button class="toggle-control" type="button" :class="{ active: autoKey }" @click="autoKey = !autoKey"><CircleDot :size="12" /> Auto Key</button>
-        <button class="toggle-control" type="button" :class="{ active: snap }" @click="snap = !snap"><Magnet :size="12" /> Snap</button>
-        <button class="toggle-control" type="button" :class="{ active: ripple }" @click="ripple = !ripple"><Link2 :size="12" /> Ripple</button>
+        <button class="toggle-control" type="button" :class="{ active: autoKey }" title="Automatically create or update a keyframe when an animatable value changes" @click="autoKey = !autoKey"><CircleDot :size="12" /> Auto Key</button>
+        <button class="toggle-control" type="button" :class="{ active: snap }" title="Align timeline edits to frames and nearby edit points" @click="snap = !snap"><Magnet :size="12" /> Snap</button>
+        <button class="toggle-control" type="button" :class="{ active: ripple }" title="Shift later clips when trimming a clip end or deleting clips" @click="ripple = !ripple"><Link2 :size="12" /> Ripple</button>
         <span class="divider" />
         <button class="timecode-button" type="button">00:00:{{ String(Math.floor(currentTime)).padStart(2, '0') }}:{{ String(Math.floor(currentTime % 1 * project.frameRate)).padStart(2, '0') }}</button>
         <label class="duration-control" title="Composition duration in seconds"><span>Duration</span><NumberField :model-value="project.duration" :min="1" :max="86400" :step=".5" label="Composition duration" @update:model-value="onDurationChange" /><small>s</small></label>
@@ -1272,6 +1321,7 @@ onBeforeUnmount(() => {
       <Teleport to="body">
         <div v-if="trackContextMenu" class="timeline-context-menu" :style="{ left: `${trackContextMenu.x}px`, top: `${trackContextMenu.y}px` }" role="menu" @contextmenu.prevent>
           <button type="button" role="menuitem" @click="renameContextTrack"><Pencil :size="11" /> Rename</button>
+          <button v-if="contextTrack()?.segments.some((segment) => segment.type === 'cluster' && segment.assetId)" type="button" role="menuitem" @click="editContextCluster"><SlidersHorizontal :size="11" /> Cluster settings</button>
           <button type="button" role="menuitem" @click="toggleContextTrackVisible"><EyeOff v-if="contextTrack()?.segments.every((segment) => segment.visible)" :size="11" /><Eye v-else :size="11" /> {{ contextTrack()?.segments.every((segment) => segment.visible) ? 'Hide' : 'Show' }}</button>
           <span />
           <button v-if="trackContextMenu?.clipId" type="button" class="danger" role="menuitem" @click="deleteContextClips"><Trash2 :size="11" /> {{ contextClipDeleteLabel }}</button>
@@ -1289,8 +1339,18 @@ onBeforeUnmount(() => {
         @confirm="confirmTrackDialog"
       >
         <input v-if="trackDialog?.mode === 'rename'" v-model="trackRenameValue" autofocus aria-label="New layer name" @focus="($event.target as HTMLInputElement).select()" />
-        <p v-else class="dialog-warning">This action cannot be undone.</p>
+        <p v-else class="dialog-warning">You can undo this action.</p>
       </MDialog>
+      <ClusterSettingsDialog
+        :open="Boolean(clusterDialog)"
+        :mode="clusterDialog?.mode"
+        :asset-id="clusterDialog?.assetId"
+        :name="clusterDialog?.name"
+        :width="clusterDialog?.width"
+        :height="clusterDialog?.height"
+        @close="clusterDialog = null"
+        @confirm="confirmClusterSettings"
+      />
     </template>
 
     <CurveEditor v-else-if="activeBottomTab === 'Graph Editor'" />

@@ -450,7 +450,7 @@ onBeforeUnmount(() => {
 
       <div class="canvas-help">Pan: drag empty space · Zoom: wheel · Link: drag a socket · M: mute · Delete: remove</div>
 
-      <div v-if="addMenu" class="node-menu" @pointerdown.stop>
+      <div v-if="addMenu" class="node-menu" @pointerdown.stop @wheel.stop>
         <div v-for="category in NODE_CATEGORIES" :key="category" class="menu-group">
           <strong>{{ category }}</strong>
           <button v-for="kind in NODE_KINDS.filter((item) => NODE_DEFINITIONS[item].category === category)" :key="kind" type="button" @click="addNodeOfKind(kind)">

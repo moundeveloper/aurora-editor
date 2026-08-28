@@ -45,14 +45,18 @@ describe('cluster timeline contexts', () => {
 
     const cluster = store.createEmptyCluster()
 
-    expect(cluster.children).toEqual([])
+    expect(cluster.children).toHaveLength(2)
+    expect(cluster.children?.map((layer) => ({ type: layer.type, placeholder: layer.isPlaceholder }))).toEqual([
+      { type: 'shape', placeholder: true },
+      { type: 'audio', placeholder: true },
+    ])
     expect(cluster.start).toBe(3)
     expect(cluster.duration).toBeGreaterThan(0)
     expect(store.activeClusterId).toBe(cluster.id)
-    expect(store.timelineLayers).toHaveLength(0)
+    expect(store.timelineLayers).toHaveLength(2)
 
     const first = store.addTimelineLayer('rectangle')
-    expect(cluster.children).toHaveLength(1)
+    expect(cluster.children).toHaveLength(3)
     expect(store.selectedLayer?.id).toBe(first.id)
   })
 
@@ -118,7 +122,8 @@ describe('cluster timeline contexts', () => {
 
     const asset = store.assets.find((item) => item.id === empty.assetId)
     expect(asset).toMatchObject({ kind: 'composition', name: empty.name })
-    expect(asset?.layerTemplate?.children).toEqual([])
+    expect(asset?.layerTemplate?.children).toHaveLength(2)
+    expect(asset?.layerTemplate?.children?.every((layer) => layer.isPlaceholder)).toBe(true)
     expect(asset?.sizeLabel).toBe('0 reusable layers')
   })
 
@@ -132,10 +137,10 @@ describe('cluster timeline contexts', () => {
 
     const asset = store.assets.find((item) => item.id === cluster.assetId)!
     expect(store.assets).toHaveLength(assetCount)
-    expect(asset.layerTemplate?.children).toHaveLength(2)
+    expect(asset.layerTemplate?.children).toHaveLength(4)
     expect(asset.sizeLabel).toBe('2 reusable layers')
     // The refreshed template is what a later drop instantiates.
-    expect(store.addAssetToTimeline(asset.id, 0)!.children).toHaveLength(2)
+    expect(store.addAssetToTimeline(asset.id, 0)!.children).toHaveLength(4)
   })
 
   it('gives every tab its own playhead', () => {

@@ -1,37 +1,38 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
 import { storeToRefs } from 'pinia'
 import { Check, ChevronDown, CircleCheck, Download, Film, FolderOpen, Gauge, HardDrive, Info, MonitorUp, Play } from '@lucide/vue'
 import { useEditorStore } from '@/stores/editor'
 
 const store = useEditorStore()
 const { project, exportProgress } = storeToRefs(store)
-const filename = ref('Beyond_the_Horizon_Final')
+const filename = ref(`${project.value.name.replace(/\W+/g, '_')}_Final`)
 const includeAudio = ref(true)
 const hardware = ref(true)
+const totalFrames = computed(() => Math.ceil(project.value.duration * project.value.frameRate))
 </script>
 
 <template>
   <section class="export-workspace">
     <div class="export-sidebar">
       <header><Download :size="15" /><strong>Deliver</strong></header>
-      <button class="preset active" type="button"><span><Film :size="14" /></span><div><strong>Web · High Quality</strong><small>H.264 · 1920 × 1080</small></div><Check :size="12" /></button>
+      <button class="preset active" type="button"><span><Film :size="14" /></span><div><strong>Web · High Quality</strong><small>H.264 · {{ project.width }} × {{ project.height }}</small></div><Check :size="12" /></button>
       <button class="preset" type="button"><span><MonitorUp :size="14" /></span><div><strong>Master · ProRes</strong><small>Highest quality archive</small></div></button>
       <button class="preset" type="button"><span><Play :size="14" /></span><div><strong>Social · Vertical</strong><small>H.264 · 1080 × 1920</small></div></button>
       <span class="sidebar-label">Recent renders</span>
       <div class="recent-render"><CircleCheck :size="13" /><span><strong>Horizon_v08.mp4</strong><small>Today · 284 MB</small></span></div>
     </div>
     <div class="export-form">
-      <header><div><strong>Export composition</strong><span>Main Composition · {{ project.duration.toFixed(1) }} seconds</span></div><span class="capability"><CircleCheck :size="11" /> Hardware encoder available</span></header>
+      <header><div><strong>Export project</strong><span>{{ project.name }} · {{ project.duration.toFixed(1) }} seconds</span></div><span class="capability"><CircleCheck :size="11" /> Hardware encoder available</span></header>
       <div class="export-scroll">
         <section><h3>Output</h3><div class="form-grid"><label>Filename</label><div class="field wide"><input v-model="filename" /><span>.mp4</span></div><label>Destination</label><button class="field wide" type="button"><FolderOpen :size="12" /> Downloads <span>Choose…</span></button></div></section>
         <section><h3>Video</h3><div class="form-grid"><label>Format</label><button class="field" type="button">MP4 <ChevronDown :size="11" /></button><label>Codec</label><button class="field" type="button">H.264 <ChevronDown :size="11" /></button><label>Resolution</label><button class="field" type="button">{{ project.width }} × {{ project.height }} <ChevronDown :size="11" /></button><label>Frame rate</label><button class="field" type="button">{{ project.frameRate }} fps <ChevronDown :size="11" /></button><label>Quality</label><button class="field" type="button">High · 24 Mbps <ChevronDown :size="11" /></button><label>Color space</label><button class="field" type="button">Rec. 709 <ChevronDown :size="11" /></button></div></section>
         <section><h3>Audio</h3><div class="check-row"><button type="button" :class="{ checked: includeAudio }" @click="includeAudio = !includeAudio"><Check v-if="includeAudio" :size="10" /></button><span><strong>Include audio</strong><small>AAC · 48 kHz · 320 kbps · Stereo</small></span></div></section>
-        <section><h3>Range & acceleration</h3><div class="form-grid"><label>Render range</label><button class="field" type="button">Entire composition <ChevronDown :size="11" /></button><label>Frames</label><div class="field">0 – {{ project.duration * project.frameRate - 1 }}</div></div><div class="check-row"><button type="button" :class="{ checked: hardware }" @click="hardware = !hardware"><Check v-if="hardware" :size="10" /></button><span><strong>Hardware acceleration</strong><small>Use VideoEncoder when supported</small></span></div></section>
+        <section><h3>Range & acceleration</h3><div class="form-grid"><label>Render range</label><button class="field" type="button">Entire composition <ChevronDown :size="11" /></button><label>Frames</label><div class="field">0 – {{ totalFrames - 1 }}</div></div><div class="check-row"><button type="button" :class="{ checked: hardware }" @click="hardware = !hardware"><Check v-if="hardware" :size="10" /></button><span><strong>Hardware acceleration</strong><small>Use VideoEncoder when supported</small></span></div></section>
         <div class="estimate"><HardDrive :size="15" /><span><strong>Estimated file size</strong><small>52–68 MB · 00:00:18:00</small></span><Gauge :size="15" /><span><strong>Estimated render</strong><small>About 12 seconds</small></span></div>
       </div>
       <footer>
-        <div v-if="exportProgress > 0" class="render-progress"><span><i :style="{ width: `${exportProgress}%` }" /></span><small>{{ exportProgress < 100 ? `Rendering frame ${Math.round(exportProgress * 5.4)} of 540` : 'Export complete' }}</small></div>
+        <div v-if="exportProgress > 0" class="render-progress"><span><i :style="{ width: `${exportProgress}%` }" /></span><small>{{ exportProgress < 100 ? `Rendering frame ${Math.round(exportProgress / 100 * totalFrames)} of ${totalFrames}` : 'Export complete' }}</small></div>
         <span v-else class="export-note"><Info :size="11" /> Preview and export share the same composition renderer.</span>
         <button type="button" class="queue-button">Add to queue</button><button type="button" class="render-button" @click="store.startExport()"><Download :size="13" /> {{ exportProgress > 0 && exportProgress < 100 ? 'Rendering…' : 'Export video' }}</button>
       </footer>

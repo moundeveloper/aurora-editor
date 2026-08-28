@@ -94,6 +94,14 @@ export class AuroraProjectDatabase extends Dexie {
     const projectId = activeId ?? (await this.projects.orderBy('updatedAt').last())?.id
     return projectId ? this.loadSnapshot(projectId) : null
   }
+
+  async listProjects(): Promise<EditorProject[]> {
+    return (await this.projects.orderBy('updatedAt').reverse().toArray())
+  }
+
+  async setActiveProject(projectId: string) {
+    if (await this.projects.get(projectId)) await this.settings.put({ key: 'active-project-id', value: projectId })
+  }
 }
 
 export const auroraProjectDatabase = new AuroraProjectDatabase()

@@ -9,6 +9,7 @@ import {
 import { useEditorStore } from '@/stores/editor'
 import type { HybridWebGLRenderBackend } from '@/engine/rendering/HybridWebGLRenderBackend'
 import { evaluateNumericProperty } from '@/engine/animation/evaluateProperty'
+import { setNumericPropertyAtTime } from '@/engine/animation/editNumericProperty'
 import type { EditorLayer, ShapePathPoint } from '@/models/editor'
 import IconButton from './common/IconButton.vue'
 
@@ -82,7 +83,7 @@ const tools: Array<{ name: MotionTool; icon: typeof MousePointer2 }> = [
 
 const timecode = computed(() => {
   const totalFrames = Math.floor(currentTime.value * project.value.frameRate)
-  const frames = totalFrames % project.value.frameRate
+  const frames = totalFrames % Math.max(1, Math.round(project.value.frameRate))
   const totalSeconds = Math.floor(totalFrames / project.value.frameRate)
   const seconds = totalSeconds % 60
   const minutes = Math.floor(totalSeconds / 60) % 60
@@ -137,12 +138,20 @@ const selectionStyle = computed(() => {
 const stageStyle = computed(() => {
   const availableWidth = Math.max(0, viewportSize.value.width - 48)
   const availableHeight = Math.max(0, viewportSize.value.height - 48)
-  const fitScale = Math.min(availableWidth / 1280, availableHeight / 720)
+  const fitScale = Math.min(availableWidth / project.value.width, availableHeight / project.value.height)
   const displayScale = Math.max(0, fitScale) * (zoom.value / 100)
   return {
-    width: `${1280 * displayScale}px`,
-    height: `${720 * displayScale}px`,
+    width: `${project.value.width * displayScale}px`,
+    height: `${project.value.height * displayScale}px`,
     transform: `translate(${viewportPan.value.x}px, ${viewportPan.value.y}px)`,
+  }
+})
+
+const previewRenderSize = computed(() => {
+  const scale = Math.min(1, 1280 / project.value.width, 720 / project.value.height)
+  return {
+    width: Math.max(1, Math.round(project.value.width * scale)),
+    height: Math.max(1, Math.round(project.value.height * scale)),
   }
 })
 
@@ -158,8 +167,8 @@ async function drawNow() {
       nodeConnections: nodeConnections.value,
       renderRootNodeId: renderRootNodeId.value,
       time: currentTime.value,
-      width: 1280,
-      height: 720,
+      width: previewRenderSize.value.width,
+      height: previewRenderSize.value.height,
       quality: 'preview',
     })
   } catch {
@@ -190,12 +199,11 @@ function setTransformValue(key: 'x' | 'y' | 'scaleX' | 'scaleY' | 'rotation', va
   const layer = targetLayer ?? selectedLayer.value
   if (!layer) return
   const channel = layer.transform[key]
-  channel.value = value
-  const selectedKeyframe = channel.keyframes.find((keyframe) => keyframe.id === selectedKeyframeId.value)
-  const keyAtPlayhead = channel.keyframes.find((keyframe) => Math.abs(keyframe.time - currentTime.value) < .02)
-  if (selectedKeyframe) selectedKeyframe.value = value
-  else if (keyAtPlayhead) keyAtPlayhead.value = value
-  else if (store.autoKey && channel.animated) channel.keyframes.push({ id: crypto.randomUUID(), time: currentTime.value, value, interpolation: 'bezier' })
+  const result = setNumericPropertyAtTime(channel, value, currentTime.value, project.value.frameRate, {
+    autoKey: store.autoKey,
+    selectedKeyframeId: selectedKeyframeId.value,
+  })
+  if (result.keyframeId) selectedKeyframeId.value = result.keyframeId
 }
 
 function scaleAxisForHandle(handle: number): ViewportTransformState['scaleAxis'] {
@@ -514,7 +522,7 @@ onMounted(async () => {
   if (!canvas.value) return
   const { HybridWebGLRenderBackend } = await import('@/engine/rendering/HybridWebGLRenderBackend')
   renderer = new HybridWebGLRenderBackend(canvas.value, '/demo/aurora-ridge.png')
-  await renderer.initialize({ width: 1280, height: 720, pixelRatio: 1 })
+  await renderer.initialize({ ...previewRenderSize.value, pixelRatio: 1 })
   if (canvasWrap.value) {
     resizeObserver = new ResizeObserver(([entry]) => {
       if (!entry) return
@@ -541,7 +549,7 @@ onBeforeUnmount(() => {
   renderer = null
 })
 
-watch([currentTime, layers, scenes3D, nodes, nodeConnections, renderRootNodeId], draw, { deep: true })
+watch([currentTime, project, layers, scenes3D, nodes, nodeConnections, renderRootNodeId], draw, { deep: true })
 </script>
 
 <template>
@@ -567,7 +575,7 @@ watch([currentTime, layers, scenes3D, nodes, nodeConnections, renderRootNodeId],
 
     <div ref="canvasWrap" class="canvas-viewport" :class="{ 'show-grid': showGrid, panning: isViewportPanning, 'hand-tool': activeTool === 'Hand', 'zoom-tool': activeTool === 'Zoom', 'drawing-tool': activeTool === 'Rectangle' || activeTool === 'Ellipse', 'pen-tool': activeTool === 'Pen' }" @pointerdown="onViewportPointerDown" @dblclick.prevent="activeTool === 'Pen' && finishPenFromDoubleClick()" @wheel="onViewportWheel" @auxclick.prevent>
       <div class="canvas-stage" :style="stageStyle">
-        <canvas ref="canvas" width="1280" height="720" aria-label="Composition preview" />
+        <canvas ref="canvas" :width="previewRenderSize.width" :height="previewRenderSize.height" aria-label="Composition preview" />
         <div v-if="shapeDraw" class="shape-draw-preview" :style="shapePreviewStyle" />
         <svg v-if="penDraft" class="pen-draft-overlay" :viewBox="`0 0 ${project.width} ${project.height}`" preserveAspectRatio="none" aria-label="Path being drawn">
           <path :d="penDraftPath" />
@@ -640,7 +648,7 @@ watch([currentTime, layers, scenes3D, nodes, nodeConnections, renderRootNodeId],
 .canvas-viewport { position: relative; display: flex; min-height: 0; flex: 1; align-items: center; justify-content: center; padding: 24px; overflow: hidden; background-color: #08090c; background-image: linear-gradient(45deg, #0c0e13 25%, transparent 25%), linear-gradient(-45deg, #0c0e13 25%, transparent 25%), linear-gradient(45deg, transparent 75%, #0c0e13 75%), linear-gradient(-45deg, transparent 75%, #0c0e13 75%); background-position: 0 0, 0 8px, 8px -8px, -8px 0; background-size: 16px 16px; touch-action: none; }
 .canvas-viewport.drawing-tool, .canvas-viewport.pen-tool { cursor: crosshair; }.canvas-viewport.drawing-tool .layer-hit-target, .canvas-viewport.drawing-tool .transform-box, .canvas-viewport.pen-tool .layer-hit-target, .canvas-viewport.pen-tool .transform-box { pointer-events: none; }
 .canvas-viewport.show-grid::after { position: absolute; inset: 0; background-image: linear-gradient(rgb(142 154 225 / .08) 1px, transparent 1px), linear-gradient(90deg, rgb(142 154 225 / .08) 1px, transparent 1px); background-size: 36px 36px; content: ''; pointer-events: none; }
-.canvas-viewport.hand-tool { cursor: grab; }.canvas-viewport.zoom-tool { cursor: zoom-in; }.canvas-viewport.panning { cursor: grabbing; user-select: none; }.canvas-stage { position: relative; flex: 0 0 auto; aspect-ratio: 16 / 9; box-shadow: 0 15px 45px rgb(0 0 0 / .55), 0 0 0 1px #30333d; transform-origin: center; }
+.canvas-viewport.hand-tool { cursor: grab; }.canvas-viewport.zoom-tool { cursor: zoom-in; }.canvas-viewport.panning { cursor: grabbing; user-select: none; }.canvas-stage { position: relative; flex: 0 0 auto; box-shadow: 0 15px 45px rgb(0 0 0 / .55), 0 0 0 1px #30333d; transform-origin: center; }
 .canvas-stage canvas { display: block; width: 100%; height: 100%; }
 .shape-draw-preview { position: absolute; z-index: 12; background: rgb(140 155 255 / .16); border: 1px solid #a5b4fc; box-shadow: 0 0 0 1px rgb(13 15 24 / .55); pointer-events: none; }
 .pen-draft-overlay { position: absolute; z-index: 12; inset: 0; width: 100%; height: 100%; overflow: visible; pointer-events: none; }.pen-draft-overlay path { fill: rgb(140 155 255 / .1); stroke: #a5b4fc; stroke-width: 3; vector-effect: non-scaling-stroke; }.pen-draft-overlay line { stroke: #717da9; stroke-width: 1; vector-effect: non-scaling-stroke; }.pen-draft-overlay circle.handle { fill: #151821; stroke: #8c9bff; stroke-width: 2; vector-effect: non-scaling-stroke; }.pen-draft-overlay circle.anchor { fill: #e0e7ff; stroke: #4f5d9d; stroke-width: 2; vector-effect: non-scaling-stroke; }

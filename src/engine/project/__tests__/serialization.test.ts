@@ -45,6 +45,18 @@ describe('hybrid project architecture', () => {
     expect(json).not.toContain('MeshStandardMaterial')
   })
 
+  it('preserves an intentionally empty current project', () => {
+    const fallback: SerializedEditorState = { project, layers, scenes3D: [createDemo3DScene()], assets: [], ...createDemoNodeGraph2() }
+    const graph = createDemoNodeGraph([])
+    const empty: SerializedEditorState = { project, layers: [], scenes3D: [], assets: [], nodes: graph.nodes, nodeConnections: graph.connections }
+
+    const restored = deserializeEditorState(serializeEditorState(empty), fallback)
+
+    expect(restored.layers).toEqual([])
+    expect(restored.scenes3D).toEqual([])
+    expect(restored.nodes.map((node) => node.kind)).toEqual(['output'])
+  })
+
   it('migrates a version-one project with the demo 3D scene and layer', () => {
     const fallback: SerializedEditorState = { project, layers, scenes3D: [createDemo3DScene()], assets: [], ...createDemoNodeGraph2() }
     const legacy = JSON.stringify({ project: { ...project, version: 1 }, layers: [layers[0]] })
@@ -147,6 +159,7 @@ describe('hybrid project architecture', () => {
     expect(await database.projects.count()).toBe(1)
     expect(await database.layers.count()).toBe(layers.length)
     expect(await database.scenes3D.count()).toBe(1)
+    expect((await database.listProjects()).map((item) => item.id)).toEqual([project.id])
     await database.delete()
   })
 })

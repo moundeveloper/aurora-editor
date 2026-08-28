@@ -9,13 +9,13 @@ import { cameraIdAtTime } from '@/engine/scene3d/cameraCuts'
 import MSelect, { type MSelectOption } from './common/MSelect.vue'
 
 const store = useEditorStore()
-const { selectedLayer, selectedScene, currentTime } = storeToRefs(store)
+const { selectedLayer, selectedScene, currentTime, assets, project } = storeToRefs(store)
 const viewport = ref<HTMLElement>()
 const canvas = ref<HTMLCanvasElement>()
 const renderError = ref(false)
 const cameraChoice = ref('')
 const followCuts = ref(true)
-const runtimeRegistry = new ThreeSceneRuntimeRegistry()
+const runtimeRegistry = new ThreeSceneRuntimeRegistry(() => renderPreview())
 let renderer: THREE.WebGLRenderer | null = null
 let resizeObserver: ResizeObserver | null = null
 
@@ -27,6 +27,11 @@ const previewCamera = computed(() => {
     ?? null
 })
 const cameraOptions = computed<MSelectOption[]>(() => selectedScene.value?.cameras.map((camera) => ({ value: camera.id, label: camera.name })) ?? [])
+const previewCanvasStyle = computed(() => ({
+  width: project.value.width >= project.value.height ? 'calc(100% - 28px)' : 'auto',
+  height: project.value.width >= project.value.height ? 'auto' : 'calc(100% - 20px)',
+  aspectRatio: `${project.value.width} / ${project.value.height}`,
+}))
 
 function syncProgramCamera() {
   const scene = selectedScene.value
@@ -55,7 +60,7 @@ function renderPreview() {
     renderer.setSize(width, height, false)
     renderer.setClearColor(sceneDefinition.settings.backgroundColor ?? '#090b10', 1)
     renderer.shadowMap.enabled = sceneDefinition.settings.shadows
-    const runtime = runtimeRegistry.get(sceneDefinition, width, height, currentTime.value)
+    const runtime = runtimeRegistry.get(sceneDefinition, width, height, currentTime.value, assets.value)
     runtime.root.visible = selectedLayer.value?.visible !== false
     const camera = runtime.cameras.get(cameraDefinition.id)
     if (!camera) return
@@ -89,7 +94,7 @@ onBeforeUnmount(() => {
   renderer = null
 })
 
-watch([selectedLayer, selectedScene, currentTime], () => {
+watch([selectedLayer, selectedScene, currentTime, assets, project], () => {
   syncProgramCamera()
   renderPreview()
 }, { deep: true, immediate: true })
@@ -114,7 +119,7 @@ watch(() => selectedScene.value?.cameras.map((camera) => camera.id), (cameraIds)
     </header>
 
     <div ref="viewport" class="preview-viewport">
-      <canvas ref="canvas" aria-label="Live 3D camera preview" />
+      <canvas ref="canvas" :style="previewCanvasStyle" aria-label="Live 3D camera preview" />
       <div v-if="renderError || !previewCamera" class="preview-message"><ImageOff :size="15" /> {{ renderError ? 'Preview unavailable' : 'No camera in scene' }}</div>
     </div>
   </section>
@@ -125,6 +130,6 @@ watch(() => selectedScene.value?.cameras.map((camera) => camera.id), (cameraIds)
 .preview-header { display: flex; height: 30px; min-width: 0; flex: 0 0 auto; align-items: center; gap: 7px; padding: 0 8px; color: var(--text-secondary); background: var(--bg-panel-alt); border-bottom: 1px solid var(--border-subtle); }
 .preview-title { display: flex; flex: 0 0 auto; align-items: center; gap: 5px; color: #dce2ff; font-size: 8.5px; font-weight: 620; letter-spacing: .035em; text-transform: uppercase; }.preview-title svg { color: var(--accent); }.preview-divider { width: 1px; height: 16px; flex: 0 0 auto; background: var(--border-subtle); }
 .camera-select { min-width: 88px; flex: 1; }.follow-cuts { display: grid; width: 22px; height: 22px; flex: 0 0 auto; place-items: center; padding: 0; color: var(--text-muted); background: transparent; border: 1px solid transparent; border-radius: 3px; cursor: pointer; }.follow-cuts:hover { color: var(--text-primary); background: var(--bg-hover); }.follow-cuts.active { color: #cdd5ff; background: var(--bg-selected); border-color: var(--accent-border); }.preview-spacer { flex: 0 0 0; }.live-status { display: flex; flex: 0 0 auto; align-items: center; gap: 4px; color: var(--success); font-size: 7px; letter-spacing: .05em; text-transform: uppercase; }.live-status.preview { color: #aeb8e8; }.live-status i { width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
-.preview-viewport { position: relative; display: flex; min-height: 0; flex: 1; align-items: center; justify-content: center; overflow: hidden; background: #080a0e; }.preview-viewport canvas { display: block; width: calc(100% - 28px); max-width: 960px; height: auto; max-height: calc(100% - 20px); aspect-ratio: 16 / 9; background: #090b10; box-shadow: 0 8px 28px rgb(0 0 0 / .48), 0 0 0 1px #30333d; }
+.preview-viewport { position: relative; display: flex; min-height: 0; flex: 1; align-items: center; justify-content: center; overflow: hidden; background: #080a0e; }.preview-viewport canvas { display: block; max-width: calc(100% - 28px); max-height: calc(100% - 20px); background: #090b10; box-shadow: 0 8px 28px rgb(0 0 0 / .48), 0 0 0 1px #30333d; }
 .preview-message { position: absolute; display: flex; align-items: center; gap: 6px; padding: 6px 9px; color: var(--text-muted); background: rgb(12 14 19 / .82); border: 1px solid var(--border-subtle); border-radius: 3px; font-size: 8px; }
 </style>

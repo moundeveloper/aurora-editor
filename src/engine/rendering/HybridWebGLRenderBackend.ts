@@ -215,6 +215,7 @@ export class HybridWebGLRenderBackend implements RenderBackend {
     const layerMap = new Map(request.layers.map((layer) => [layer.id, layer]))
     const sceneMap = new Map(request.scenes3D.map((scene) => [scene.id, scene]))
     await this.resolveFrameTextures(plan, layerMap, request.assets ?? [], request.time)
+    await this.runtimeRegistry.prepareAssets(request.scenes3D, request.assets ?? [])
 
     this.threeRenderer.resetState()
     this.threeRenderer.setRenderTarget(null)
@@ -230,7 +231,7 @@ export class HybridWebGLRenderBackend implements RenderBackend {
       if (pass.backend === 'three-webgl') {
         const scene = pass.sceneId ? sceneMap.get(pass.sceneId) : undefined
         if (!scene) return
-        this.renderThreeLayer(layer, scene, request.time, size.width, size.height, request.project.width, request.project.height, pass.effects, layerMap)
+        this.renderThreeLayer(layer, scene, request.time, size.width, size.height, request.project.width, request.project.height, pass.effects, layerMap, request.assets ?? [])
         threePasses += 1
       } else {
         this.renderPixiLayer(layer, request.time, size.width, size.height, request.project.width, request.project.height, pass.effects, pass.blendMode, layerMap)
@@ -462,9 +463,10 @@ export class HybridWebGLRenderBackend implements RenderBackend {
     projectHeight: number,
     effects: GraphEffects,
     layerMap: Map<string, EditorLayer>,
+    assets: MediaAsset[],
   ) {
     if (!this.threeRenderer) return
-    const runtime = this.runtimeRegistry.get(sceneDefinition, width, height, time)
+    const runtime = this.runtimeRegistry.get(sceneDefinition, width, height, time, assets)
     const cameraId = cameraIdAtTime(sceneDefinition, time)
     const camera = cameraId ? runtime.cameras.get(cameraId) : undefined
     if (!camera) return

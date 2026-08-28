@@ -194,6 +194,11 @@ export interface EditorLayer {
   sceneId?: string
   /** Library entry this cluster publishes itself to, kept in step as the cluster is edited. */
   assetId?: string
+  /** False after the user explicitly removes this reusable item from the Library. */
+  libraryPublished?: boolean
+  /** Independent canvas size for cluster compositions. */
+  width?: number
+  height?: number
   children?: EditorLayer[]
   isPlaceholder?: boolean
   color: string
@@ -208,7 +213,7 @@ export interface EditorLayer {
 export interface MediaAsset {
   id: string
   name: string
-  kind: 'video' | 'image' | 'audio' | 'composition' | 'model3d' | 'hdr' | 'texture'
+  kind: 'video' | 'image' | 'audio' | 'composition' | 'scene3d' | 'model3d' | 'hdr' | 'texture'
   /**
    * Content address of the bytes in the media vault. Absent for assets that have none — a saved
    * composition, or an import made while the media server was unreachable.
@@ -218,6 +223,10 @@ export interface MediaAsset {
   sizeBytes?: number
   /** Reusable timeline composition, captured when a cluster is created. */
   layerTemplate?: EditorLayer
+  /** Timeline wrapper for a reusable 3D scene. Kept separate from cluster compositions. */
+  sceneLayerTemplate?: EditorLayer
+  /** Reusable 3D scene definition paired with a 3D timeline-layer template. */
+  sceneTemplate?: Aurora3DScene
   duration?: number
   dimensions?: string
   thumbnail?: string

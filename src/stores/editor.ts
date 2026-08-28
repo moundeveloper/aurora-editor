@@ -8,7 +8,7 @@ import type {
 } from '@/models/editor'
 import { evaluateNumericProperty } from '@/engine/animation/evaluateProperty'
 import { ensureNumericKeyframe, setNumericPropertyAtTime, toggleNumericKeyframe } from '@/engine/animation/editNumericProperty'
-import { deserializeEditorState, serializeEditorState } from '@/engine/project/serialization'
+import { CURRENT_PROJECT_VERSION, deserializeEditorState, serializeEditorState } from '@/engine/project/serialization'
 import { auroraProjectDatabase } from '@/engine/project/AuroraProjectDatabase'
 import { importAsset, mediaUrl } from '@/services/mediaLibrary'
 import { kindForFile } from '#shared/contracts.ts'
@@ -30,9 +30,9 @@ const property = (id: string, value: number): AnimatableProperty<number> => ({
   keyframes: [],
 })
 
-const makeTransform = (prefix: string) => ({
-  x: property(`${prefix}-x`, 960),
-  y: property(`${prefix}-y`, 540),
+const makeTransform = (prefix: string, x = 960, y = 540) => ({
+  x: property(`${prefix}-x`, x),
+  y: property(`${prefix}-y`, y),
   scaleX: property(`${prefix}-sx`, 100),
   scaleY: property(`${prefix}-sy`, 100),
   rotation: property(`${prefix}-rotation`, 0),
@@ -40,6 +40,19 @@ const makeTransform = (prefix: string) => ({
 })
 
 export type TimelineLayerPreset = 'adjustment' | 'cinematic-grade' | '3d-scene' | 'text' | 'rectangle' | 'ellipse' | 'image' | 'video' | 'audio'
+
+export interface NewProjectOptions {
+  name: string
+  width: number
+  height: number
+  frameRate: number
+}
+
+export interface ClusterSettings {
+  name: string
+  width: number
+  height: number
+}
 
 
 /** Library kind for a dropped file, from its extension first and the browser's MIME type second. */
@@ -58,6 +71,10 @@ export const useEditorStore = defineStore('editor', () => {
     updatedAt: Date.now(),
     version: 3,
   })
+  const makeProjectTransform = (prefix: string) => makeTransform(prefix, project.value.width / 2, project.value.height / 2)
+  const availableProjects = ref<EditorProject[]>([])
+  const projectBrowserBusy = ref(false)
+  const projectBrowserError = ref('')
 
   const workspace = ref<WorkspaceId>('Motion')
   const currentTime = ref(4.2)
@@ -133,24 +150,51 @@ export const useEditorStore = defineStore('editor', () => {
   let saveQueue: Promise<void> = Promise.resolve()
 
   function applyLoadedState(state: SerializedEditorState) {
+    const addedStarterTracks = state.layers.length === 0
     project.value = state.project
     layers.value = state.layers
     scenes3D.value = state.scenes3D
     assets.value = state.assets
     nodes.value = state.nodes
     nodeConnections.value = state.nodeConnections
+    if (!layers.value.length) layers.value = [makeEmptyTrack('visual'), makeEmptyTrack('audio')]
     // Repair before filling gaps, or a duplicate about to be folded away could be re-published.
     dedupeCompositionAssets()
     ensureClusterAssets()
+    ensure3DSceneAssets()
     /*
      * The default selection is a layer id from the starter project. A restored project usually has
      * no such layer, and the selection would otherwise point at nothing while still reading as a
      * selection — a transform box in the viewport with no clip behind it.
      */
     if (!findLayerDeep(layers.value, selectedLayerId.value ?? '')) {
-      selectedLayerId.value = null
+      selectedLayerId.value = layers.value[0]?.id ?? null
       selectedKeyframeId.value = null
     }
+    playing.value = false
+    currentTime.value = 0
+    workspace.value = 'Motion'
+    selectedNodeId.value = nodes.value.find((node) => node.kind === 'output')?.id ?? nodes.value[0]?.id ?? ''
+    selectedConnectionId.value = null
+    renderRootNodeId.value = null
+    selectedSceneId.value = scenes3D.value[0]?.id ?? ''
+    const firstScene = scenes3D.value[0]
+    selectedSceneEntityId.value = firstScene?.objects[0]?.id ?? firstScene?.cameras[0]?.id ?? firstScene?.lights[0]?.id ?? firstScene?.paths[0]?.id ?? ''
+    openClusterTabs.value = []
+    activeClusterId.value = null
+    resetEditorHistory()
+    return addedStarterTracks
+  }
+
+  function updateProjectSummary(summary: EditorProject) {
+    const next = structuredClone(toRaw(summary))
+    availableProjects.value = [next, ...availableProjects.value.filter((item) => item.id !== next.id)]
+      .sort((left, right) => right.updatedAt - left.updatedAt)
+  }
+
+  async function refreshProjects() {
+    availableProjects.value = await auroraProjectDatabase.listProjects()
+    return availableProjects.value
   }
 
   function currentState(): SerializedEditorState {
@@ -176,16 +220,85 @@ export const useEditorStore = defineStore('editor', () => {
       const loadedState = databaseState
         ? deserializeEditorState(JSON.stringify(databaseState), defaultState)
         : deserializeEditorState(legacyRaw, defaultState)
-      applyLoadedState(loadedState)
+      const addedStarterTracks = applyLoadedState(loadedState)
       persistenceReady = true
-      if (!databaseState) await saveProjectNow()
+      if (!databaseState || addedStarterTracks) {
+        changeRevision += 1
+        await saveProjectNow()
+      }
+      await refreshProjects()
       if (legacyRaw && saveStatus.value === 'Saved') window.localStorage.removeItem('aurora-editor-project')
     } catch (error) {
       applyLoadedState(deserializeEditorState(legacyRaw, defaultState))
       persistenceReady = true
       saveStatus.value = 'Save failed'
+      availableProjects.value = [structuredClone(toRaw(project.value))]
       console.error('Aurora project database initialization failed', error)
     }
+  }
+
+  function validProjectFormat(width: number, height: number, frameRate: number) {
+    return {
+      width: Math.round(Math.max(16, Math.min(16384, Number.isFinite(width) ? width : 1920))),
+      height: Math.round(Math.max(16, Math.min(16384, Number.isFinite(height) ? height : 1080))),
+      frameRate: Math.max(1, Math.min(240, Number.isFinite(frameRate) ? frameRate : 30)),
+    }
+  }
+
+  async function openProject(projectId: string) {
+    projectBrowserBusy.value = true
+    projectBrowserError.value = ''
+    try {
+      await flushProjectSave()
+      const snapshot = await auroraProjectDatabase.loadSnapshot(projectId)
+      if (!snapshot) throw new Error('The selected project could not be found.')
+      const addedStarterTracks = applyLoadedState(deserializeEditorState(JSON.stringify(snapshot), defaultState))
+      if (addedStarterTracks) {
+        changeRevision += 1
+        await saveProjectNow()
+      } else await auroraProjectDatabase.setActiveProject(projectId)
+      saveStatus.value = 'Saved'
+      return true
+    } catch (error) {
+      projectBrowserError.value = error instanceof Error ? error.message : 'The project could not be opened.'
+      return false
+    } finally {
+      projectBrowserBusy.value = false
+    }
+  }
+
+  async function createEmptyProject(options: NewProjectOptions) {
+    projectBrowserBusy.value = true
+    projectBrowserError.value = ''
+    try {
+      await flushProjectSave()
+      const format = validProjectFormat(options.width, options.height, options.frameRate)
+      const nextProject: EditorProject = {
+        id: crypto.randomUUID(),
+        name: options.name.trim() || 'Untitled Project',
+        ...format,
+        duration: 10,
+        backgroundColor: '#080b12',
+        updatedAt: Date.now(),
+        version: CURRENT_PROJECT_VERSION,
+      }
+      const graph = createDemoNodeGraph([])
+      applyLoadedState({ project: nextProject, layers: [], scenes3D: [], assets: [], nodes: graph.nodes, nodeConnections: graph.connections })
+      changeRevision += 1
+      await saveProjectNow()
+      await refreshProjects()
+      return true
+    } catch (error) {
+      projectBrowserError.value = error instanceof Error ? error.message : 'The project could not be created.'
+      return false
+    } finally {
+      projectBrowserBusy.value = false
+    }
+  }
+
+  function setProjectFormat(width: number, height: number, frameRate: number) {
+    Object.assign(project.value, validProjectFormat(width, height, frameRate))
+    markChanged()
   }
 
   /**
@@ -194,6 +307,123 @@ export const useEditorStore = defineStore('editor', () => {
    */
   const openClusterTabs = ref<string[]>([])
   const activeClusterId = ref<string | null>(null)
+
+  interface EditorHistorySnapshot {
+    state: SerializedEditorState
+    workspace: WorkspaceId
+    currentTime: number
+    selectedLayerId: string | null
+    selectedKeyframeId: string | null
+    selectedNodeId: string
+    selectedConnectionId: string | null
+    renderRootNodeId: string | null
+    selectedSceneId: string
+    selectedSceneEntityId: string
+    openClusterTabs: string[]
+    activeClusterId: string | null
+  }
+
+  const undoStack = ref<EditorHistorySnapshot[]>([])
+  const redoStack = ref<EditorHistorySnapshot[]>([])
+  const canUndo = computed(() => undoStack.value.length > 0)
+  const canRedo = computed(() => redoStack.value.length > 0)
+  let historyPresent: EditorHistorySnapshot | null = null
+  let restoringHistory = false
+
+  function captureHistorySnapshot(): EditorHistorySnapshot {
+    return {
+      state: JSON.parse(serializeEditorState(currentState())) as SerializedEditorState,
+      workspace: workspace.value,
+      currentTime: currentTime.value,
+      selectedLayerId: selectedLayerId.value,
+      selectedKeyframeId: selectedKeyframeId.value,
+      selectedNodeId: selectedNodeId.value,
+      selectedConnectionId: selectedConnectionId.value,
+      renderRootNodeId: renderRootNodeId.value,
+      selectedSceneId: selectedSceneId.value,
+      selectedSceneEntityId: selectedSceneEntityId.value,
+      openClusterTabs: [...openClusterTabs.value],
+      activeClusterId: activeClusterId.value,
+    }
+  }
+
+  function resetEditorHistory() {
+    undoStack.value = []
+    redoStack.value = []
+    historyPresent = captureHistorySnapshot()
+  }
+
+  function historySignature(snapshot: EditorHistorySnapshot) {
+    return JSON.stringify({
+      ...snapshot,
+      state: { ...snapshot.state, project: { ...snapshot.state.project, updatedAt: 0 } },
+    })
+  }
+
+  function recordHistoryChange() {
+    if (restoringHistory) return
+    const current = captureHistorySnapshot()
+    if (historyPresent && historySignature(historyPresent) === historySignature(current)) return
+    if (historyPresent) {
+      const previousInEditingWorkspace = { ...historyPresent, workspace: current.workspace }
+      undoStack.value = [...undoStack.value.slice(-99), previousInEditingWorkspace]
+    }
+    historyPresent = current
+    redoStack.value = []
+  }
+
+  function restoreHistorySnapshot(snapshot: EditorHistorySnapshot) {
+    restoringHistory = true
+    const state = JSON.parse(JSON.stringify(snapshot.state)) as SerializedEditorState
+    project.value = state.project
+    layers.value = state.layers
+    scenes3D.value = state.scenes3D
+    assets.value = state.assets
+    nodes.value = state.nodes
+    nodeConnections.value = state.nodeConnections
+    workspace.value = snapshot.workspace
+    currentTime.value = Math.max(0, Math.min(project.value.duration, snapshot.currentTime))
+    selectedLayerId.value = findLayerDeep(layers.value, snapshot.selectedLayerId ?? '')?.id ?? layers.value[0]?.id ?? null
+    selectedKeyframeId.value = snapshot.selectedKeyframeId
+    selectedNodeId.value = nodes.value.some((node) => node.id === snapshot.selectedNodeId) ? snapshot.selectedNodeId : nodes.value[0]?.id ?? ''
+    selectedConnectionId.value = nodeConnections.value.some((connection) => connection.id === snapshot.selectedConnectionId) ? snapshot.selectedConnectionId : null
+    renderRootNodeId.value = nodes.value.some((node) => node.id === snapshot.renderRootNodeId) ? snapshot.renderRootNodeId : null
+    selectedSceneId.value = scenes3D.value.some((scene) => scene.id === snapshot.selectedSceneId) ? snapshot.selectedSceneId : scenes3D.value[0]?.id ?? ''
+    const scene = scenes3D.value.find((item) => item.id === selectedSceneId.value)
+    const entityIds = new Set([...(scene?.objects ?? []), ...(scene?.cameras ?? []), ...(scene?.lights ?? []), ...(scene?.paths ?? [])].map((entity) => entity.id))
+    selectedSceneEntityId.value = entityIds.has(snapshot.selectedSceneEntityId)
+      ? snapshot.selectedSceneEntityId
+      : scene?.objects[0]?.id ?? scene?.cameras[0]?.id ?? scene?.lights[0]?.id ?? scene?.paths[0]?.id ?? ''
+    openClusterTabs.value = snapshot.openClusterTabs.filter((id) => findLayerDeep(layers.value, id)?.type === 'cluster')
+    activeClusterId.value = snapshot.activeClusterId && openClusterTabs.value.includes(snapshot.activeClusterId) ? snapshot.activeClusterId : null
+    playing.value = false
+    selectedMaskSegment.value = null
+    restoringHistory = false
+  }
+
+  function undo() {
+    const target = undoStack.value.at(-1)
+    if (!target) return false
+    const current = historyPresent ?? captureHistorySnapshot()
+    undoStack.value = undoStack.value.slice(0, -1)
+    redoStack.value = [...redoStack.value.slice(-99), current]
+    restoreHistorySnapshot(target)
+    historyPresent = captureHistorySnapshot()
+    scheduleProjectSave()
+    return true
+  }
+
+  function redo() {
+    const target = redoStack.value.at(-1)
+    if (!target) return false
+    const current = historyPresent ?? captureHistorySnapshot()
+    redoStack.value = redoStack.value.slice(0, -1)
+    undoStack.value = [...undoStack.value.slice(-99), current]
+    restoreHistorySnapshot(target)
+    historyPresent = captureHistorySnapshot()
+    scheduleProjectSave()
+    return true
+  }
 
   function findLayerDeep(list: EditorLayer[], id: string): EditorLayer | null {
     for (const layer of list) {
@@ -225,17 +455,46 @@ export const useEditorStore = defineStore('editor', () => {
     return list.flatMap((layer) => [layer, ...(layer.children ? flattenLayers(layer.children) : [])])
   }
 
+  function isClusterNameAvailable(name: string, excludeAssetId?: string) {
+    const normalized = name.trim().toLocaleLowerCase()
+    if (!normalized) return false
+    return !assets.value.some((asset) => asset.kind === 'composition'
+      && asset.id !== excludeAssetId
+      && asset.name.trim().toLocaleLowerCase() === normalized)
+  }
+
+  function nextClusterName() {
+    let name = ''
+    do name = `Cluster ${clusterCounter++}`
+    while (!isClusterNameAvailable(name))
+    return name
+  }
+
+  function validClusterSettings(settings: Partial<ClusterSettings> = {}): ClusterSettings {
+    return {
+      name: settings.name?.trim() || nextClusterName(),
+      width: Math.round(Math.max(16, Math.min(16384, Number.isFinite(settings.width) ? settings.width! : project.value.width))),
+      height: Math.round(Math.max(16, Math.min(16384, Number.isFinite(settings.height) ? settings.height! : project.value.height))),
+    }
+  }
+
   function renameTimelineLayers(layerIds: string[], name: string) {
     const nextName = name.trim()
     if (!nextName) return false
     const ids = new Set(layerIds)
     const targets = flattenLayers().filter((layer) => ids.has(layer.id))
     if (!targets.length) return false
+    const clusterTarget = targets.find((layer) => layer.type === 'cluster')
+    if (clusterTarget && !isClusterNameAvailable(nextName, clusterTarget.assetId)) return false
     targets.forEach((layer) => {
       layer.name = nextName
+      if (layer.type === 'cluster') publishClusterAsset(layer)
       if (layer.type === '3d-scene' && layer.sceneId) {
         const scene = scenes3D.value.find((item) => item.id === layer.sceneId)
-        if (scene) scene.name = nextName
+        if (scene) {
+          scene.name = nextName
+          publish3DSceneAsset(layer, scene)
+        }
       }
     })
     markChanged()
@@ -269,6 +528,16 @@ export const useEditorStore = defineStore('editor', () => {
     })
     const deletedTree = flattenLayers(deleted)
     const deletedIds = new Set(deletedTree.map((layer) => layer.id))
+    if (ripple.value && options.keepTracks) {
+      const frameTolerance = (0.5 / project.value.frameRate) + 0.0001
+      layerList().filter((layer) => !ids.has(layer.id)).forEach((layer) => {
+        const trackId = trackKeyOf(layer)
+        const removedBefore = deleted
+          .filter((item) => trackKeyOf(item) === trackId && item.start + item.duration <= layer.start + frameTolerance)
+          .reduce((duration, item) => duration + item.duration, 0)
+        if (removedBefore > 0) shiftLayerTiming(layer, -removedBefore)
+      })
+    }
     replaceLayerList(layerList().filter((layer) => !ids.has(layer.id)))
     if (options.keepTracks) {
       // Descending, so each insertion index still refers to the position it was recorded at.
@@ -376,20 +645,12 @@ export const useEditorStore = defineStore('editor', () => {
     const layer = selectedLayer.value
     if (!layer) return
     const channel = layer.transform[key]
-    channel.value = value
-    if (channel.animated) {
-      const selectedKeyframe = channel.keyframes.find((item) => item.id === selectedKeyframeId.value)
-      const tolerance = (0.5 / project.value.frameRate) + 0.0001
-      const keyframeAtPlayhead = channel.keyframes.find((item) => Math.abs(item.time - currentTime.value) <= tolerance)
-      const keyframeToUpdate = selectedKeyframe ?? keyframeAtPlayhead
-      if (keyframeToUpdate) keyframeToUpdate.value = value
-      else if (autoKey.value) {
-        const keyframe = { id: crypto.randomUUID(), time: currentTime.value, value, interpolation: 'bezier' as const }
-        channel.keyframes.push(keyframe)
-        channel.keyframes.sort((left, right) => left.time - right.time)
-        selectedKeyframeId.value = keyframe.id
-      }
-    }
+    const result = setNumericPropertyAtTime(channel, value, currentTime.value, project.value.frameRate, {
+      autoKey: autoKey.value,
+      selectedKeyframeId: selectedKeyframeId.value,
+    })
+    if (!result.changed) return
+    if (result.keyframeId) selectedKeyframeId.value = result.keyframeId
     markChanged()
   }
 
@@ -425,6 +686,7 @@ export const useEditorStore = defineStore('editor', () => {
         entry.hash = stored.hash
         entry.mimeType = stored.mimeType
         entry.sizeBytes = stored.sizeBytes
+        if (stored.width && stored.height) entry.dimensions = `${stored.width} × ${stored.height}`
         // The object URL was a stand-in; the vault copy outlives the tab, so release the blob.
         if (entry.thumbnail?.startsWith('blob:')) URL.revokeObjectURL(entry.thumbnail)
         entry.thumbnail = stored.kind === 'image' || stored.kind === 'video' ? mediaUrl(stored.hash) : undefined
@@ -439,6 +701,34 @@ export const useEditorStore = defineStore('editor', () => {
     markChanged()
   }
 
+  function mediaAssetReferenceCount(assetId: string) {
+    const layerReferences = flattenLayers().filter((layer) => layer.assetId === assetId).length
+    const sceneReferences = scenes3D.value.reduce((count, scene) => count
+      + (scene.environmentAssetId === assetId ? 1 : 0)
+      + scene.objects.filter((object) => object.assetId === assetId).length, 0)
+    return layerReferences + sceneReferences
+  }
+
+  /** Removes a Library entry while leaving authored layers/scenes in place and explicitly unlinked. */
+  function deleteMediaAsset(assetId: string) {
+    const asset = assets.value.find((item) => item.id === assetId)
+    if (!asset) return false
+    flattenLayers().forEach((layer) => {
+      if (layer.assetId !== assetId) return
+      delete layer.assetId
+      if (layer.type === 'cluster' || layer.type === '3d-scene') layer.libraryPublished = false
+    })
+    scenes3D.value.forEach((scene) => {
+      if (scene.environmentAssetId === assetId) delete scene.environmentAssetId
+      scene.objects.forEach((object) => { if (object.assetId === assetId) delete object.assetId })
+    })
+    if (asset.thumbnail?.startsWith('blob:')) URL.revokeObjectURL(asset.thumbnail)
+    assets.value = assets.value.filter((item) => item.id !== assetId)
+    importFailures.value = importFailures.value.filter((failure) => failure.assetId !== assetId)
+    markChanged()
+    return true
+  }
+
   /**
    * `toRaw` only unwraps the object it is handed, so a cluster still holds reactive children and
    * cannot be structurally cloned. Unwrap the whole tree before copying it.
@@ -448,13 +738,16 @@ export const useEditorStore = defineStore('editor', () => {
     return raw.children?.length ? { ...raw, children: raw.children.map(rawLayerTree) } : raw
   }
 
+  const raw3DScene = (scene: Aurora3DScene): Aurora3DScene => JSON.parse(JSON.stringify(scene)) as Aurora3DScene
+
   /** `atTime` lands the layer where it was dropped on the timeline; without it, at the playhead. */
   function addAssetToTimeline(assetId: string, atTime?: number, trackId?: string | null) {
     const asset = assets.value.find((item) => item.id === assetId)
     if (!asset || asset.kind === 'model3d' || asset.kind === 'hdr' || asset.kind === 'texture') return
     const dropTime = Math.max(0, Math.min(project.value.duration, atTime ?? currentTime.value))
-    if (asset.layerTemplate) {
-      const layer = structuredClone(rawLayerTree(asset.layerTemplate))
+    const reusableTemplate = asset.kind === 'scene3d' ? asset.sceneLayerTemplate : asset.layerTemplate
+    if (reusableTemplate) {
+      const layer = structuredClone(rawLayerTree(reusableTemplate))
       const delta = dropTime - layer.start
       const renewLayer = (item: EditorLayer) => {
         item.id = crypto.randomUUID()
@@ -473,7 +766,19 @@ export const useEditorStore = defineStore('editor', () => {
       // Templates snapshotted before the link existed carry no assetId; without one the copy reads
       // as a brand new cluster and earns a duplicate Library entry.
       layer.assetId = asset.id
+      layer.libraryPublished = true
       layer.name = asset.name
+      if (asset.kind === 'scene3d') {
+        if (!asset.sceneTemplate) return
+        const scene = raw3DScene(asset.sceneTemplate)
+        scene.id = crypto.randomUUID()
+        scene.name = asset.name
+        scene.revision += 1
+        layer.sceneId = scene.id
+        scenes3D.value.push(scene)
+        selectedSceneId.value = scene.id
+        selectedSceneEntityId.value = scene.objects[0]?.id ?? scene.cameras[0]?.id ?? scene.lights[0]?.id ?? scene.paths[0]?.id ?? ''
+      }
       layerList().splice(0, 0, layer)
       project.value.duration = Math.max(project.value.duration, layer.start + layer.duration)
       selectedLayerId.value = layer.id
@@ -481,7 +786,7 @@ export const useEditorStore = defineStore('editor', () => {
       markChanged()
       return layer
     }
-    const type = asset.kind === 'composition' ? 'image' : asset.kind
+    const type = asset.kind === 'composition' ? 'image' : asset.kind === 'scene3d' ? '3d-scene' : asset.kind
     const layer: EditorLayer = {
       id: crypto.randomUUID(), name: asset.name.replace(/\.[^.]+$/, ''), type,
       // The link back to the library entry, and through it to the media the vault serves.
@@ -489,7 +794,7 @@ export const useEditorStore = defineStore('editor', () => {
       start: dropTime, duration: Math.min(asset.duration ?? 6, Math.max(1 / project.value.frameRate, project.value.duration - dropTime)),
       color: type === 'audio' ? '#5c9b82' : type === 'image' ? '#6b99d5' : '#5477a8',
       visible: true, locked: false, muted: false, expanded: false,
-      transform: makeTransform(crypto.randomUUID()), effects: [],
+      transform: makeProjectTransform(crypto.randomUUID()), effects: [],
     }
 
     /*
@@ -566,7 +871,7 @@ export const useEditorStore = defineStore('editor', () => {
       locked: false,
       muted: false,
       expanded: false,
-      transform: makeTransform(id),
+      transform: makeProjectTransform(id),
       effects: [],
     }
     layer.transform.x.value = Math.max(0, Math.min(project.value.width, x))
@@ -614,7 +919,7 @@ export const useEditorStore = defineStore('editor', () => {
       locked: false,
       muted: false,
       expanded: false,
-      transform: makeTransform(id),
+      transform: makeProjectTransform(id),
       effects: [],
     }
     layer.transform.x.value = centerX
@@ -674,7 +979,7 @@ export const useEditorStore = defineStore('editor', () => {
       locked: false,
       muted: false,
       expanded: false,
-      transform: makeTransform(id),
+      transform: makeProjectTransform(id),
       effects: preset === 'cinematic-grade' ? ['Color Matrix', 'Vignette'] : isAudio ? ['Gain'] : [],
     }
 
@@ -686,6 +991,7 @@ export const useEditorStore = defineStore('editor', () => {
       layer.sceneId = scene.id
       selectedSceneId.value = scene.id
       selectedSceneEntityId.value = scene.cameras[0]!.id
+      publish3DSceneAsset(layer, scene)
     }
 
     layerList().splice(isAudio ? layerList().length : 0, 0, layer)
@@ -764,9 +1070,35 @@ export const useEditorStore = defineStore('editor', () => {
       locked: false,
       muted: false,
       expanded: false,
-      transform: makeTransform(id),
+      transform: makeProjectTransform(id),
       effects: [],
     }
+  }
+
+  /** Moves a clip and every piece of timing data that belongs to it by the same amount. */
+  function shiftLayerTiming(layer: EditorLayer, delta: number) {
+    if (!delta) return
+    layer.start = Math.max(0, layer.start + delta)
+    ;(Object.keys(layer.transform) as Array<keyof EditorLayer['transform']>).forEach((key) => {
+      layer.transform[key].keyframes.forEach((keyframe) => { keyframe.time = Math.max(0, keyframe.time + delta) })
+    })
+    layer.children?.forEach((child) => shiftLayerTiming(child, delta))
+  }
+
+  /** Shifts clips at or after a cut point on one track. Used by ripple trims and ripple deletes. */
+  function rippleTrackSegments(trackId: string, fromTime: number, delta: number, excludedLayerIds: string[] = []) {
+    if (!ripple.value || Math.abs(delta) < 0.000001) return 0
+    const excluded = new Set(excludedLayerIds)
+    const tolerance = (0.5 / project.value.frameRate) + 0.0001
+    const targets = layerList().filter((layer) => !layer.isPlaceholder
+      && !excluded.has(layer.id)
+      && (layer.trackId ?? layer.id) === trackId
+      && layer.start >= fromTime - tolerance)
+    targets.forEach((layer) => shiftLayerTiming(layer, delta))
+    if (!activeClusterId.value && delta > 0 && targets.length) {
+      project.value.duration = Math.max(project.value.duration, ...targets.map((layer) => layer.start + layer.duration))
+    }
+    return targets.length
   }
 
   function addEmptyTrack(category: 'visual' | 'audio') {
@@ -785,11 +1117,13 @@ export const useEditorStore = defineStore('editor', () => {
    * rather than left describing whatever the cluster looked like the moment it was made.
    */
   function publishClusterAsset(cluster: EditorLayer) {
-    const count = cluster.children?.length ?? 0
+    cluster.libraryPublished = true
+    const count = cluster.children?.filter((child) => !child.isPlaceholder).length ?? 0
     const existing = cluster.assetId ? assets.value.find((asset) => asset.id === cluster.assetId) : undefined
     if (existing) {
       existing.name = cluster.name
       existing.duration = cluster.duration
+      existing.dimensions = `${cluster.width ?? project.value.width} × ${cluster.height ?? project.value.height}`
       existing.sizeLabel = `${count} reusable ${count === 1 ? 'layer' : 'layers'}`
       existing.layerTemplate = structuredClone(rawLayerTree(cluster))
       return existing
@@ -805,14 +1139,79 @@ export const useEditorStore = defineStore('editor', () => {
       name: cluster.name,
       kind: 'composition',
       duration: cluster.duration,
-      dimensions: `${project.value.width} × ${project.value.height}`,
+      dimensions: `${cluster.width ?? project.value.width} × ${cluster.height ?? project.value.height}`,
       sizeLabel: `${count} reusable ${count === 1 ? 'layer' : 'layers'}`,
       layerTemplate: undefined,
     }
     cluster.assetId = asset.id
+    cluster.libraryPublished = true
     asset.layerTemplate = structuredClone(rawLayerTree(cluster))
     assets.value.unshift(asset)
     return asset
+  }
+
+  function updateClusterSettings(assetId: string, requestedSettings: ClusterSettings) {
+    const asset = assets.value.find((item) => item.id === assetId && item.kind === 'composition')
+    if (!asset) return false
+    const settings = validClusterSettings(requestedSettings)
+    if (!isClusterNameAvailable(settings.name, assetId)) return false
+    const linked = flattenLayers().filter((layer) => layer.type === 'cluster' && layer.assetId === assetId)
+    linked.forEach((cluster) => {
+      cluster.name = settings.name
+      cluster.width = settings.width
+      cluster.height = settings.height
+      publishClusterAsset(cluster)
+    })
+    asset.name = settings.name
+    asset.dimensions = `${settings.width} × ${settings.height}`
+    if (asset.layerTemplate) {
+      asset.layerTemplate.name = settings.name
+      asset.layerTemplate.width = settings.width
+      asset.layerTemplate.height = settings.height
+    }
+    markChanged()
+    return true
+  }
+
+  /** Publishes a 3D layer and its scene as a reusable Library asset. */
+  function publish3DSceneAsset(layer: EditorLayer, scene?: Aurora3DScene) {
+    if (layer.type !== '3d-scene') return
+    layer.libraryPublished = true
+    const source = scene ?? scenes3D.value.find((item) => item.id === layer.sceneId)
+    if (!source) return
+    const existing = layer.assetId ? assets.value.find((asset) => asset.id === layer.assetId) : undefined
+    if (existing) {
+      existing.name = source.name
+      existing.kind = 'scene3d'
+      existing.duration = layer.duration
+      existing.dimensions = `${project.value.width} × ${project.value.height}`
+      existing.sizeLabel = `${source.objects.length} objects · ${source.cameras.length} cameras`
+      existing.sceneLayerTemplate = structuredClone(rawLayerTree(layer))
+      delete existing.layerTemplate
+      existing.sceneTemplate = raw3DScene(source)
+      return existing
+    }
+    const asset: MediaAsset = {
+      id: crypto.randomUUID(),
+      name: source.name,
+      kind: 'scene3d',
+      duration: layer.duration,
+      dimensions: `${project.value.width} × ${project.value.height}`,
+      sizeLabel: `${source.objects.length} objects · ${source.cameras.length} cameras`,
+    }
+    layer.assetId = asset.id
+    layer.libraryPublished = true
+    asset.sceneLayerTemplate = structuredClone(rawLayerTree(layer))
+    asset.sceneTemplate = raw3DScene(source)
+    assets.value.unshift(asset)
+    return asset
+  }
+
+  function ensure3DSceneAssets(list: EditorLayer[] = layers.value) {
+    list.forEach((layer) => {
+      if (layer.type === '3d-scene' && layer.libraryPublished !== false && !assets.value.some((asset) => asset.id === layer.assetId)) publish3DSceneAsset(layer)
+      if (layer.children?.length) ensure3DSceneAssets(layer.children)
+    })
   }
 
   /**
@@ -875,7 +1274,7 @@ export const useEditorStore = defineStore('editor', () => {
    */
   function ensureClusterAssets(list: EditorLayer[] = layers.value) {
     list.forEach((layer) => {
-      if (layer.type === 'cluster' && !assets.value.some((asset) => asset.id === layer.assetId)) publishClusterAsset(layer)
+      if (layer.type === 'cluster' && layer.libraryPublished !== false && !assets.value.some((asset) => asset.id === layer.assetId)) publishClusterAsset(layer)
       if (layer.children?.length) ensureClusterAssets(layer.children)
     })
   }
@@ -939,14 +1338,20 @@ export const useEditorStore = defineStore('editor', () => {
   }
 
   /** A cluster with nothing in it yet, opened straight away so it can be built from the inside. */
-  function createEmptyCluster() {
+  function createEmptyCluster(): EditorLayer
+  function createEmptyCluster(requestedSettings: ClusterSettings): EditorLayer | null
+  function createEmptyCluster(requestedSettings: Partial<ClusterSettings> = {}) {
+    const settings = validClusterSettings(requestedSettings)
+    if (!isClusterNameAvailable(settings.name)) return null
     const id = crypto.randomUUID()
     const frameDuration = 1 / project.value.frameRate
     const start = Math.min(currentTime.value, Math.max(0, project.value.duration - frameDuration))
     const cluster: EditorLayer = {
       id,
-      name: `Cluster ${clusterCounter++}`,
+      name: settings.name,
       type: 'cluster',
+      width: settings.width,
+      height: settings.height,
       start,
       duration: Math.max(frameDuration, Math.min(5, project.value.duration - start)),
       color: '#7f8fe2',
@@ -954,14 +1359,14 @@ export const useEditorStore = defineStore('editor', () => {
       locked: false,
       muted: false,
       expanded: false,
-      transform: makeTransform(id),
+      transform: makeProjectTransform(id),
       effects: [],
-      children: [],
+      children: [makeEmptyTrack('visual'), makeEmptyTrack('audio')],
     }
     layerList().splice(0, 0, cluster)
     publishClusterAsset(cluster)
-    markChanged()
     enterCluster(cluster.id)
+    markChanged()
     return cluster
   }
 
@@ -976,8 +1381,10 @@ export const useEditorStore = defineStore('editor', () => {
     const id = crypto.randomUUID()
     const cluster: EditorLayer = {
       id,
-      name: `Cluster ${clusterCounter++}`,
+      name: nextClusterName(),
       type: 'cluster',
+      width: project.value.width,
+      height: project.value.height,
       start,
       duration: end - start,
       color: '#7f8fe2',
@@ -985,7 +1392,7 @@ export const useEditorStore = defineStore('editor', () => {
       locked: false,
       muted: false,
       expanded: false,
-      transform: makeTransform(id),
+      transform: makeProjectTransform(id),
       effects: [],
       children,
     }
@@ -1058,14 +1465,20 @@ export const useEditorStore = defineStore('editor', () => {
     return layer ? splitLayerAt(layer.id, currentTime.value) : false
   }
 
-  function markChanged() {
-    ensureClusterAssets()
-    syncOpenClusterAssets()
+  function scheduleProjectSave() {
     changeRevision += 1
     saveStatus.value = 'Saving…'
     if (typeof window === 'undefined') return
     if (saveTimer !== null) window.clearTimeout(saveTimer)
     saveTimer = window.setTimeout(() => { void saveProjectNow() }, 250)
+  }
+
+  function markChanged() {
+    ensureClusterAssets()
+    ensure3DSceneAssets()
+    syncOpenClusterAssets()
+    recordHistoryChange()
+    scheduleProjectSave()
   }
 
   function saveProjectNow() {
@@ -1078,6 +1491,7 @@ export const useEditorStore = defineStore('editor', () => {
       project.value.updatedAt = Date.now()
       try {
         await auroraProjectDatabase.saveSnapshot(projectSnapshot())
+        updateProjectSummary(project.value)
         if (revisionToSave === changeRevision) saveStatus.value = 'Saved'
       } catch (error) {
         saveStatus.value = 'Save failed'
@@ -1104,6 +1518,15 @@ export const useEditorStore = defineStore('editor', () => {
     }
   }
 
+  /** Creates a reusable scene directly from the 3D workspace and opens it for editing. */
+  function create3DSceneFromWorkspace() {
+    activateTimelineTab(null)
+    const layer = addTimelineLayer('3d-scene')
+    workspace.value = '3D'
+    select3DLayer(layer.id)
+    return layer
+  }
+
   function select3DLayer(layerId: string) {
     const layer = layers.value.find((item) => item.id === layerId && item.type === '3d-scene')
     const scene = layer?.sceneId ? scenes3D.value.find((item) => item.id === layer.sceneId) : undefined
@@ -1125,6 +1548,8 @@ export const useEditorStore = defineStore('editor', () => {
   function markSceneChanged(scene: Aurora3DScene = selectedScene.value!) {
     if (!scene) return
     scene.revision += 1
+    flattenLayers().filter((layer) => layer.type === '3d-scene' && layer.sceneId === scene.id)
+      .forEach((layer) => publish3DSceneAsset(layer, scene))
     markChanged()
   }
 
@@ -1133,6 +1558,26 @@ export const useEditorStore = defineStore('editor', () => {
     if (!scene) return null
     const object = createPrimitiveObject(primitive, scene.objects.length + 1)
     object.transform.position.x.value = (scene.objects.length % 3) * 2 - 2
+    scene.objects.push(object)
+    selectedSceneEntityId.value = object.id
+    markSceneChanged(scene)
+    return object
+  }
+
+  /** Creates an image card whose media can be changed later in the inspector. */
+  function add3DImagePlane(assetId?: string) {
+    const scene = selectedScene.value
+    if (!scene) return null
+    const asset = assets.value.find((item) => item.id === assetId && (item.kind === 'image' || item.kind === 'texture'))
+      ?? assets.value.find((item) => item.kind === 'image' || item.kind === 'texture')
+    const object = createPrimitiveObject('plane', scene.objects.length + 1)
+    object.name = asset ? `${asset.name.replace(/\.[^.]+$/, '')} Plane` : `Image Plane ${scene.objects.length + 1}`
+    object.assetId = asset?.id
+    object.receiveShadow = false
+    object.material.metalness.value = 0
+    object.material.roughness.value = 1
+    object.material.emissive = '#000000'
+    object.material.emissiveIntensity.value = 0
     scene.objects.push(object)
     selectedSceneEntityId.value = object.id
     markSceneChanged(scene)
@@ -1247,6 +1692,16 @@ export const useEditorStore = defineStore('editor', () => {
     const entity = selectedSceneEntity.value
     if (entity?.kind !== 'object') return
     if (apply3DPropertyValue(entity.value.material[key], value)) markSceneChanged()
+  }
+
+  function set3DObjectImage(assetId: string | null) {
+    const entity = selectedSceneEntity.value
+    if (entity?.kind !== 'object' || entity.value.primitive !== 'plane') return false
+    const asset = assetId ? assets.value.find((item) => item.id === assetId && (item.kind === 'image' || item.kind === 'texture')) : undefined
+    if (assetId && !asset) return false
+    entity.value.assetId = asset?.id
+    markSceneChanged()
+    return true
   }
 
   function set3DLightIntensity(value: number) {
@@ -1789,8 +2244,12 @@ export const useEditorStore = defineStore('editor', () => {
     }, 90)
   }
 
+  resetEditorHistory()
+
   return {
-    project, workspace, currentTime, playing, loop, autoKey, snap, ripple, selectedLayerId, selectedKeyframeId,
+    project, availableProjects, projectBrowserBusy, projectBrowserError,
+    workspace, currentTime, playing, loop, autoKey, snap, ripple, selectedLayerId, selectedKeyframeId,
+    canUndo, canRedo, undo, redo,
     selectedNodeId, selectedSceneId, selectedSceneEntityId, zoom, saveStatus, exportProgress, assets, layers, scenes3D,
     nodes, nodeConnections, selectedConnectionId, renderRootNodeId,
     selectNode, selectNodeConnection, addNode, moveNode, deleteNode, connectNodes, disconnectNodes,
@@ -1798,15 +2257,18 @@ export const useEditorStore = defineStore('editor', () => {
     ensureMaskSegments, setMaskSegmentFeather, setMaskSegmentFeatherAll, selectedMaskSegment,
     selectedLayer, selectedScene, selectedSceneEntity,
     togglePlayback, setTime, stepFrame, setProjectDuration, addKeyframe, setLayerValue, addFiles,
-    importFailures, draggingAssetId, addAssetToTimeline, addGeneratedLayer, addPathLayer, addTimelineLayer, reorderTrack, moveSegmentToTrack, moveSegmentToNewTrack, addEmptyTrack,
+    deleteMediaAsset, mediaAssetReferenceCount,
+    importFailures, draggingAssetId, addAssetToTimeline, addGeneratedLayer, addPathLayer, addTimelineLayer, reorderTrack, moveSegmentToTrack, moveSegmentToNewTrack, addEmptyTrack, rippleTrackSegments,
     renameTimelineLayers, setTimelineLayersVisible, deleteTimelineLayers,
-    createCluster, releaseCluster, createEmptyCluster,
+    createCluster, releaseCluster, createEmptyCluster, updateClusterSettings, isClusterNameAvailable,
     openClusterTabs, activeClusterId, activeCluster, timelineLayers, clusterTabs,
     enterCluster, activateTimelineTab, closeClusterTab, fitClusterToChildren, publishClusterAsset, ensureClusterAssets, dedupeCompositionAssets,
-    splitLayerAt, splitSelectedLayer, markChanged, saveProjectNow, flushProjectSave, initializePersistence, setWorkspace, startExport,
-    selectSceneEntity, select3DLayer, markSceneChanged, add3DPrimitive, add3DLight, add3DCamera, set3DEntityTransform,
+    splitLayerAt, splitSelectedLayer, markChanged, saveProjectNow, flushProjectSave, initializePersistence,
+    refreshProjects, openProject, createEmptyProject, setProjectFormat, setWorkspace, create3DSceneFromWorkspace, startExport,
+    publish3DSceneAsset, ensure3DSceneAssets,
+    selectSceneEntity, select3DLayer, markSceneChanged, add3DPrimitive, add3DImagePlane, add3DLight, add3DCamera, set3DEntityTransform,
     rename3DEntity, set3DEntityVisible, delete3DEntity,
-    update3DEntityTransform, set3DObjectMaterial, set3DLightIntensity, set3DCameraFov,
+    update3DEntityTransform, set3DObjectMaterial, set3DObjectImage, set3DLightIntensity, set3DCameraFov,
     toggle3DKeyframe, keySelected3DTransform, move3DKeyframe, delete3DKeyframe, setActive3DCamera,
     add3DCameraCut, set3DCameraCutCamera, move3DCameraCut, delete3DCameraCut,
     add3DPath, delete3DPath, findScenePath, move3DPathPoint, set3DPathPointAxis, set3DPathPointMode,

@@ -224,19 +224,20 @@ export function createCameraPathConstraint(cameraId: string, pathId: string): Au
   }
 }
 
-export function createPrimitiveObject(primitive: 'box' | 'sphere', index: number): Aurora3DObject {
+export function createPrimitiveObject(primitive: 'box' | 'sphere' | 'plane', index: number): Aurora3DObject {
   const id = crypto.randomUUID()
+  const label = primitive === 'box' ? 'Cube' : primitive === 'sphere' ? 'Sphere' : 'Plane'
   return {
     id,
-    name: `${primitive === 'box' ? 'Cube' : 'Sphere'} ${index}`,
+    name: `${label} ${index}`,
     type: 'mesh',
     primitive,
     visible: true,
     locked: false,
-    castShadow: true,
+    castShadow: primitive !== 'plane',
     receiveShadow: true,
     transform: makeTransform3D(id, [0, 0, 0]),
-    material: makePBRMaterial(`${id}-material`, primitive === 'box' ? '#8c9bff' : '#6f9fcb'),
+    material: makePBRMaterial(`${id}-material`, primitive === 'box' ? '#8c9bff' : primitive === 'sphere' ? '#6f9fcb' : '#ffffff'),
     influences: [],
   }
 }
