@@ -3,7 +3,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { z } from 'zod'
 import { ProjectRepository } from '../../server/src/projects/ProjectRepository.ts'
 import { ensureVault, vaultLayout } from '../../server/src/storage/paths.ts'
-import { createNeonSingularityProject } from './showcase.ts'
+import { createNeonSingularityProject, createPillarRunProject } from './showcase.ts'
 
 export async function createAuroraMcpServer(root?: string) {
   const layout = await ensureVault(vaultLayout(root))
@@ -50,6 +50,33 @@ export async function createAuroraMcpServer(root?: string) {
       keyframes: JSON.stringify(snapshot).match(/"interpolation"/g)?.length ?? 0,
       nodes: snapshot.nodes.length,
       objects3D: snapshot.scenes3D.reduce((sum, scene) => sum + scene.objects.length, 0),
+      vault: layout.root,
+    }
+    return { content: [{ type: 'text', text: JSON.stringify(summary, null, 2) }] }
+  })
+
+  server.registerTool('aurora_project_create_pillar_run', {
+    title: 'Create Pillar Run drone showcase',
+    description: 'Creates and activates a polished neon canyon with six pillar gates, an animated modular drone, a cinematic chase camera, lighting, overlays, and compositing nodes.',
+    inputSchema: z.object({
+      name: z.string().min(1).max(256).optional().describe('Optional project name'),
+      projectId: z.string().min(1).max(128).regex(/^[a-zA-Z0-9_-]+$/).optional().describe('Optional existing id to replace in place'),
+    }),
+    annotations: { destructiveHint: false, idempotentHint: false },
+  }, async ({ name, projectId }) => {
+    const snapshot = createPillarRunProject(name, projectId)
+    await projects.save(snapshot)
+    const scene = snapshot.scenes3D[0]!
+    const summary = {
+      projectId: snapshot.project.id,
+      name: snapshot.project.name,
+      duration: snapshot.project.duration,
+      layers: snapshot.layers.length,
+      keyframes: JSON.stringify(snapshot).match(/"interpolation"/g)?.length ?? 0,
+      nodes: snapshot.nodes.length,
+      objects3D: scene.objects.length,
+      pillarGates: 6,
+      cameraPathPoints: scene.paths[0]?.points.length ?? 0,
       vault: layout.root,
     }
     return { content: [{ type: 'text', text: JSON.stringify(summary, null, 2) }] }

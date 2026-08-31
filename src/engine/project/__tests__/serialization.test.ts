@@ -153,6 +153,19 @@ describe('hybrid project architecture', () => {
     registry.dispose()
   })
 
+  it('keeps image planes visible from either side and outside stale deformation bounds', () => {
+    const scene = createDemo3DScene()
+    const imagePlane = createPrimitiveObject('plane', scene.objects.length + 1)
+    scene.objects.push(imagePlane)
+    const registry = new ThreeSceneRuntimeRegistry()
+    const runtime = registry.get(scene, 1280, 720, 0)
+    const mesh = runtime.objects.get(imagePlane.id) as THREE.Mesh<THREE.BufferGeometry, THREE.MeshStandardMaterial>
+
+    expect(mesh.material.side).toBe(THREE.DoubleSide)
+    expect(mesh.frustumCulled).toBe(false)
+    registry.dispose()
+  })
+
   it('keeps bottom-to-top backend ordering in the render plan', () => {
     const plan = createRenderPlan({ project, layers, scenes3D: [createDemo3DScene()], time: 4, width: 1280, height: 720, quality: 'preview' })
     expect(plan.passes.map((pass) => [pass.layerId, pass.backend])).toEqual([

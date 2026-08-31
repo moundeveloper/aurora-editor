@@ -21,12 +21,14 @@ The server currently provides:
 - `aurora_project_list` — list projects in the vault.
 - `aurora_project_get` — inspect a complete editable project document.
 - `aurora_project_create_showcase` — author and activate the Neon Singularity hybrid animation.
+- `aurora_project_create_pillar_run` — author and activate the DRONE-07 cinematic pillar run.
 
 For a protocol-level smoke test that launches the server and calls its authoring tool through an MCP
 client:
 
 ```powershell
 pnpm mcp:create-showcase "My Aurora Premiere"
+pnpm mcp:create-drone "DRONE-07 Pillar Run"
 pnpm mcp:inspect-project <project-id>
 ```
 

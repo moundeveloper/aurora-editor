@@ -85,8 +85,14 @@ function makeObject(definition: Aurora3DObject, assets: Map<string, MediaAsset>)
     color: definition.material.baseColor,
     emissive: definition.material.emissive,
     transparent: true,
+    // An image card has no physical thickness. It must remain visible while the editor camera
+    // orbits behind it, including before its texture has finished resolving.
+    side: definition.primitive === 'plane' ? THREE.DoubleSide : THREE.FrontSide,
   })
   const mesh = new THREE.Mesh(makeGeometry(definition, assets), material)
+  // Rig and influence deformation can move a card beyond stale CPU bounds. Image planes are cheap
+  // enough that testing them in the depth pass is safer than incorrectly dropping the whole card.
+  mesh.frustumCulled = definition.primitive !== 'plane'
   mesh.castShadow = definition.castShadow
   mesh.receiveShadow = definition.receiveShadow
   return mesh
@@ -297,6 +303,20 @@ export class ThreeSceneRuntimeRegistry {
 
   private syncImageMap(material: THREE.MeshStandardMaterial, definition: Aurora3DObject, assets: Map<string, MediaAsset>) {
     const url = definition.primitive === 'plane' ? imageUrl(imageAssetFor(definition, assets)) : undefined
+    const nextSide = definition.primitive === 'plane' ? THREE.DoubleSide : THREE.FrontSide
+    const imagePlane = Boolean(url)
+    const renderStateChanged = material.side !== nextSide
+      || material.depthWrite === imagePlane
+      || material.alphaTest !== (imagePlane ? .001 : 0)
+      || material.polygonOffset !== imagePlane
+    material.side = nextSide
+    material.depthWrite = !imagePlane
+    material.alphaTest = imagePlane ? .001 : 0
+    // Prevent a card mounted directly on a wall from losing patches to z-fighting at grazing angles.
+    material.polygonOffset = imagePlane
+    material.polygonOffsetFactor = imagePlane ? -1 : 0
+    material.polygonOffsetUnits = imagePlane ? -2 : 0
+    if (renderStateChanged) material.needsUpdate = true
     if (material.userData.auroraImageUrl === url) {
       const ready = url ? this.textures.get(url) : undefined
       if (ready && material.map !== ready) {
@@ -308,11 +328,8 @@ export class ThreeSceneRuntimeRegistry {
 
     material.userData.auroraImageUrl = url
     material.map = url ? this.textures.get(url) ?? null : null
-    material.side = url ? THREE.DoubleSide : THREE.FrontSide
     // Alpha blending preserves soft edges; skipping depth writes stops invisible texels occluding
     // geometry behind the card. alphaTest discards fully transparent pixels in shadow/depth passes.
-    material.depthWrite = !url
-    material.alphaTest = url ? .001 : 0
     material.needsUpdate = true
     if (!url || material.map) return
     void this.ensureTexture(url).then((texture) => {

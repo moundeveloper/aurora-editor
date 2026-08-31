@@ -305,3 +305,187 @@ export function createNeonSingularityProject(name = 'Neon Singularity', projectI
     rigs: [],
   }
 }
+
+/** A dense but preview-friendly environment authored entirely through Aurora's editable primitives. */
+export function createPillarRunProject(name = 'Pillar Run // Drone-07', projectId: string = randomUUID()): SerializedEditorState {
+  const snapshot = createNeonSingularityProject(name, projectId)
+
+  const droneMaterial = material('drone-shell', '#16233b', '#20e9ff', 1.8)
+  droneMaterial.metalness.value = .88
+  droneMaterial.roughness.value = .16
+  const droneRoot: Aurora3DObject = {
+    id: 'drone-root', name: 'DRONE-07 Flight Rig', type: 'group', primitive: 'box', visible: true,
+    locked: false, castShadow: false, receiveShadow: false, transform: transform3D('drone-root', [0, 2.2, 10]),
+    material: droneMaterial, influences: [],
+  }
+  const flightKeys: Array<[number, [number, number, number]]> = [
+    [0, [0, 2.2, 10]], [2.4, [-2.45, 2.85, 4]], [4.8, [2.55, 1.9, -2]],
+    [7.2, [-2.35, 3.05, -8]], [9.6, [2.25, 2.15, -14]], [12, [0, 3.25, -22]],
+  ]
+  droneRoot.transform.position.x = numeric('drone-flight-x', 0, flightKeys.map(([time, value]) => [time, value[0]]))
+  droneRoot.transform.position.y = numeric('drone-flight-y', 2.2, flightKeys.map(([time, value]) => [time, value[1]]))
+  droneRoot.transform.position.z = numeric('drone-flight-z', 10, flightKeys.map(([time, value]) => [time, value[2]]))
+  droneRoot.transform.rotation.z = numeric('drone-flight-bank', 0, [[0, 0], [2.4, 12], [4.8, -14], [7.2, 13], [9.6, -11], [12, 0]])
+  droneRoot.transform.rotation.y = numeric('drone-flight-yaw', 0, [[0, 0], [2.4, -8], [4.8, 10], [7.2, -9], [9.6, 8], [12, 0]])
+
+  const child = (id: string, label: string, primitive: 'box' | 'sphere', position: [number, number, number], surface: AuroraPBRMaterial) => {
+    const object = mesh(id, label, primitive, position, surface)
+    object.parentId = droneRoot.id
+    return object
+  }
+  const body = child('drone-body', 'Aerodynamic Carbon Body', 'sphere', [0, 0, 0], droneMaterial)
+  body.transform.scale.x.value = 1.15
+  body.transform.scale.y.value = .34
+  body.transform.scale.z.value = .82
+  const core = child('drone-core', 'Cyan Reactor Core', 'sphere', [0, -.28, .05], material('drone-core', '#42f5ff', '#20efff', 4.5))
+  core.transform.scale.x = numeric('drone-core-scale-x', .32, [[0, .24], [1.2, .38], [2.4, .24], [3.6, .38], [4.8, .24], [6, .38], [7.2, .24], [8.4, .38], [9.6, .24], [10.8, .38], [12, .24]])
+  core.transform.scale.y = core.transform.scale.x
+  core.transform.scale.z = core.transform.scale.x
+  core.castShadow = false
+
+  const armMaterial = material('drone-arms', '#0a1020', '#9b4dff', .7)
+  armMaterial.metalness.value = .92
+  const armA = child('drone-arm-a', 'Rotor Arm A', 'box', [0, 0, 0], armMaterial)
+  armA.transform.scale.x.value = 1.55
+  armA.transform.scale.y.value = .07
+  armA.transform.scale.z.value = .09
+  armA.transform.rotation.y.value = 28
+  const armB = child('drone-arm-b', 'Rotor Arm B', 'box', [0, 0, 0], armMaterial)
+  armB.transform.scale.x.value = 1.55
+  armB.transform.scale.y.value = .07
+  armB.transform.scale.z.value = .09
+  armB.transform.rotation.y.value = -28
+
+  const rotorPositions: Array<[number, number, number]> = [[-1.35, .05, -.72], [1.35, .05, -.72], [-1.35, .05, .72], [1.35, .05, .72]]
+  const rotors = rotorPositions.flatMap((position, index) => {
+    const hub = child(`drone-rotor-hub-${index + 1}`, `Rotor ${index + 1} Hub`, 'sphere', position, material(`hub-${index}`, '#222a44', '#ff3fe6', 1.6))
+    hub.transform.scale.x.value = .24
+    hub.transform.scale.y.value = .12
+    hub.transform.scale.z.value = .24
+    hub.castShadow = false
+    const blade = child(`drone-rotor-blade-${index + 1}`, `Rotor ${index + 1} Blade`, 'box', [position[0], position[1] + .08, position[2]], material(`blade-${index}`, '#38435f', '#29eaff', .8))
+    blade.transform.scale.x.value = .58
+    blade.transform.scale.y.value = .025
+    blade.transform.scale.z.value = .07
+    blade.transform.rotation.y = numeric(`blade-${index}-spin`, 0, [[0, index * 45], [12, 2160 + index * 45]])
+    blade.castShadow = false
+    return [hub, blade]
+  })
+
+  const environment: Aurora3DObject[] = []
+  const floor = mesh('runway-floor', 'Wet Obsidian Runway', 'box', [0, -.35, -6], material('runway', '#040713', '#071a31', .16))
+  floor.transform.scale.x.value = 8
+  floor.transform.scale.y.value = .16
+  floor.transform.scale.z.value = 18
+  floor.material.metalness.value = .78
+  floor.material.roughness.value = .22
+  floor.castShadow = false
+  environment.push(floor)
+
+  const wall = (id: string, x: number) => {
+    const object = mesh(id, x < 0 ? 'Left Canyon Wall' : 'Right Canyon Wall', 'box', [x, 3.4, -6], material(id, '#080d1c', x < 0 ? '#17104a' : '#073f4e', .4))
+    object.transform.scale.x.value = .18
+    object.transform.scale.y.value = 3.8
+    object.transform.scale.z.value = 18
+    return object
+  }
+  environment.push(wall('wall-left', -8.2), wall('wall-right', 8.2))
+
+  const gateDepths = [7, 2, -3, -8, -13, -18]
+  gateDepths.forEach((z, gateIndex) => {
+    const accent = gateIndex % 2 ? '#a83cff' : '#17e9ff'
+    ;[-4.15, 4.15].forEach((x, sideIndex) => {
+      const pillar = mesh(`pillar-${gateIndex}-${sideIndex}`, `Gate ${gateIndex + 1} ${sideIndex ? 'Right' : 'Left'} Pillar`, 'box', [x, 3.7, z], material(`pillar-${gateIndex}-${sideIndex}`, '#11182b', accent, 1.25))
+      pillar.transform.scale.x.value = .68
+      pillar.transform.scale.y.value = 3.85
+      pillar.transform.scale.z.value = .68
+      pillar.material.metalness.value = .76
+      pillar.material.roughness.value = .2
+      environment.push(pillar)
+    })
+    const beam = mesh(`gate-beam-${gateIndex}`, `Gate ${gateIndex + 1} Crown`, 'box', [0, 7.45, z], material(`beam-${gateIndex}`, '#0b1020', accent, 1.8))
+    beam.transform.scale.x.value = 4.8
+    beam.transform.scale.y.value = .18
+    beam.transform.scale.z.value = .5
+    beam.castShadow = false
+    environment.push(beam)
+    const beacon = mesh(`gate-beacon-${gateIndex}`, `Gate ${gateIndex + 1} Beacon`, 'sphere', [0, 7.25, z], material(`beacon-${gateIndex}`, accent, accent, 3.8))
+    beacon.transform.scale.x.value = .16
+    beacon.transform.scale.y.value = .16
+    beacon.transform.scale.z.value = .16
+    beacon.castShadow = false
+    environment.push(beacon)
+  })
+
+  const camera: AuroraCamera = {
+    id: 'camera-drone-chase', name: 'Drone Chase Camera', visible: true, projection: 'perspective',
+    transform: transform3D('camera-drone-chase', [0, 3.1, 16]),
+    fov: numeric('drone-camera-fov', 48, [[0, 54], [2.4, 43], [4.8, 50], [7.2, 42], [9.6, 48], [12, 38]]),
+    near: .08, far: 160,
+    pathConstraint: {
+      pathId: 'path-drone-chase', progress: numeric('drone-camera-progress', 0, [[0, 0], [12, 1]]),
+      bank: numeric('drone-camera-bank', 0, [[0, 0], [2.4, 7], [4.8, -9], [7.2, 8], [9.6, -7], [12, 0]]),
+      offset: { x: numeric('drone-camera-offset-x', 0), y: numeric('drone-camera-offset-y', .35), z: numeric('drone-camera-offset-z', 0) },
+      orientation: 'look-at', lookAtEntityId: droneRoot.id,
+    },
+  }
+  const cameraPathPoints: Array<[string, [number, number, number]]> = [
+    ['launch', [0, 3.2, 16]], ['gate-a', [-2.8, 3.7, 8]], ['gate-b', [2.9, 2.7, 1]],
+    ['gate-c', [-2.7, 3.9, -7]], ['gate-d', [2.7, 3, -15]], ['finish', [0, 4.1, -26]],
+  ]
+
+  const light = (id: string, label: string, type: AuroraLight['type'], color: string, intensity: number, position: [number, number, number]): AuroraLight => ({
+    id, name: label, type, color, visible: true, intensity: numeric(`${id}-intensity`, intensity),
+    transform: transform3D(id, position), castShadow: type === 'directional',
+  })
+  const droneLight = light('drone-follow-light', 'Drone Cyan Underglow', 'point', '#2cecff', 24, [0, 2, 10])
+  droneLight.transform.position.x = numeric('drone-light-x', 0, flightKeys.map(([time, value]) => [time, value[0]]))
+  droneLight.transform.position.y = numeric('drone-light-y', 1.5, flightKeys.map(([time, value]) => [time, value[1] - .7]))
+  droneLight.transform.position.z = numeric('drone-light-z', 10, flightKeys.map(([time, value]) => [time, value[2]]))
+
+  const scene: Aurora3DScene = {
+    id: 'scene-pillar-run', name: 'Neon Canyon Pillar Run',
+    objects: [...environment, droneRoot, body, core, armA, armB, ...rotors],
+    cameras: [camera], cameraCuts: [{ id: 'cut-drone-launch', cameraId: camera.id, time: 0 }],
+    lights: [
+      light('pillar-ambient', 'Midnight Atmosphere', 'ambient', '#374070', .52, [0, 0, 0]),
+      light('pillar-moon', 'Cold Moon Key', 'directional', '#b9d9ff', 2.6, [5, 11, 8]),
+      light('pillar-magenta', 'Magenta Tunnel Fill', 'point', '#d23cff', 31, [-4, 4, -8]),
+      droneLight,
+    ],
+    paths: [{
+      id: 'path-drone-chase', name: 'Six-Gate Chase Line', visible: true, color: '#35edff',
+      transform: transform3D('path-drone-chase', [0, 0, 0]), closed: false, locked: false,
+      points: cameraPathPoints.map(([id, position], index) => ({
+        id: `chase-${id}`, position,
+        handleIn: [position[0], position[1], position[2] + (index ? 2.2 : 0)],
+        handleOut: [position[0], position[1], position[2] - (index === cameraPathPoints.length - 1 ? 0 : 2.2)],
+        mode: 'smooth' as const,
+      })),
+    }],
+    activeCameraId: camera.id, environmentIntensity: 1.1,
+    settings: { shadows: true, shadowMapSize: 1024, quality: 'preview', backgroundColor: '#02040d' }, revision: 1,
+  }
+
+  snapshot.scenes3D = [scene]
+  snapshot.project.name = name
+  snapshot.project.backgroundColor = '#02040d'
+  const sceneLayer = snapshot.layers.find((item) => item.id === 'layer-neon-scene')
+  if (sceneLayer) {
+    sceneLayer.name = 'DRONE-07 // Neon Canyon 3D'
+    sceneLayer.sceneId = scene.id
+  }
+  const title = snapshot.layers.find((item) => item.id === 'layer-hero-title')
+  if (title) {
+    title.name = 'PILLAR RUN // DRONE-07'
+    title.textContent = 'PILLAR RUN // DRONE-07'
+  }
+  const subtitle = snapshot.layers.find((item) => item.id === 'layer-subtitle')
+  if (subtitle) {
+    subtitle.name = 'AUTONOMOUS FLIGHT TEST · SECTOR 9'
+    subtitle.textContent = 'AUTONOMOUS FLIGHT TEST · SECTOR 9'
+  }
+  const flare = snapshot.layers.find((item) => item.id === 'layer-core-flare')
+  if (flare) flare.name = 'Drone Telemetry Pulse'
+  return snapshot
+}

@@ -10,6 +10,7 @@
     "server": "node server/src/index.ts",
     "mcp": "node mcp/src/index.ts",
     "mcp:create-showcase": "node mcp/src/create-showcase.ts",
+    "mcp:create-drone": "node mcp/src/create-drone-showcase.ts",
     "mcp:inspect-project": "node mcp/src/inspect-project.ts",
     "build": "run-p type-check \"build-only {@}\" --",
     "preview": "vite preview",

@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { evaluateNumericProperty } from '../../../src/engine/animation/evaluateProperty.ts'
 import { evaluateNodeGraph } from '../../../src/engine/nodes/evaluateGraph.ts'
 import { deserializeEditorState } from '../../../src/engine/project/serialization.ts'
-import { createNeonSingularityProject } from '../showcase.ts'
+import { createNeonSingularityProject, createPillarRunProject } from '../showcase.ts'
 
 describe('MCP Neon Singularity authoring', () => {
   it('creates an editable hybrid project with meaningful animation', () => {
@@ -36,5 +36,23 @@ describe('MCP Neon Singularity authoring', () => {
     expect(evaluateNumericProperty(cameraProgress, 6)).toBeCloseTo(.5)
     expect(evaluateNumericProperty(cameraProgress, 12)).toBeCloseTo(1)
     expect(evaluateNumericProperty(coreScale, 1.5)).toBeGreaterThan(evaluateNumericProperty(coreScale, 0))
+  })
+})
+
+describe('MCP Pillar Run authoring', () => {
+  it('builds a complex environment, modular drone, and editable chase animation', () => {
+    const snapshot = createPillarRunProject('Flight Test', 'pillar-run-test')
+    const scene = snapshot.scenes3D[0]!
+    const drone = scene.objects.find((object) => object.id === 'drone-root')!
+
+    expect(snapshot.project.name).toBe('Flight Test')
+    expect(scene.name).toBe('Neon Canyon Pillar Run')
+    expect(scene.objects.length).toBeGreaterThanOrEqual(30)
+    expect(scene.objects.filter((object) => object.name.includes('Pillar'))).toHaveLength(12)
+    expect(scene.objects.filter((object) => object.parentId === drone.id).length).toBeGreaterThanOrEqual(10)
+    expect(scene.cameras[0]?.pathConstraint?.lookAtEntityId).toBe(drone.id)
+    expect(scene.paths[0]?.points).toHaveLength(6)
+    expect(evaluateNumericProperty(drone.transform.position.z, 0)).toBeCloseTo(10)
+    expect(evaluateNumericProperty(drone.transform.position.z, 12)).toBeCloseTo(-22)
   })
 })
