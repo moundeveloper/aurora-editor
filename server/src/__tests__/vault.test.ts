@@ -7,7 +7,7 @@ import { createServer, type AuroraServer } from '../app.ts'
 import { blobPath, isContentHash, isInside, safeJoin, vaultLayout } from '../storage/paths.ts'
 import { storeBlob } from '../storage/blobs.ts'
 import { parseRange } from '../routes/media.ts'
-import { assetListSchema, importResultSchema } from '../../../shared/contracts.ts'
+import { assetListSchema, importResultSchema, serializedProjectSchema } from '../../../shared/contracts.ts'
 
 describe('vault paths', () => {
   const layout = vaultLayout('/vault')
@@ -173,6 +173,35 @@ describe('aurora server', () => {
     expect(info.root).toBe(server.layout.root)
     expect(info.assetCount).toBe(1)
     expect(info.bytesStored).toBe('some-bytes'.length)
+  })
+
+  it('persists projects for both the editor and MCP through the same API', async () => {
+    const snapshot = {
+      project: {
+        id: 'mcp-project', name: 'MCP Project', width: 1920, height: 1080, frameRate: 30,
+        duration: 12, backgroundColor: '#02030d', updatedAt: 42, version: 11,
+      },
+      layers: [{ id: 'title', name: 'Title' }], scenes3D: [], assets: [], nodes: [], nodeConnections: [], rigs: [],
+    }
+    const saved = await server.app.request('/api/projects/mcp-project', {
+      method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(snapshot),
+    })
+    expect(saved.status).toBe(200)
+    expect(serializedProjectSchema.parse(await saved.json()).project.name).toBe('MCP Project')
+
+    const active = await server.app.request('/api/projects/active')
+    expect(active.status).toBe(200)
+    expect(serializedProjectSchema.parse(await active.json()).layers).toHaveLength(1)
+
+    const listed = await (await server.app.request('/api/projects')).json() as { projects: Array<{ id: string }> }
+    expect(listed.projects.map((project) => project.id)).toEqual(['mcp-project'])
+
+    snapshot.project.name = 'MCP Project Revised'
+    const updated = await server.app.request('/api/projects/mcp-project', {
+      method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(snapshot),
+    })
+    expect(updated.status).toBe(200)
+    expect((await server.projects.load('mcp-project'))?.project.name).toBe('MCP Project Revised')
   })
 
   it('leaves nothing behind when a stream fails part way', async () => {

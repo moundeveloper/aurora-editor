@@ -9,7 +9,7 @@ import type {
 import { evaluateNumericProperty } from '@/engine/animation/evaluateProperty'
 import { ensureNumericKeyframe, setNumericPropertyAtTime, toggleNumericKeyframe } from '@/engine/animation/editNumericProperty'
 import { CURRENT_PROJECT_VERSION, deserializeEditorState, serializeEditorState } from '@/engine/project/serialization'
-import { auroraProjectDatabase } from '@/engine/project/AuroraProjectDatabase'
+import { auroraProjectLibrary } from '@/services/projectLibrary'
 import { importAsset, mediaUrl } from '@/services/mediaLibrary'
 import { kindForFile } from '../../shared/contracts.ts'
 import { create3DPath, createCameraObjectConstraint, createCameraPathConstraint, createDemo3DScene, createEmpty3DScene, createPrimitiveObject, makeTransform3D, numericProperty } from '@/engine/scene3d/sceneFactory'
@@ -216,7 +216,7 @@ export const useEditorStore = defineStore('editor', () => {
   }
 
   async function refreshProjects() {
-    availableProjects.value = await auroraProjectDatabase.listProjects()
+    availableProjects.value = await auroraProjectLibrary.listProjects()
     return availableProjects.value
   }
 
@@ -240,7 +240,7 @@ export const useEditorStore = defineStore('editor', () => {
     if (persistenceReady) return
     const legacyRaw = typeof window === 'undefined' ? null : window.localStorage.getItem('aurora-editor-project')
     try {
-      const databaseState = await auroraProjectDatabase.loadActiveSnapshot()
+      const databaseState = await auroraProjectLibrary.loadActiveSnapshot()
       const loadedState = databaseState
         ? deserializeEditorState(JSON.stringify(databaseState), defaultState)
         : deserializeEditorState(legacyRaw, defaultState)
@@ -274,13 +274,13 @@ export const useEditorStore = defineStore('editor', () => {
     projectBrowserError.value = ''
     try {
       await flushProjectSave()
-      const snapshot = await auroraProjectDatabase.loadSnapshot(projectId)
+      const snapshot = await auroraProjectLibrary.loadSnapshot(projectId)
       if (!snapshot) throw new Error('The selected project could not be found.')
       const addedStarterTracks = applyLoadedState(deserializeEditorState(JSON.stringify(snapshot), defaultState))
       if (addedStarterTracks) {
         changeRevision += 1
         await saveProjectNow()
-      } else await auroraProjectDatabase.setActiveProject(projectId)
+      } else await auroraProjectLibrary.setActiveProject(projectId)
       saveStatus.value = 'Saved'
       return true
     } catch (error) {
@@ -1540,7 +1540,7 @@ export const useEditorStore = defineStore('editor', () => {
     const save = async () => {
       project.value.updatedAt = Date.now()
       try {
-        await auroraProjectDatabase.saveSnapshot(projectSnapshot())
+        await auroraProjectLibrary.saveSnapshot(projectSnapshot())
         updateProjectSummary(project.value)
         if (revisionToSave === changeRevision) saveStatus.value = 'Saved'
       } catch (error) {
