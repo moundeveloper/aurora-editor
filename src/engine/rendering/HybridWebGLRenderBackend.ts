@@ -13,7 +13,7 @@ import { bonePoseMatrices, rigIsActive } from '@/engine/rig/skeleton'
 import { cameraIdAtTime } from '@/engine/scene3d/cameraCuts'
 import { createMaskGeometry, maskAlphaField, maskGeometryKey, type MaskGeometryField } from '@/engine/rendering/maskField'
 import { MediaTextureCache } from '@/engine/rendering/mediaTextures'
-import { mediaUrl } from '#shared/contracts.ts'
+import { mediaUrl } from '../../../shared/contracts.ts'
 
 /** Colour nodes fold into one matrix so a chain of them still costs a single filter pass. */
 function colorFilterFor(effects: GraphEffects) {
