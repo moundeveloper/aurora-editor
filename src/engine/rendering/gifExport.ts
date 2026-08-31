@@ -16,6 +16,9 @@ export interface GifExportOptions {
   /** Palette size per frame, 2–256. */
   colors: number
   loop: boolean
+  /** Optional project-time range. End is exclusive and both values are clamped to the composition. */
+  startTime?: number
+  endTime?: number
   onProgress?: (frame: number, total: number) => void
   signal?: AbortSignal
 }
@@ -31,7 +34,9 @@ export async function exportProjectGif(options: GifExportOptions): Promise<Blob>
   if (typeof document === 'undefined') throw new Error('GIF export needs a browser document.')
   const { project } = options.composition
   const size = gifExportSize(project, options.maxWidth)
-  const total = gifFrameCount(project.duration, options.frameRate)
+  const startTime = Math.max(0, Math.min(project.duration, options.startTime ?? 0))
+  const endTime = Math.max(startTime, Math.min(project.duration, options.endTime ?? project.duration))
+  const total = gifFrameCount(endTime - startTime, options.frameRate)
   const colors = Math.max(2, Math.min(256, Math.round(options.colors)))
   const delay = 1000 / Math.max(1, options.frameRate)
 
@@ -47,7 +52,7 @@ export async function exportProjectGif(options: GifExportOptions): Promise<Blob>
       if (options.signal?.aborted) throw new DOMException('GIF export cancelled', 'AbortError')
       await backend.renderFrame({
         ...options.composition,
-        time: frame / Math.max(1, options.frameRate),
+        time: Math.min(endTime, startTime + frame / Math.max(1, options.frameRate)),
         width: size.width,
         height: size.height,
         quality: 'full',

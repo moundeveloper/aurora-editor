@@ -35,11 +35,13 @@ const rightOpen = ref(true)
 const bottomOpen = ref(true)
 const nodePreviewHeight = computed(() => Math.round(Math.max(120, (rightWidth.value - 28) * 9 / 16 + 50)))
 const maskEditorOpen = computed(() => workspace.value === 'Nodes' && nodes.value.some((node) => node.id === selectedNodeId.value && node.kind === 'mask'))
+const inspectorAvailable = computed(() => workspace.value !== 'Audio')
+const inspectorVisible = computed(() => inspectorAvailable.value && rightOpen.value)
 const resizing = ref<'left' | 'right' | 'bottom' | null>(null)
 
 const layoutStyle = computed(() => ({
   '--left-width': leftOpen.value ? `${leftWidth.value}px` : '0px',
-  '--right-width': rightOpen.value ? `${rightWidth.value}px` : '0px',
+  '--right-width': inspectorVisible.value ? `${rightWidth.value}px` : '0px',
   '--bottom-height': bottomOpen.value ? `${bottomHeight.value}px` : '0px',
   '--node-preview-height': `${nodePreviewHeight.value}px`,
 }))
@@ -95,7 +97,7 @@ onBeforeUnmount(() => {
     <TopBar />
 
     <main v-if="workspace !== 'Export'" class="workspace-shell">
-      <div class="upper-workspace">
+      <div class="upper-workspace" :class="{ 'no-right-pane': !inspectorVisible }">
         <div v-show="leftOpen" class="left-pane"><SceneHierarchyPanel v-if="workspace === '3D'" /><AssetPanel v-else /></div>
         <div v-show="leftOpen" class="pane-resizer vertical left" role="separator" aria-label="Resize asset browser" @pointerdown="startResize('left')" />
 
@@ -106,8 +108,8 @@ onBeforeUnmount(() => {
           <AudioWorkspace v-else />
         </div>
 
-        <div v-show="rightOpen" class="pane-resizer vertical right" role="separator" aria-label="Resize inspector" @pointerdown="startResize('right')" />
-        <div v-show="rightOpen" class="right-pane" :class="{ 'preview-right-pane': workspace === 'Nodes' || workspace === '3D', 'mask-editor-open': maskEditorOpen }">
+        <div v-show="inspectorVisible" class="pane-resizer vertical right" role="separator" aria-label="Resize inspector" @pointerdown="startResize('right')" />
+        <div v-show="inspectorVisible" class="right-pane" :class="{ 'preview-right-pane': workspace === 'Nodes' || workspace === '3D', 'mask-editor-open': maskEditorOpen }">
           <template v-if="workspace === 'Nodes'">
             <NodePreviewPanel />
             <MaskEdgePanel v-if="maskEditorOpen" />
@@ -131,7 +133,7 @@ onBeforeUnmount(() => {
       <div class="panel-toggles">
         <button type="button" :class="{ active: leftOpen }" title="Toggle asset browser" @click="leftOpen = !leftOpen"><PanelLeftClose :size="12" /></button>
         <button type="button" :class="{ active: bottomOpen }" title="Toggle timeline" @click="bottomOpen = !bottomOpen"><PanelBottomClose :size="12" /></button>
-        <button type="button" :class="{ active: rightOpen }" title="Toggle inspector" @click="rightOpen = !rightOpen"><PanelRightClose :size="12" /></button>
+        <button v-if="inspectorAvailable" type="button" :class="{ active: rightOpen }" title="Toggle inspector" @click="rightOpen = !rightOpen"><PanelRightClose :size="12" /></button>
       </div>
       <span class="status-divider" />
       <span><ShieldCheck :size="11" /> Local-first</span>

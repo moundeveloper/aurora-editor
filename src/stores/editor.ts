@@ -2526,7 +2526,7 @@ export const useEditorStore = defineStore('editor', () => {
    * Renders every frame of the composition into an animated GIF and downloads it. Unlike the video
    * placeholder above, the progress here tracks frames that have actually been encoded.
    */
-  async function exportGif(options: { filename: string; maxWidth: number; frameRate: number; colors: number; loop: boolean }) {
+  async function exportGif(options: { filename: string; maxWidth: number; frameRate: number; colors: number; loop: boolean; startTime?: number; endTime?: number }) {
     if (exportStatus.value === 'rendering') return
     const controller = new AbortController()
     exportAbort = controller
@@ -2550,6 +2550,8 @@ export const useEditorStore = defineStore('editor', () => {
         frameRate: options.frameRate,
         colors: options.colors,
         loop: options.loop,
+        startTime: options.startTime,
+        endTime: options.endTime,
         signal: controller.signal,
         onProgress: (frame, total) => { exportProgress.value = Math.max(1, Math.round((frame / total) * 100)) },
       })

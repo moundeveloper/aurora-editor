@@ -47,6 +47,7 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--focus); out
 .app-shell { display: grid; width: 100%; height: 100%; min-width: 980px; grid-template-rows: auto auto minmax(0, 1fr) 22px; overflow: hidden; background: var(--bg-app); }
 .workspace-shell { display: grid; min-height: 0; grid-template-rows: minmax(0, 1fr) 4px var(--bottom-height); overflow: hidden; }
 .upper-workspace { display: grid; min-height: 0; grid-template-columns: var(--left-width) 4px minmax(360px, 1fr) 4px var(--right-width); overflow: hidden; }
+.upper-workspace.no-right-pane { grid-template-columns: var(--left-width) 4px minmax(360px, 1fr); }
 .left-pane, .center-pane, .right-pane, .bottom-pane { min-width: 0; min-height: 0; overflow: hidden; }
 .right-pane.preview-right-pane { display: grid; grid-template-rows: var(--node-preview-height) minmax(0, 1fr); }
 .right-pane.preview-right-pane.mask-editor-open { grid-template-rows: var(--node-preview-height) 220px minmax(0, 1fr); }
