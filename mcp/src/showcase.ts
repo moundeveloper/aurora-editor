@@ -141,33 +141,42 @@ function createGraph(layers: EditorLayer[]) {
     item.id,
     30 + index * 105,
   ))
+  const flareSource = sources.find((item) => item.sourceId === 'layer-core-flare')!
+  const flareGlow = effectNode('node-flare-glow', 'glow', 'Core Flare Bloom', 215, flareSource.y, [['Threshold', 62], ['Radius', 24], ['Intensity', 1.15]])
   const stack: EditorNode = {
-    id: 'node-showcase-stack', kind: 'stack', title: 'Neon Layer Stack', x: 255, y: 155,
+    id: 'node-showcase-stack', kind: 'stack', title: 'Neon Layer Stack', x: 430, y: 155,
     muted: false, properties: {},
     inputs: [...sources.map((_, index) => nodeSocket(`node-showcase-stack-in-${index}`, `Input ${index + 1}`, 'image')), nodeSocket('node-showcase-stack-spare', `Input ${sources.length + 1}`, 'image')],
     outputs: [nodeSocket('node-showcase-stack-out', 'Image', 'image')],
   }
-  const glow = effectNode('node-master-glow', 'glow', 'Electric Bloom', 470, 155, [['Threshold', 48], ['Radius', 42], ['Intensity', 1.8]])
-  const grade = effectNode('node-master-grade', 'colorMatrix', 'Cyan / Magenta Grade', 665, 155, [['Temperature', -12], ['Contrast', 1.2]])
-  const vignette = effectNode('node-master-vignette', 'vignette', 'Cinematic Focus', 860, 155, [['Amount', 28], ['Softness', 78]])
+  const grade = effectNode('node-master-grade', 'colorMatrix', 'Cyan / Magenta Grade', 625, 155, [['Temperature', -12], ['Contrast', 1.2]])
+  const vignette = effectNode('node-master-vignette', 'vignette', 'Cinematic Focus', 820, 155, [['Amount', 28], ['Softness', 78]])
   const output: EditorNode = {
-    id: 'node-output', kind: 'output', title: 'Composite', x: 1055, y: 155, muted: false, properties: {},
+    id: 'node-output', kind: 'output', title: 'Composite', x: 1015, y: 155, muted: false, properties: {},
     inputs: [nodeSocket('node-output-in', 'Image', 'image')], outputs: [],
   }
-  const connections: EditorNodeConnection[] = sources.map((source, index) => ({
+  const connections: EditorNodeConnection[] = sources.flatMap((source, index) => source === flareSource ? [
+    {
+      id: 'link-flare-source-glow', fromNodeId: source.id, fromPortId: source.outputs[0]!.id,
+      toNodeId: flareGlow.id, toPortId: flareGlow.inputs[0]!.id,
+    },
+    {
+      id: 'link-flare-glow-stack', fromNodeId: flareGlow.id, fromPortId: flareGlow.outputs[0]!.id,
+      toNodeId: stack.id, toPortId: stack.inputs[index]!.id,
+    },
+  ] : [{
     id: `link-${source.id}-stack`, fromNodeId: source.id, fromPortId: source.outputs[0]!.id,
     toNodeId: stack.id, toPortId: stack.inputs[index]!.id,
-  }))
+  }])
   const connect = (from: EditorNode, to: EditorNode, id: string): EditorNodeConnection => ({
     id, fromNodeId: from.id, fromPortId: from.outputs[0]!.id, toNodeId: to.id, toPortId: to.inputs[0]!.id,
   })
   connections.push(
-    connect(stack, glow, 'link-stack-glow'),
-    connect(glow, grade, 'link-glow-grade'),
+    connect(stack, grade, 'link-stack-grade'),
     connect(grade, vignette, 'link-grade-vignette'),
     connect(vignette, output, 'link-vignette-output'),
   )
-  return { nodes: [...sources, stack, glow, grade, vignette, output], nodeConnections: connections }
+  return { nodes: [...sources, flareGlow, stack, grade, vignette, output], nodeConnections: connections }
 }
 
 function createScene(): Aurora3DScene {
@@ -178,7 +187,9 @@ function createScene(): Aurora3DScene {
   core.influences.push({
     id: 'core-displace', type: 'displace', name: 'Living Surface', enabled: true,
     parameters: {
-      amount: numeric('core-displace-amount', .14, [[0, .05], [3, .22], [6, .08], [9, .25], [12, .05]]),
+      // Animated influence parameters rebuild geometry every frame. A static deformation keeps the
+      // organic silhouette while the transform and emissive animation provide the visible pulse.
+      amount: numeric('core-displace-amount', .14),
       scale: numeric('core-displace-scale', 3.5), seed: numeric('core-displace-seed', 17),
     },
   })
@@ -189,6 +200,7 @@ function createScene(): Aurora3DScene {
   fins.transform.scale.z.value = .08
   fins.transform.rotation.z = numeric('fins-rotation-z', 0, [[0, 0], [12, 360]])
   fins.influences.push(radialInfluence('fins-radial', 12, 3.2))
+  fins.castShadow = false
 
   const satellites = mesh('orbital-satellites', 'Satellite Crown', 'sphere', [-4.4, .15, 0], material('satellites', '#ff3ee7', '#ff2bd6', 2.7))
   satellites.transform.scale.x.value = .17
@@ -196,6 +208,7 @@ function createScene(): Aurora3DScene {
   satellites.transform.scale.z.value = .17
   satellites.transform.rotation.z = numeric('satellites-rotation-z', 0, [[0, 360], [12, 0]])
   satellites.influences.push(radialInfluence('satellites-radial', 18, 4.4))
+  satellites.castShadow = false
 
   const floor = mesh('mirror-floor', 'Obsidian Mirror', 'plane', [0, -2.2, 0], material('floor', '#050716', '#071a35', .2))
   floor.transform.rotation.x.value = -90
@@ -203,6 +216,7 @@ function createScene(): Aurora3DScene {
   floor.transform.scale.y.value = 12
   floor.material.metalness.value = .9
   floor.material.roughness.value = .16
+  floor.castShadow = false
 
   const camera: AuroraCamera = {
     id: 'camera-orbit', name: 'Orbital Camera', visible: true, projection: 'perspective',
@@ -227,7 +241,6 @@ function createScene(): Aurora3DScene {
       light('ambient-violet', 'Violet Atmosphere', 'ambient', '#4b42a8', .65, [0, 0, 0]),
       light('key-cyan', 'Cyan Key', 'directional', '#4cf7ff', 4.8, [5, 7, 6]),
       light('rim-magenta', 'Magenta Rim', 'point', '#ff2bd6', 34, [-4, 2, 2]),
-      light('pulse-white', 'Core Pulse', 'point', '#d9fbff', 22, [0, .2, 1]),
     ],
     paths: [{
       id: 'camera-orbit-path', name: 'Hero Orbit', visible: true, color: '#52f5ff',
@@ -240,7 +253,7 @@ function createScene(): Aurora3DScene {
       ],
     }],
     activeCameraId: camera.id, environmentIntensity: 1.15,
-    settings: { shadows: true, shadowMapSize: 2048, quality: 'full', backgroundColor: '#02030d' }, revision: 1,
+    settings: { shadows: true, shadowMapSize: 1024, quality: 'preview', backgroundColor: '#02030d' }, revision: 2,
   }
 }
 
