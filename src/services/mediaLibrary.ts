@@ -1,7 +1,7 @@
 import {
   assetListSchema, importResultSchema, mediaUrl, vaultInfoSchema,
   type ImportResult, type MediaAssetRecord, type VaultInfo,
-} from '#shared/contracts.ts'
+} from '../../shared/contracts.ts'
 
 /**
  * The app's side of the media server.

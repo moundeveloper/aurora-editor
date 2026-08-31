@@ -11,7 +11,7 @@ import { ensureNumericKeyframe, setNumericPropertyAtTime, toggleNumericKeyframe 
 import { CURRENT_PROJECT_VERSION, deserializeEditorState, serializeEditorState } from '@/engine/project/serialization'
 import { auroraProjectDatabase } from '@/engine/project/AuroraProjectDatabase'
 import { importAsset, mediaUrl } from '@/services/mediaLibrary'
-import { kindForFile } from '#shared/contracts.ts'
+import { kindForFile } from '../../shared/contracts.ts'
 import { create3DPath, createCameraObjectConstraint, createCameraPathConstraint, createDemo3DScene, createEmpty3DScene, createPrimitiveObject, makeTransform3D, numericProperty } from '@/engine/scene3d/sceneFactory'
 import { createRig, createRigBone, type RigBoneChannelKey } from '@/engine/rig/rigFactory'
 import { MAX_RIG_CELLS, MIN_RIG_CELLS } from '@/engine/rig/rigMesh'
