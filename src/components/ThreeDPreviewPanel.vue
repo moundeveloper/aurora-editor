@@ -18,6 +18,7 @@ const followCuts = ref(true)
 const runtimeRegistry = new ThreeSceneRuntimeRegistry(() => renderPreview())
 let renderer: THREE.WebGLRenderer | null = null
 let resizeObserver: ResizeObserver | null = null
+let previewFrame = 0
 
 const previewCamera = computed(() => {
   const scene = selectedScene.value
@@ -48,7 +49,7 @@ function toggleFollowCuts() {
   syncProgramCamera()
 }
 
-function renderPreview() {
+function renderPreviewNow() {
   const sceneDefinition = selectedScene.value
   const cameraDefinition = previewCamera.value
   const host = viewport.value
@@ -71,6 +72,14 @@ function renderPreview() {
   }
 }
 
+function renderPreview() {
+  if (previewFrame) return
+  previewFrame = requestAnimationFrame(() => {
+    previewFrame = 0
+    renderPreviewNow()
+  })
+}
+
 onMounted(async () => {
   await nextTick()
   if (!canvas.value || !viewport.value) return
@@ -88,6 +97,7 @@ onMounted(async () => {
 })
 
 onBeforeUnmount(() => {
+  if (previewFrame) cancelAnimationFrame(previewFrame)
   resizeObserver?.disconnect()
   runtimeRegistry.dispose()
   renderer?.dispose()

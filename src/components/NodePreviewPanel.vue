@@ -4,20 +4,16 @@ import { storeToRefs } from 'pinia'
 import { Eye, ImageOff } from '@lucide/vue'
 import { useEditorStore } from '@/stores/editor'
 import { evaluateNodeGraph } from '@/engine/nodes/evaluateGraph'
-import type { HybridWebGLRenderBackend } from '@/engine/rendering/HybridWebGLRenderBackend'
+import type { AuroraFrameEngine } from '@/engine/rendering/AuroraFrameEngine'
 
 const store = useEditorStore()
 const {
-  project, currentTime, layers, assets, scenes3D, nodes, nodeConnections, renderRootNodeId, selectedNodeId,
+  project, currentTime, playing, layers, assets, scenes3D, nodes, nodeConnections, renderRootNodeId, renderRevision, rigs, selectedNodeId,
 } = storeToRefs(store)
 const canvas = ref<HTMLCanvasElement>()
 const initializing = ref(true)
 const renderError = ref(false)
-let renderer: HybridWebGLRenderBackend | null = null
-let drawFrame = 0
-let rendering = false
-let redrawRequested = false
-let disposed = false
+let renderer: AuroraFrameEngine | null = null
 
 const selectedNode = computed(() => nodes.value.find((node) => node.id === selectedNodeId.value))
 const selectedNodeHasImage = computed(() => {
@@ -71,7 +67,7 @@ const previewCanvasStyle = computed(() => ({
 async function drawNow() {
   if (!renderer) return
   try {
-    await renderer.renderFrame({
+    await renderer.requestFrame({
       project: project.value,
       layers: layers.value,
       scenes3D: scenes3D.value,
@@ -79,7 +75,10 @@ async function drawNow() {
       nodes: selectedNodeHasImage.value ? nodes.value : [],
       nodeConnections: selectedNodeHasImage.value ? nodeConnections.value : [],
       renderRootNodeId: selectedNodeHasImage.value ? previewRootNodeId.value : null,
+      revision: renderRevision.value,
+      rigs: rigs.value,
       time: currentTime.value,
+      playback: playing.value,
       width: previewRenderSize.value.width,
       height: previewRenderSize.value.height,
       quality: 'preview',
@@ -91,25 +90,15 @@ async function drawNow() {
 }
 
 function scheduleDraw() {
-  redrawRequested = true
-  if (drawFrame || rendering || disposed) return
-  drawFrame = requestAnimationFrame(async () => {
-    drawFrame = 0
-    if (!redrawRequested || disposed) return
-    redrawRequested = false
-    rendering = true
-    await drawNow()
-    rendering = false
-    if (redrawRequested) scheduleDraw()
-  })
+  void drawNow()
 }
 
 onMounted(async () => {
   await nextTick()
   if (!canvas.value) return
   try {
-    const { HybridWebGLRenderBackend } = await import('@/engine/rendering/HybridWebGLRenderBackend')
-    renderer = new HybridWebGLRenderBackend(canvas.value, '/demo/aurora-ridge.png')
+    const { AuroraFrameEngine } = await import('@/engine/rendering/AuroraFrameEngine')
+    renderer = new AuroraFrameEngine(canvas.value, '/demo/aurora-ridge.png', { targetFrameMs: 24, adaptiveQuality: true })
     await renderer.initialize({ ...previewRenderSize.value, pixelRatio: 1 })
     await drawNow()
   } catch {
@@ -120,13 +109,11 @@ onMounted(async () => {
 })
 
 onBeforeUnmount(() => {
-  disposed = true
-  if (drawFrame) cancelAnimationFrame(drawFrame)
   void renderer?.dispose()
   renderer = null
 })
 
-watch([currentTime, project, layers, scenes3D, nodes, nodeConnections, previewRootNodeId], scheduleDraw, { deep: true })
+watch([currentTime, project, layers, scenes3D, nodes, nodeConnections, previewRootNodeId, renderRevision, rigs], scheduleDraw, { deep: true })
 </script>
 
 <template>

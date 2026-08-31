@@ -10,11 +10,23 @@ import type { Aurora3DObject, Aurora3DScene, AuroraCamera, AuroraLight, AuroraRi
 export interface Scene3DRuntime {
   sceneId: string
   revision: number
+  structureKey: string
   scene: THREE.Scene
   root: THREE.Group
   objects: Map<string, THREE.Object3D>
   cameras: Map<string, THREE.Camera>
   lights: Map<string, THREE.Light>
+}
+
+/** Value edits must not rebuild a complete Three scene. Only topology changes earn a new runtime. */
+function sceneStructureKey(definition: Aurora3DScene, assets: Map<string, MediaAsset>) {
+  const objects = definition.objects.map((object) => [
+    object.id, object.type, object.primitive, object.parentId ?? '', object.assetId ?? '',
+    object.assetId ? assets.get(object.assetId)?.dimensions ?? '' : '',
+  ].join(':')).join('|')
+  const cameras = definition.cameras.map((camera) => `${camera.id}:${camera.projection}`).join('|')
+  const lights = definition.lights.map((light) => `${light.id}:${light.type}`).join('|')
+  return `${objects}#${cameras}#${lights}`
 }
 
 function applyTransform(target: THREE.Object3D, transform: Transform3D, time: number) {
@@ -243,10 +255,11 @@ export class ThreeSceneRuntimeRegistry {
     this.disposed = false
     const assetMap = new Map(assets.map((asset) => [asset.id, asset]))
     const rigMap = new Map(rigs.map((rig) => [rig.id, rig]))
+    const structureKey = sceneStructureKey(sceneDefinition, assetMap)
     let runtime = this.runtimes.get(sceneDefinition.id)
-    if (!runtime || runtime.revision !== sceneDefinition.revision) {
+    if (!runtime || runtime.structureKey !== structureKey) {
       if (runtime) this.disposeRuntime(runtime)
-      runtime = this.create(sceneDefinition, width / Math.max(1, height), assetMap)
+      runtime = this.create(sceneDefinition, width / Math.max(1, height), assetMap, structureKey)
       this.runtimes.set(sceneDefinition.id, runtime)
     }
     this.update(runtime, sceneDefinition, width / Math.max(1, height), time, assetMap, rigMap)
@@ -310,7 +323,7 @@ export class ThreeSceneRuntimeRegistry {
     })
   }
 
-  private create(definition: Aurora3DScene, aspect: number, assets: Map<string, MediaAsset>): Scene3DRuntime {
+  private create(definition: Aurora3DScene, aspect: number, assets: Map<string, MediaAsset>, structureKey: string): Scene3DRuntime {
     const scene = new THREE.Scene()
     const root = new THREE.Group()
     root.name = definition.name
@@ -318,6 +331,7 @@ export class ThreeSceneRuntimeRegistry {
     const runtime: Scene3DRuntime = {
       sceneId: definition.id,
       revision: definition.revision,
+      structureKey,
       scene,
       root,
       objects: new Map(),
@@ -362,6 +376,10 @@ export class ThreeSceneRuntimeRegistry {
       object.visible = item.visible
       applyTransform(object, item.transform, time)
       if (object instanceof THREE.Mesh) syncGeometry(object, item, item.rigId ? rigs.get(item.rigId) : undefined, assets, time)
+      if (object instanceof THREE.Mesh) {
+        object.castShadow = item.castShadow
+        object.receiveShadow = item.receiveShadow
+      }
       if (object instanceof THREE.Mesh && object.material instanceof THREE.MeshStandardMaterial) {
         this.syncImageMap(object.material, item, assets)
         object.material.color.set(item.material.baseColor)
@@ -370,7 +388,6 @@ export class ThreeSceneRuntimeRegistry {
         object.material.metalness = evaluateNumericProperty(item.material.metalness, time)
         object.material.roughness = evaluateNumericProperty(item.material.roughness, time)
         object.material.emissiveIntensity = evaluateNumericProperty(item.material.emissiveIntensity, time)
-        object.material.needsUpdate = true
       }
     })
     runtime.root.updateMatrixWorld(true)

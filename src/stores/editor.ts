@@ -168,6 +168,7 @@ export const useEditorStore = defineStore('editor', () => {
   let persistenceReady = false
   let saveTimer: number | null = null
   let changeRevision = 0
+  const renderRevision = ref(0)
   let saveQueue: Promise<void> = Promise.resolve()
 
   function applyLoadedState(state: SerializedEditorState) {
@@ -206,6 +207,7 @@ export const useEditorStore = defineStore('editor', () => {
     openClusterTabs.value = []
     activeClusterId.value = null
     resetEditorHistory()
+    renderRevision.value += 1
     return addedStarterTracks
   }
 
@@ -1517,6 +1519,7 @@ export const useEditorStore = defineStore('editor', () => {
 
   function scheduleProjectSave() {
     changeRevision += 1
+    renderRevision.value += 1
     saveStatus.value = 'Saving…'
     if (typeof window === 'undefined') return
     if (saveTimer !== null) window.clearTimeout(saveTimer)
@@ -2577,7 +2580,7 @@ export const useEditorStore = defineStore('editor', () => {
   resetEditorHistory()
 
   return {
-    project, availableProjects, projectBrowserBusy, projectBrowserError,
+    project, availableProjects, projectBrowserBusy, projectBrowserError, renderRevision,
     workspace, currentTime, playing, loop, autoKey, snap, ripple, selectedLayerId, selectedKeyframeId,
     canUndo, canRedo, undo, redo, beginInteractiveEdit, endInteractiveEdit,
     selectedNodeId, selectedSceneId, selectedSceneEntityId, zoom, saveStatus, exportProgress, exportStatus, exportMessage, assets, layers, scenes3D,

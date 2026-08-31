@@ -120,9 +120,20 @@ interface MaskRasterCacheEntry {
 
 interface MaskGeometryCacheEntry { key: string; geometry: MaskGeometryField }
 
+interface PixiPassCacheEntry {
+  key: string
+  container: Container
+}
+
+interface AppendedPixiLayer {
+  container: Container
+  cached: boolean
+}
+
 export interface HybridRendererStats {
   backend: 'WebGL2'
   pixiPasses: number
+  pixiBatches: number
   threePasses: number
   threeDrawCalls: number
   triangles: number
@@ -148,12 +159,15 @@ export class HybridWebGLRenderBackend implements RenderBackend {
   private readonly frameTextures = new Map<string, Texture>()
   /** Rigs this frame's passes may be attached to, resolved once instead of per layer. */
   private readonly frameRigs = new Map<string, AuroraRig>()
+  /** Static display objects and filters survive frames; only their evaluated transform is updated. */
+  private readonly pixiPassCache = new Map<string, PixiPassCacheEntry>()
+  private readonly activePixiPasses = new Set<string>()
   private pixelRatio = 1
   private initialized = false
   private initialization: Promise<void> | null = null
   private contextLost = false
   private lastStats: HybridRendererStats = {
-    backend: 'WebGL2', pixiPasses: 0, threePasses: 0, threeDrawCalls: 0, triangles: 0, width: 1, height: 1,
+    backend: 'WebGL2', pixiPasses: 0, pixiBatches: 0, threePasses: 0, threeDrawCalls: 0, triangles: 0, width: 1, height: 1,
   }
 
   constructor(private readonly canvas: HTMLCanvasElement, private readonly sourceUrl: string) {
@@ -233,12 +247,14 @@ export class HybridWebGLRenderBackend implements RenderBackend {
     if (!this.threeRenderer || !this.pixiRenderer || this.contextLost) return this.surface(request.width, request.height)
     const size = resolveRenderSize(request.width, request.height, request.quality)
     if (this.lastStats.width !== size.width || this.lastStats.height !== size.height) this.resize(size.width, size.height, this.pixelRatio)
-    const plan = createRenderPlan({ ...request, width: size.width, height: size.height })
+    const plan = request.compiledPlan
+      ? { ...request.compiledPlan, width: size.width, height: size.height, quality: request.quality }
+      : createRenderPlan({ ...request, width: size.width, height: size.height })
     const layerMap = new Map(request.layers.map((layer) => [layer.id, layer]))
     this.frameRigs.clear()
     ;(request.rigs ?? []).forEach((rig) => this.frameRigs.set(rig.id, rig))
     const sceneMap = new Map(request.scenes3D.map((scene) => [scene.id, scene]))
-    await this.resolveFrameTextures(plan, layerMap, request.assets ?? [], request.time)
+    await this.resolveFrameTextures(plan, layerMap, request.assets ?? [], request.time, request.playback ?? false)
     await this.runtimeRegistry.prepareAssets(request.scenes3D, request.assets ?? [])
 
     this.threeRenderer.resetState()
@@ -248,24 +264,51 @@ export class HybridWebGLRenderBackend implements RenderBackend {
     this.threeRenderer.clear(true, true, true)
 
     let pixiPasses = 0
+    let pixiBatches = 0
     let threePasses = 0
+    this.activePixiPasses.clear()
+    let pixiBatch: Array<{ pass: RenderPlan['passes'][number]; layer: EditorLayer }> = []
+    const flushPixi = () => {
+      if (!pixiBatch.length) return
+      const stage = new Container()
+      const ephemeral: Container[] = []
+      pixiBatch.forEach(({ pass, layer }) => {
+        const appended = this.appendPixiLayer(
+          stage, pass.id, request.revision, layer, request.time, size.width, size.height,
+          request.project.width, request.project.height, pass.effects, pass.blendMode, layerMap,
+        )
+        if (appended && !appended.cached) ephemeral.push(appended.container)
+      })
+      this.pixiRenderer!.resetState()
+      this.pixiRenderer!.render({ container: stage, clear: false })
+      pixiBatches += 1
+      stage.removeChildren()
+      ephemeral.forEach((container) => container.destroy({ children: true }))
+      stage.destroy()
+      this.threeRenderer!.resetState()
+      pixiBatch = []
+    }
     plan.passes.forEach((pass) => {
       const layer = layerMap.get(pass.layerId)
       if (!layer) return
       if (pass.backend === 'three-webgl') {
+        flushPixi()
         const scene = pass.sceneId ? sceneMap.get(pass.sceneId) : undefined
         if (!scene) return
         this.renderThreeLayer(layer, scene, request.time, size.width, size.height, request.project.width, request.project.height, pass.effects, layerMap, request.assets ?? [], request.rigs ?? [])
         threePasses += 1
       } else {
-        this.renderPixiLayer(layer, request.time, size.width, size.height, request.project.width, request.project.height, pass.effects, pass.blendMode, layerMap)
+        pixiBatch.push({ pass, layer })
         pixiPasses += 1
       }
     })
+    flushPixi()
+    this.prunePixiPassCache()
 
     this.lastStats = {
       backend: 'WebGL2',
       pixiPasses,
+      pixiBatches,
       threePasses,
       threeDrawCalls: this.threeRenderer.info.render.calls,
       triangles: this.threeRenderer.info.render.triangles,
@@ -311,7 +354,7 @@ export class HybridWebGLRenderBackend implements RenderBackend {
    * resolving each layer to a texture the cache already holds or is about to. A video is seeked to
    * its own local time, since a clip trimmed to start later in the timeline still begins at zero.
    */
-  private async resolveFrameTextures(plan: RenderPlan, layerMap: Map<string, EditorLayer>, assets: MediaAsset[], time: number) {
+  private async resolveFrameTextures(plan: RenderPlan, layerMap: Map<string, EditorLayer>, assets: MediaAsset[], time: number, playback: boolean) {
     this.frameTextures.clear()
     const assetMap = new Map(assets.map((asset) => [asset.id, asset]))
     await Promise.all(plan.passes.map(async (pass) => {
@@ -321,7 +364,7 @@ export class HybridWebGLRenderBackend implements RenderBackend {
       if (!asset?.hash) return
       const url = mediaUrl(asset.hash)
       const texture = layer.type === 'video'
-        ? await this.mediaTextures.videoFrame(url, Math.max(0, time - layer.start))
+        ? await this.mediaTextures.videoFrame(url, Math.max(0, time - layer.start), playback)
         : await this.mediaTextures.image(url)
       if (texture) this.frameTextures.set(layer.id, texture)
     }))
@@ -358,26 +401,46 @@ export class HybridWebGLRenderBackend implements RenderBackend {
     return entry
   }
 
-  private renderPixiLayer(layer: EditorLayer, time: number, width: number, height: number, projectWidth: number, projectHeight: number, effects: GraphEffects, blendMode: NodeBlendMode, layerMap: Map<string, EditorLayer>) {
-    if (!this.pixiRenderer || !this.threeRenderer) return
+  private appendPixiLayer(
+    stage: Container,
+    passId: string,
+    revision: number | undefined,
+    layer: EditorLayer,
+    time: number,
+    width: number,
+    height: number,
+    projectWidth: number,
+    projectHeight: number,
+    effects: GraphEffects,
+    blendMode: NodeBlendMode,
+    layerMap: Map<string, EditorLayer>,
+  ): AppendedPixiLayer | null {
+    if (!this.pixiRenderer || !this.threeRenderer) return null
+    const cacheable = (layer.type === 'text' || layer.type === 'shape') && !effects.mask && effects.vignetteAmount <= 0
+    const fallbackRevision = revision === undefined ? JSON.stringify({ layer, effects, blendMode }) : revision
+    const cacheKey = `${fallbackRevision}|${width}x${height}|${projectWidth}x${projectHeight}`
+    const cached = cacheable ? this.pixiPassCache.get(passId) : undefined
+    if (cached?.key === cacheKey) {
+      this.applyPixiPassTransform(cached.container, layer, time, width, height, projectWidth, projectHeight, effects, blendMode)
+      stage.addChild(cached.container)
+      this.activePixiPasses.add(passId)
+      return { container: cached.container, cached: true }
+    }
+    if (cached) {
+      cached.container.parent?.removeChild(cached.container)
+      cached.container.destroy({ children: true })
+      this.pixiPassCache.delete(passId)
+    }
+
     const container = this.createPixiLayer(layer, time, width, height, projectWidth, projectHeight)
-    if (!container) return
-    // Node effects sit on top of the layer's own transform, so the graph shifts what the layer draws.
+    if (!container) return null
+    this.applyPixiPassTransform(container, layer, time, width, height, projectWidth, projectHeight, effects, blendMode)
     const scaleFactor = width / projectWidth
-    container.position.set(
-      container.position.x + effects.offsetX * scaleFactor,
-      container.position.y + effects.offsetY * scaleFactor,
-    )
-    container.rotation += THREE.MathUtils.degToRad(effects.rotation)
-    container.scale.set(container.scale.x * effects.scale, container.scale.y * effects.scale)
-    container.alpha *= effects.opacity
-    container.blendMode = blendMode
     const filters = []
     if (effects.blur > 0) filters.push(new BlurFilter({ strength: effects.blur * scaleFactor, quality: 4 }))
     const colorMatrix = colorFilterFor(effects)
     if (colorMatrix) filters.push(colorMatrix)
     if (filters.length) container.filters = filters
-    const stage = new Container()
     stage.addChild(container)
     const maskLayer = effects.mask ? layerMap.get(effects.mask.layerId) : null
     const maskRaster = effects.mask && maskLayer
@@ -393,10 +456,47 @@ export class HybridWebGLRenderBackend implements RenderBackend {
     }
     const vignette = vignetteOverlay(effects, width, height)
     if (vignette) stage.addChild(vignette)
-    this.pixiRenderer.resetState()
-    this.pixiRenderer.render({ container: stage, clear: false })
-    stage.destroy({ children: true })
-    this.threeRenderer.resetState()
+    if (cacheable) {
+      this.pixiPassCache.set(passId, { key: cacheKey, container })
+      this.activePixiPasses.add(passId)
+      return { container, cached: true }
+    }
+    return { container, cached: false }
+  }
+
+  private applyPixiPassTransform(
+    container: Container,
+    layer: EditorLayer,
+    time: number,
+    width: number,
+    height: number,
+    projectWidth: number,
+    projectHeight: number,
+    effects: GraphEffects,
+    blendMode: NodeBlendMode,
+  ) {
+    const scaleX = width / projectWidth
+    const scaleY = height / projectHeight
+    container.position.set(
+      evaluateNumericProperty(layer.transform.x, time) * scaleX + effects.offsetX * scaleX,
+      evaluateNumericProperty(layer.transform.y, time) * scaleY + effects.offsetY * scaleY,
+    )
+    container.rotation = THREE.MathUtils.degToRad(evaluateNumericProperty(layer.transform.rotation, time) + effects.rotation)
+    container.scale.set(
+      evaluateNumericProperty(layer.transform.scaleX, time) / 100 * effects.scale,
+      evaluateNumericProperty(layer.transform.scaleY, time) / 100 * effects.scale,
+    )
+    container.alpha = evaluateNumericProperty(layer.transform.opacity, time) / 100 * effects.opacity
+    container.blendMode = blendMode
+  }
+
+  private prunePixiPassCache() {
+    this.pixiPassCache.forEach((entry, passId) => {
+      if (this.activePixiPasses.has(passId)) return
+      entry.container.parent?.removeChild(entry.container)
+      entry.container.destroy({ children: true })
+      this.pixiPassCache.delete(passId)
+    })
   }
 
   private createPixiLayer(layer: EditorLayer, time: number, width: number, height: number, projectWidth: number, projectHeight: number): Container | null {
@@ -562,11 +662,13 @@ export class HybridWebGLRenderBackend implements RenderBackend {
       this.pixiRenderer?.resetState()
     } else {
       // An unmasked 3D scene can still take the direct path and avoid allocating an intermediate pass.
+      const opacityRestore: Array<{ material: THREE.Material & { opacity: number }; opacity: number }> = []
       runtime.root.traverse((object) => {
         if (!(object instanceof THREE.Mesh)) return
         const materials = Array.isArray(object.material) ? object.material : [object.material]
         materials.forEach((material) => {
-          material.transparent = true
+          if (!('opacity' in material) || typeof material.opacity !== 'number') return
+          opacityRestore.push({ material, opacity: material.opacity })
           material.opacity *= layerOpacity
         })
       })
@@ -575,6 +677,7 @@ export class HybridWebGLRenderBackend implements RenderBackend {
       this.threeRenderer.autoClear = false
       this.threeRenderer.clearDepth()
       this.threeRenderer.render(runtime.scene, camera)
+      opacityRestore.forEach(({ material, opacity }) => { material.opacity = opacity })
       this.pixiRenderer?.resetState()
     }
     const vignette = vignetteOverlay(effects, width, height)
@@ -624,6 +727,9 @@ export class HybridWebGLRenderBackend implements RenderBackend {
     this.mediaTextures.dispose()
     this.frameTextures.clear()
     this.frameRigs.clear()
+    this.pixiPassCache.forEach((entry) => entry.container.destroy({ children: true }))
+    this.pixiPassCache.clear()
+    this.activePixiPasses.clear()
     this.sourceTexture?.destroy(true)
     this.sourceTexture = null
     this.sourceImage = null

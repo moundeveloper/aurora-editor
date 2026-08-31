@@ -7,7 +7,7 @@ import {
   Type, Volume2, VolumeX, ZoomIn, ZoomOut,
 } from '@lucide/vue'
 import { useEditorStore } from '@/stores/editor'
-import type { HybridWebGLRenderBackend } from '@/engine/rendering/HybridWebGLRenderBackend'
+import type { AuroraFrameEngine } from '@/engine/rendering/AuroraFrameEngine'
 import { evaluateNumericProperty } from '@/engine/animation/evaluateProperty'
 import { setNumericPropertyAtTime } from '@/engine/animation/editNumericProperty'
 import type { AuroraRig, EditorLayer, ShapePathPoint } from '@/models/editor'
@@ -16,7 +16,7 @@ import { poseOffsetTowards, poseRotationTowards, restAimTowards } from '@/engine
 import IconButton from './common/IconButton.vue'
 
 const store = useEditorStore()
-const { project, currentTime, playing, loop, snap, zoom, layers, timelineLayers, assets, scenes3D, nodes, nodeConnections, renderRootNodeId, rigs, selectedRigBoneId, selectedLayer, selectedLayerId, selectedKeyframeId } = storeToRefs(store)
+const { project, currentTime, playing, loop, snap, zoom, layers, timelineLayers, assets, scenes3D, nodes, nodeConnections, renderRootNodeId, renderRevision, rigs, selectedRigBoneId, selectedLayer, selectedLayerId, selectedKeyframeId } = storeToRefs(store)
 const canvas = ref<HTMLCanvasElement>()
 const canvasWrap = ref<HTMLElement>()
 const transformBox = ref<HTMLElement>()
@@ -29,12 +29,8 @@ const showGuides = ref(true)
 const viewportSize = ref({ width: 0, height: 0 })
 const viewportPan = ref({ x: 0, y: 0 })
 const isViewportPanning = ref(false)
-let renderer: HybridWebGLRenderBackend | null = null
+let renderer: AuroraFrameEngine | null = null
 let resizeObserver: ResizeObserver | null = null
-let drawFrame = 0
-let rendering = false
-let redrawRequested = false
-let disposed = false
 
 interface ShapeDrawState {
   pointerId: number
@@ -355,7 +351,7 @@ function endRigDrag() {
 async function drawNow() {
   if (!renderer) return
   try {
-    await renderer.renderFrame({
+    await renderer.requestFrame({
       project: project.value,
       layers: layers.value,
       scenes3D: scenes3D.value,
@@ -363,8 +359,10 @@ async function drawNow() {
       nodes: nodes.value,
       nodeConnections: nodeConnections.value,
       renderRootNodeId: renderRootNodeId.value,
+      revision: renderRevision.value,
       rigs: rigs.value,
       time: currentTime.value,
+      playback: playing.value,
       width: previewRenderSize.value.width,
       height: previewRenderSize.value.height,
       quality: 'preview',
@@ -374,23 +372,9 @@ async function drawNow() {
   }
 }
 
-/**
- * Brush strokes and drags mutate the graph many times per pointer event, and every mutation reaches
- * the deep watcher below. Coalesce to one full-size frame, and never start a second render while the
- * previous one is still resolving.
- */
+/** Brush strokes and drags can outpace rendering; the engine keeps only the newest queued frame. */
 function draw() {
-  redrawRequested = true
-  if (drawFrame || rendering || disposed) return
-  drawFrame = requestAnimationFrame(async () => {
-    drawFrame = 0
-    if (!redrawRequested || disposed) return
-    redrawRequested = false
-    rendering = true
-    await drawNow()
-    rendering = false
-    if (redrawRequested) draw()
-  })
+  void drawNow()
 }
 
 function setTransformValue(key: 'x' | 'y' | 'scaleX' | 'scaleY' | 'rotation', value: number, targetLayer?: EditorLayer) {
@@ -730,8 +714,8 @@ function onViewerKeydown(event: KeyboardEvent) {
 onMounted(async () => {
   await nextTick()
   if (!canvas.value) return
-  const { HybridWebGLRenderBackend } = await import('@/engine/rendering/HybridWebGLRenderBackend')
-  renderer = new HybridWebGLRenderBackend(canvas.value, '/demo/aurora-ridge.png')
+  const { AuroraFrameEngine } = await import('@/engine/rendering/AuroraFrameEngine')
+  renderer = new AuroraFrameEngine(canvas.value, '/demo/aurora-ridge.png')
   await renderer.initialize({ ...previewRenderSize.value, pixelRatio: 1 })
   if (canvasWrap.value) {
     resizeObserver = new ResizeObserver(([entry]) => {
@@ -748,8 +732,6 @@ onMounted(async () => {
 })
 
 onBeforeUnmount(() => {
-  disposed = true
-  if (drawFrame) cancelAnimationFrame(drawFrame)
   resizeObserver?.disconnect()
   window.removeEventListener('pointermove', onViewportPointerMove)
   window.removeEventListener('pointerup', endViewportTransform)
@@ -759,7 +741,7 @@ onBeforeUnmount(() => {
   renderer = null
 })
 
-watch([currentTime, project, layers, scenes3D, nodes, nodeConnections, renderRootNodeId, rigs], draw, { deep: true })
+watch([currentTime, project, layers, scenes3D, nodes, nodeConnections, renderRootNodeId, renderRevision, rigs], draw, { deep: true })
 </script>
 
 <template>

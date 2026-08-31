@@ -42,10 +42,16 @@ export interface RenderFrameRequest {
   rigs?: AuroraRig[]
   /** A Viewer node takes over the frame when one is active; otherwise the Composite node is the root. */
   renderRootNodeId?: string | null
+  /** Structural editor revision; time changes do not invalidate the compiled graph. */
+  revision?: number
   time: number
+  /** Sequential playback uses the media decoder clock; scrubbing and export request exact seeks. */
+  playback?: boolean
   width: number
   height: number
   quality: RenderQuality
+  /** Supplied by AuroraFrameEngine so the device never recompiles editor nodes. */
+  compiledPlan?: RenderPlan
 }
 
 export interface RendererInitializationOptions {

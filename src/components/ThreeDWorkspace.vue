@@ -494,13 +494,15 @@ function attachSelection() {
   else transform.detach()
 }
 
-function renderViewport() {
+let viewportFrame = 0
+
+function renderViewportNow() {
   const sceneDefinition = selectedScene.value
   const host = viewport.value
   if (!renderer || !editorCamera || !host || !sceneDefinition) return
   const syncScene = !transform?.dragging || !runtime || runtime.sceneId !== sceneDefinition.id
   if (syncScene) {
-    if (runtime && (runtime.sceneId !== sceneDefinition.id || runtime.revision !== sceneDefinition.revision)) disposeEditorHelpers(runtime)
+    if (runtime && runtime.sceneId !== sceneDefinition.id) disposeEditorHelpers(runtime)
     runtime = runtimeRegistry.get(sceneDefinition, host.clientWidth, host.clientHeight, currentTime.value, assets.value, rigs.value)
   }
   const targetRuntime = runtime
@@ -517,6 +519,14 @@ function renderViewport() {
   renderer.setViewport(0, 0, host.clientWidth, host.clientHeight)
   renderer.render(targetRuntime.scene, editorCamera)
   stats.value = { calls: renderer.info.render.calls, triangles: renderer.info.render.triangles }
+}
+
+function renderViewport() {
+  if (viewportFrame) return
+  viewportFrame = requestAnimationFrame(() => {
+    viewportFrame = 0
+    renderViewportNow()
+  })
 }
 
 function resizeViewport() {
@@ -1000,6 +1010,7 @@ onMounted(async () => {
 })
 
 onBeforeUnmount(() => {
+  if (viewportFrame) cancelAnimationFrame(viewportFrame)
   resizeObserver?.disconnect()
   window.removeEventListener('keydown', onKeydown)
   window.removeEventListener('pointermove', onPathDragMove)

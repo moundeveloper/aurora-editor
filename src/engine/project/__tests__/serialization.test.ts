@@ -4,7 +4,7 @@ import * as THREE from 'three'
 import { evaluateNumericProperty } from '@/engine/animation/evaluateProperty'
 import { setNumericPropertyAtTime, toggleNumericKeyframe } from '@/engine/animation/editNumericProperty'
 import { createRenderPlan, HYBRID_ALPHA_CONTRACT, resolveRenderSize } from '@/engine/rendering/contracts'
-import { createDemo3DScene } from '@/engine/scene3d/sceneFactory'
+import { createDemo3DScene, createPrimitiveObject } from '@/engine/scene3d/sceneFactory'
 import { ThreeSceneRuntimeRegistry } from '@/engine/scene3d/ThreeSceneRuntime'
 import { CURRENT_PROJECT_VERSION, deserializeEditorState, serializeEditorState } from '@/engine/project/serialization'
 import { createDemoNodeGraph } from '@/engine/nodes/nodeGraph'
@@ -129,6 +129,27 @@ describe('hybrid project architecture', () => {
     const keyLight = runtime.lights.get('light-key') as THREE.DirectionalLight
     const lightDirection = keyLight.target.position.clone().sub(keyLight.position).normalize()
     expect(lightDirection.angleTo(keyLight.position.clone().negate().normalize())).toBeCloseTo(0)
+    registry.dispose()
+  })
+
+  it('reconciles 3D value edits without destroying the runtime scene', () => {
+    const scene = createDemo3DScene()
+    const registry = new ThreeSceneRuntimeRegistry()
+    const first = registry.get(scene, 1280, 720, 0)
+    const cube = first.objects.get('object-aurora-cube')
+
+    scene.objects[0]!.transform.position.x.value = 4
+    scene.revision += 1
+    const valueEdit = registry.get(scene, 1280, 720, 0)
+    expect(valueEdit).toBe(first)
+    expect(valueEdit.objects.get('object-aurora-cube')).toBe(cube)
+    expect(cube?.position.x).toBe(4)
+
+    scene.objects.push(createPrimitiveObject('sphere', 3))
+    scene.revision += 1
+    const topologyEdit = registry.get(scene, 1280, 720, 0)
+    expect(topologyEdit).not.toBe(first)
+    expect(topologyEdit.objects.size).toBe(3)
     registry.dispose()
   })
 
