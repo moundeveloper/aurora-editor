@@ -3,21 +3,25 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { storeToRefs } from 'pinia'
 import {
   BoxSelect, ChevronDown, Circle, Crosshair, Grid3X3, Hand, Maximize2, MousePointer2,
-  Move, Pause, PenTool, Play, RotateCcw, SkipBack, SkipForward, Square,
+  Move, Pause, PenTool, Play, RotateCcw, SkipBack, SkipForward, Spline, Square,
   Type, Volume2, VolumeX, ZoomIn, ZoomOut,
 } from '@lucide/vue'
 import { useEditorStore } from '@/stores/editor'
-import { CanvasCompositionRenderer } from '@/engine/rendering/CanvasCompositionRenderer'
+import type { HybridWebGLRenderBackend } from '@/engine/rendering/HybridWebGLRenderBackend'
 import { evaluateNumericProperty } from '@/engine/animation/evaluateProperty'
-import type { EditorLayer } from '@/models/editor'
+import { setNumericPropertyAtTime } from '@/engine/animation/editNumericProperty'
+import type { AuroraRig, EditorLayer, ShapePathPoint } from '@/models/editor'
+import { applyMatrix, boneTransforms, invert, multiply, rotation as rotationMatrix, scaling, translation, type Matrix2D, type RigPoint } from '@/engine/rig/skeleton'
+import { poseOffsetTowards, poseRotationTowards, restAimTowards } from '@/engine/rig/rigPosing'
 import IconButton from './common/IconButton.vue'
 
 const store = useEditorStore()
-const { project, currentTime, playing, loop, snap, zoom, layers, selectedLayer, selectedLayerId, selectedKeyframeId } = storeToRefs(store)
+const { project, currentTime, playing, loop, snap, zoom, layers, timelineLayers, assets, scenes3D, nodes, nodeConnections, renderRootNodeId, rigs, selectedRigBoneId, selectedLayer, selectedLayerId, selectedKeyframeId } = storeToRefs(store)
 const canvas = ref<HTMLCanvasElement>()
 const canvasWrap = ref<HTMLElement>()
 const transformBox = ref<HTMLElement>()
-const activeTool = ref('Select')
+type MotionTool = 'Select' | 'Hand' | 'Zoom' | 'Text' | 'Rectangle' | 'Ellipse' | 'Pen' | 'Rig' | 'Transform'
+const activeTool = ref<MotionTool>('Select')
 const activeTransformMode = ref<'move' | 'scale' | 'rotate' | null>(null)
 const audioEnabled = ref(true)
 const showGrid = ref(false)
@@ -25,8 +29,46 @@ const showGuides = ref(true)
 const viewportSize = ref({ width: 0, height: 0 })
 const viewportPan = ref({ x: 0, y: 0 })
 const isViewportPanning = ref(false)
-let renderer: CanvasCompositionRenderer | null = null
+let renderer: HybridWebGLRenderBackend | null = null
 let resizeObserver: ResizeObserver | null = null
+let drawFrame = 0
+let rendering = false
+let redrawRequested = false
+let disposed = false
+
+interface ShapeDrawState {
+  pointerId: number
+  kind: 'rectangle' | 'ellipse'
+  start: { x: number; y: number }
+  current: { x: number; y: number }
+  startClientX: number
+  startClientY: number
+  shift: boolean
+  alt: boolean
+}
+
+interface PenDragState { pointerId: number; pointId: string }
+
+const shapeDraw = ref<ShapeDrawState | null>(null)
+const penDraft = ref<{ points: ShapePathPoint[] } | null>(null)
+let penDrag: PenDragState | null = null
+
+/** Half the on-screen size of an image layer's quad, in project pixels. Rig space spans -1 to 1 across it. */
+const RIG_HALF_SIZE = 130
+/** Pointer slack for grabbing a bone handle, in screen pixels. */
+const RIG_GRAB_RADIUS = 11
+
+type RigDragMode = 'create' | 'rotate' | 'offset' | 'rest-head' | 'rest-tip'
+
+interface RigDragState {
+  pointerId: number
+  mode: RigDragMode
+  boneId: string
+  origin: { x: number; y: number; angle: number; length: number }
+  moved: boolean
+}
+
+let rigDrag: RigDragState | null = null
 
 interface ViewportTransformState {
   layer: EditorLayer
@@ -48,19 +90,19 @@ interface ViewportTransformState {
   moved: boolean
 }
 
-interface ViewportPanState { startX: number; startY: number; originX: number; originY: number }
+interface ViewportPanState { pointerId: number; startX: number; startY: number; originX: number; originY: number }
 
 let viewportTransformState: ViewportTransformState | null = null
 let viewportPanState: ViewportPanState | null = null
-const tools = [
+const tools: Array<{ name: MotionTool; icon: typeof MousePointer2 }> = [
   { name: 'Select', icon: MousePointer2 }, { name: 'Hand', icon: Hand }, { name: 'Zoom', icon: ZoomIn },
   { name: 'Text', icon: Type }, { name: 'Rectangle', icon: Square }, { name: 'Ellipse', icon: Circle },
-  { name: 'Pen', icon: PenTool }, { name: 'Transform', icon: Move },
+  { name: 'Pen', icon: PenTool }, { name: 'Rig', icon: Spline }, { name: 'Transform', icon: Move },
 ]
 
 const timecode = computed(() => {
   const totalFrames = Math.floor(currentTime.value * project.value.frameRate)
-  const frames = totalFrames % project.value.frameRate
+  const frames = totalFrames % Math.max(1, Math.round(project.value.frameRate))
   const totalSeconds = Math.floor(totalFrames / project.value.frameRate)
   const seconds = totalSeconds % 60
   const minutes = Math.floor(totalSeconds / 60) % 60
@@ -75,7 +117,10 @@ const interactiveLayers = computed(() => [...layers.value]
 function layerBoxSize(layer: EditorLayer) {
   if (layer.type === 'cluster') return { width: 72, height: 72 }
   if (layer.type === 'video') return { width: 100, height: 100 }
-  if (layer.type === 'shape') return { width: 14.6, height: 16.7 }
+  if (layer.type === 'shape') return {
+    width: ((layer.shapeWidth ?? 280) / project.value.width) * 100,
+    height: ((layer.shapeHeight ?? 180) / project.value.height) * 100,
+  }
   if (layer.type === 'image') return { width: 20, height: 35.5 }
   return { width: layer.textContent === 'New Text' ? 28 : 48, height: 13 }
 }
@@ -92,8 +137,19 @@ function layerOverlayStyle(layer: EditorLayer) {
   }
 }
 
+/**
+ * The box may only describe a layer of the timeline currently being edited.
+ *
+ * `selectedLayer` resolves an id anywhere in the tree and falls back to the first layer when it
+ * resolves to nothing — right for the inspector, wrong here. Either would put a box around something
+ * the viewport is not showing: a fallback nobody selected, or a layer that has since been folded
+ * into a cluster and now lives outside this timeline. Matching against the active context's own
+ * layers rules out both.
+ */
+const activeSelection = computed(() => timelineLayers.value.find((layer) => layer.id === selectedLayerId.value && !layer.isPlaceholder) ?? null)
+
 const selectionStyle = computed(() => {
-  const layer = selectedLayer.value
+  const layer = activeSelection.value
   if (!layer || !['text', 'shape', 'image', 'video', 'cluster'].includes(layer.type) || currentTime.value < layer.start || currentTime.value >= layer.start + layer.duration) return { display: 'none' }
   return layerOverlayStyle(layer)
 })
@@ -101,29 +157,251 @@ const selectionStyle = computed(() => {
 const stageStyle = computed(() => {
   const availableWidth = Math.max(0, viewportSize.value.width - 48)
   const availableHeight = Math.max(0, viewportSize.value.height - 48)
-  const fitScale = Math.min(availableWidth / 1280, availableHeight / 720)
+  const fitScale = Math.min(availableWidth / project.value.width, availableHeight / project.value.height)
   const displayScale = Math.max(0, fitScale) * (zoom.value / 100)
   return {
-    width: `${1280 * displayScale}px`,
-    height: `${720 * displayScale}px`,
+    width: `${project.value.width * displayScale}px`,
+    height: `${project.value.height * displayScale}px`,
     transform: `translate(${viewportPan.value.x}px, ${viewportPan.value.y}px)`,
   }
 })
 
+const previewRenderSize = computed(() => {
+  const scale = Math.min(1, 1280 / project.value.width, 720 / project.value.height)
+  return {
+    width: Math.max(1, Math.round(project.value.width * scale)),
+    height: Math.max(1, Math.round(project.value.height * scale)),
+  }
+})
+
+/**
+ * The layer the rig overlay can be drawn over.
+ *
+ * A rig bends a texture, so any textured layer can carry one — but only an image draws at a known
+ * fixed size in project space, which is what the overlay needs to place bones under the cursor. A
+ * video's quad depends on the decoded frame, so its rig is edited numerically in the inspector.
+ */
+const rigLayer = computed(() => (activeSelection.value?.type === 'image' ? activeSelection.value : null))
+const activeRig = computed<AuroraRig | null>(() => rigs.value.find((rig) => rig.id === rigLayer.value?.rigId) ?? null)
+
+/** Project space ← rig space, matching the SVG group transform exactly so hit-testing agrees with what is drawn. */
+const rigMatrix = computed<Matrix2D | null>(() => {
+  const layer = rigLayer.value
+  if (!layer) return null
+  const at = (key: keyof EditorLayer['transform']) => evaluateNumericProperty(layer.transform[key], currentTime.value)
+  return multiply(
+    translation(at('x'), at('y')),
+    multiply(
+      rotationMatrix(at('rotation')),
+      multiply(scaling(at('scaleX') / 100, at('scaleY') / 100), scaling(RIG_HALF_SIZE, -RIG_HALF_SIZE)),
+    ),
+  )
+})
+
+const rigGroupTransform = computed(() => {
+  const layer = rigLayer.value
+  if (!layer) return ''
+  const at = (key: keyof EditorLayer['transform']) => evaluateNumericProperty(layer.transform[key], currentTime.value)
+  return `translate(${at('x')} ${at('y')}) rotate(${at('rotation')}) scale(${at('scaleX') / 100} ${at('scaleY') / 100}) scale(${RIG_HALF_SIZE} ${-RIG_HALF_SIZE})`
+})
+
+/** Posed head and tip of every bone, in rig space, ready to draw inside the transformed group. */
+const rigBoneShapes = computed(() => {
+  const rig = activeRig.value
+  if (!rig) return []
+  const transforms = boneTransforms(rig, currentTime.value)
+  return rig.bones.map((bone) => {
+    const world = transforms.get(bone.id)?.world
+    return {
+      id: bone.id,
+      name: bone.name,
+      head: world ? applyMatrix(world, 0, 0) : { x: bone.x, y: bone.y },
+      tip: world ? applyMatrix(world, bone.length, 0) : { x: bone.x, y: bone.y },
+    }
+  })
+})
+
+/** Handles are authored in rig units, so they have to shrink as the layer's own scale grows. */
+const rigHandleRadius = computed(() => {
+  const layer = rigLayer.value
+  const scale = layer ? Math.abs(evaluateNumericProperty(layer.transform.scaleX, currentTime.value)) / 100 : 1
+  return .045 / Math.max(.05, scale)
+})
+
+/** Capture keeps a drag alive past the element's edge; a pointer that refuses it still drags inside. */
+function capturePointer(pointerId: number) {
+  try {
+    canvasWrap.value?.setPointerCapture(pointerId)
+  } catch {
+    // Nothing to hold on to — the pointer ended, or it never belonged to this element.
+  }
+}
+
+function rigPointAt(event: PointerEvent): RigPoint | null {
+  const matrix = rigMatrix.value
+  const bounds = canvas.value?.getBoundingClientRect()
+  // A collapsed or hidden viewport has no size to divide by, and would hand back a bone at NaN.
+  if (!matrix || !bounds?.width || !bounds.height) return null
+  const projectX = ((event.clientX - bounds.left) / bounds.width) * project.value.width
+  const projectY = ((event.clientY - bounds.top) / bounds.height) * project.value.height
+  const point = applyMatrix(invert(matrix), projectX, projectY)
+  return Number.isFinite(point.x) && Number.isFinite(point.y) ? point : null
+}
+
+/** Distance in screen pixels between a rig-space point and the pointer, for hit-testing handles. */
+function rigScreenDistance(point: RigPoint, event: PointerEvent) {
+  const matrix = rigMatrix.value
+  const bounds = canvas.value?.getBoundingClientRect()
+  if (!matrix || !bounds?.width || !bounds.height) return Number.POSITIVE_INFINITY
+  const projected = applyMatrix(matrix, point.x, point.y)
+  const clientX = bounds.left + (projected.x / project.value.width) * bounds.width
+  const clientY = bounds.top + (projected.y / project.value.height) * bounds.height
+  return Math.hypot(event.clientX - clientX, event.clientY - clientY)
+}
+
+function ensureLayerRig() {
+  const layer = rigLayer.value
+  if (!layer) return null
+  const existing = rigs.value.find((rig) => rig.id === layer.rigId)
+  if (existing) return existing
+  const rig = store.addRig(`${layer.name} Rig`)
+  store.attachRigToLayer(rig.id)
+  return rig
+}
+
+/**
+ * A pointer press with the Rig tool either grabs a handle or starts a new bone.
+ *
+ * Grab order runs tip, head, then the bone itself, because the tip is the handle people reach for
+ * most and it sits on top of the shaft. Shift edits the rest pose — where the skeleton *is* — while
+ * a plain drag poses it, which is the distinction the whole tool turns on.
+ */
+function beginRigInteraction(event: PointerEvent) {
+  const rig = activeRig.value
+  const point = rigPointAt(event)
+  if (!point) return
+  event.preventDefault()
+  capturePointer(event.pointerId)
+
+  if (rig) {
+    const shapes = rigBoneShapes.value
+    const nearest = (pick: 'head' | 'tip') => shapes
+      .map((shape) => ({ shape, distance: rigScreenDistance(shape[pick], event) }))
+      .sort((left, right) => left.distance - right.distance)[0]
+    const tip = nearest('tip')
+    const head = nearest('head')
+    const target = tip && tip.distance <= RIG_GRAB_RADIUS && tip.distance <= (head?.distance ?? Infinity)
+      ? { shape: tip.shape, mode: event.shiftKey ? 'rest-tip' as const : 'rotate' as const }
+      : head && head.distance <= RIG_GRAB_RADIUS
+        ? { shape: head.shape, mode: event.shiftKey ? 'rest-head' as const : 'offset' as const }
+        : null
+    if (target) {
+      const bone = rig.bones.find((item) => item.id === target.shape.id)!
+      selectedRigBoneId.value = bone.id
+      rigDrag = { pointerId: event.pointerId, mode: target.mode, boneId: bone.id, origin: { x: bone.x, y: bone.y, angle: bone.angle, length: bone.length }, moved: false }
+      store.beginInteractiveEdit()
+      return
+    }
+  }
+
+  // Nothing under the cursor: draw a new bone from here, chained to the selected one unless Alt is held.
+  const target = rig ?? ensureLayerRig()
+  if (!target) return
+  const parentId = event.altKey ? undefined : selectedRigBoneId.value ?? undefined
+  const bone = store.addRigBone(target.id, { x: point.x, y: point.y, angle: 90, length: .02, parentId })
+  if (!bone) return
+  rigDrag = { pointerId: event.pointerId, mode: 'create', boneId: bone.id, origin: { x: point.x, y: point.y, angle: 90, length: .02 }, moved: false }
+  store.beginInteractiveEdit()
+}
+
+function updateRigDrag(event: PointerEvent) {
+  const drag = rigDrag
+  const rig = activeRig.value
+  const point = rigPointAt(event)
+  if (!drag || !rig || !point || drag.pointerId !== event.pointerId) return
+  const bone = rig.bones.find((item) => item.id === drag.boneId)
+  if (!bone) return
+  drag.moved = true
+
+  if (drag.mode === 'create' || drag.mode === 'rest-tip') {
+    const { angle, length } = restAimTowards(drag.origin, point, drag.origin.angle)
+    store.setRigBoneRest(rig.id, bone.id, { angle, length, ...(drag.mode === 'create' ? { falloff: Math.max(.25, length * 1.6) } : {}) })
+    return
+  }
+  if (drag.mode === 'rest-head') {
+    store.setRigBoneRest(rig.id, bone.id, { x: point.x, y: point.y })
+    return
+  }
+  if (drag.mode === 'offset') {
+    const offset = poseOffsetTowards(rig, bone, currentTime.value, point)
+    store.setRigBonePose(rig.id, bone.id, 'offsetX', offset.x)
+    store.setRigBonePose(rig.id, bone.id, 'offsetY', offset.y)
+    return
+  }
+  store.setRigBonePose(rig.id, bone.id, 'rotation', poseRotationTowards(rig, bone, currentTime.value, point))
+}
+
+function endRigDrag() {
+  const drag = rigDrag
+  rigDrag = null
+  if (!drag) return
+  const rig = activeRig.value
+  const bone = rig?.bones.find((item) => item.id === drag.boneId)
+  // A click that never became a drag would leave a zero-length bone nobody asked for.
+  if (rig && bone && drag.mode === 'create' && bone.length < .04) store.deleteRigBone(rig.id, bone.id)
+  store.endInteractiveEdit()
+}
+
+async function drawNow() {
+  if (!renderer) return
+  try {
+    await renderer.renderFrame({
+      project: project.value,
+      layers: layers.value,
+      scenes3D: scenes3D.value,
+      assets: assets.value,
+      nodes: nodes.value,
+      nodeConnections: nodeConnections.value,
+      renderRootNodeId: renderRootNodeId.value,
+      rigs: rigs.value,
+      time: currentTime.value,
+      width: previewRenderSize.value.width,
+      height: previewRenderSize.value.height,
+      quality: 'preview',
+    })
+  } catch {
+    // A dropped preview frame must never break viewport interaction.
+  }
+}
+
+/**
+ * Brush strokes and drags mutate the graph many times per pointer event, and every mutation reaches
+ * the deep watcher below. Coalesce to one full-size frame, and never start a second render while the
+ * previous one is still resolving.
+ */
 function draw() {
-  renderer?.render({ time: currentTime.value, layers: layers.value, selectedLayerId: selectedLayerId.value, width: project.value.width, height: project.value.height })
+  redrawRequested = true
+  if (drawFrame || rendering || disposed) return
+  drawFrame = requestAnimationFrame(async () => {
+    drawFrame = 0
+    if (!redrawRequested || disposed) return
+    redrawRequested = false
+    rendering = true
+    await drawNow()
+    rendering = false
+    if (redrawRequested) draw()
+  })
 }
 
 function setTransformValue(key: 'x' | 'y' | 'scaleX' | 'scaleY' | 'rotation', value: number, targetLayer?: EditorLayer) {
   const layer = targetLayer ?? selectedLayer.value
   if (!layer) return
   const channel = layer.transform[key]
-  channel.value = value
-  const selectedKeyframe = channel.keyframes.find((keyframe) => keyframe.id === selectedKeyframeId.value)
-  const keyAtPlayhead = channel.keyframes.find((keyframe) => Math.abs(keyframe.time - currentTime.value) < .02)
-  if (selectedKeyframe) selectedKeyframe.value = value
-  else if (keyAtPlayhead) keyAtPlayhead.value = value
-  else if (store.autoKey && channel.animated) channel.keyframes.push({ id: crypto.randomUUID(), time: currentTime.value, value, interpolation: 'bezier' })
+  const result = setNumericPropertyAtTime(channel, value, currentTime.value, project.value.frameRate, {
+    autoKey: store.autoKey,
+    selectedKeyframeId: selectedKeyframeId.value,
+  })
+  if (result.keyframeId) selectedKeyframeId.value = result.keyframeId
 }
 
 function scaleAxisForHandle(handle: number): ViewportTransformState['scaleAxis'] {
@@ -175,8 +453,9 @@ function beginLayerMove(event: PointerEvent, layer: EditorLayer) {
 function beginViewportPan(event: PointerEvent) {
   if (event.button !== 1 && !(event.button === 0 && activeTool.value === 'Hand')) return false
   event.preventDefault()
+  ;(event.currentTarget as HTMLElement).setPointerCapture?.(event.pointerId)
   isViewportPanning.value = true
-  viewportPanState = { startX: event.clientX, startY: event.clientY, originX: viewportPan.value.x, originY: viewportPan.value.y }
+  viewportPanState = { pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, originX: viewportPan.value.x, originY: viewportPan.value.y }
   return true
 }
 
@@ -198,10 +477,100 @@ function projectPointAt(event: PointerEvent) {
   }
 }
 
+function shapeDrawBounds(state: ShapeDrawState) {
+  let dx = state.current.x - state.start.x
+  let dy = state.current.y - state.start.y
+  if (state.shift) {
+    const size = Math.max(Math.abs(dx), Math.abs(dy))
+    dx = (dx < 0 ? -1 : 1) * size
+    dy = (dy < 0 ? -1 : 1) * size
+  }
+  const left = state.alt ? state.start.x - Math.abs(dx) : Math.min(state.start.x, state.start.x + dx)
+  const right = state.alt ? state.start.x + Math.abs(dx) : Math.max(state.start.x, state.start.x + dx)
+  const top = state.alt ? state.start.y - Math.abs(dy) : Math.min(state.start.y, state.start.y + dy)
+  const bottom = state.alt ? state.start.y + Math.abs(dy) : Math.max(state.start.y, state.start.y + dy)
+  return { left, top, width: right - left, height: bottom - top, x: (left + right) / 2, y: (top + bottom) / 2 }
+}
+
+const shapePreviewStyle = computed(() => {
+  if (!shapeDraw.value) return { display: 'none' }
+  const bounds = shapeDrawBounds(shapeDraw.value)
+  return {
+    left: `${(bounds.left / project.value.width) * 100}%`,
+    top: `${(bounds.top / project.value.height) * 100}%`,
+    width: `${(bounds.width / project.value.width) * 100}%`,
+    height: `${(bounds.height / project.value.height) * 100}%`,
+    borderRadius: shapeDraw.value.kind === 'ellipse' ? '50%' : '2px',
+  }
+})
+
+function pathData(points: ShapePathPoint[], closed = false) {
+  const first = points[0]
+  if (!first) return ''
+  let result = `M ${first.position[0]} ${first.position[1]}`
+  for (let index = 1; index < points.length; index += 1) {
+    const previous = points[index - 1]!
+    const point = points[index]!
+    result += ` C ${previous.handleOut[0]} ${previous.handleOut[1]} ${point.handleIn[0]} ${point.handleIn[1]} ${point.position[0]} ${point.position[1]}`
+  }
+  if (closed && points.length > 2) {
+    const last = points.at(-1)!
+    result += ` C ${last.handleOut[0]} ${last.handleOut[1]} ${first.handleIn[0]} ${first.handleIn[1]} ${first.position[0]} ${first.position[1]} Z`
+  }
+  return result
+}
+
+const penDraftPath = computed(() => pathData(penDraft.value?.points ?? []))
+
+function closeEnoughToFirst(point: { x: number; y: number }) {
+  const first = penDraft.value?.points[0]
+  const bounds = canvas.value?.getBoundingClientRect()
+  if (!first || !bounds) return false
+  const dx = ((point.x - first.position[0]) / project.value.width) * bounds.width
+  const dy = ((point.y - first.position[1]) / project.value.height) * bounds.height
+  return Math.hypot(dx, dy) <= 10
+}
+
+function finishPen(closed: boolean) {
+  const points = penDraft.value?.points ?? []
+  if (points.length >= 2) store.addPathLayer(points.map((point) => ({ ...point, position: [...point.position], handleIn: [...point.handleIn], handleOut: [...point.handleOut] })), closed)
+  penDraft.value = null
+  penDrag = null
+  activeTool.value = 'Select'
+}
+
+function finishPenFromDoubleClick() {
+  const points = penDraft.value?.points
+  if (!points?.length) return
+  const last = points.at(-1)
+  const previous = points.at(-2)
+  if (last && previous && Math.hypot(last.position[0] - previous.position[0], last.position[1] - previous.position[1]) < 2) points.pop()
+  finishPen(false)
+}
+
+function selectTool(tool: MotionTool) {
+  if (activeTool.value === 'Pen' && tool !== 'Pen' && penDraft.value?.points.length) finishPen(false)
+  activeTool.value = tool
+}
+
 function onViewportPointerDown(event: PointerEvent) {
   if (beginViewportPan(event)) return
   if (event.button !== 0) return
   const point = projectPointAt(event)
+  /*
+   * Layer hit targets and the transform box stop propagation, so anything still arriving here with
+   * the Select tool is a click on empty composition — which clears the selection, the same way
+   * clicking away from a shape does in any editor. Clicks outside the stage entirely count too.
+   */
+  if (activeTool.value === 'Rig') {
+    beginRigInteraction(event)
+    return
+  }
+  if (activeTool.value === 'Select' || activeTool.value === 'Transform') {
+    selectedLayerId.value = null
+    selectedKeyframeId.value = null
+    return
+  }
   if (!point) return
   if (activeTool.value === 'Zoom') {
     event.preventDefault()
@@ -212,8 +581,33 @@ function onViewportPointerDown(event: PointerEvent) {
     activeTool.value = 'Select'
   } else if (activeTool.value === 'Rectangle' || activeTool.value === 'Ellipse') {
     event.preventDefault()
-    store.addGeneratedLayer('shape', point.x, point.y, activeTool.value === 'Ellipse' ? 'ellipse' : 'rectangle')
-    activeTool.value = 'Select'
+    shapeDraw.value = {
+      pointerId: event.pointerId,
+      kind: activeTool.value === 'Ellipse' ? 'ellipse' : 'rectangle',
+      start: point,
+      current: point,
+      startClientX: event.clientX,
+      startClientY: event.clientY,
+      shift: event.shiftKey,
+      alt: event.altKey,
+    }
+    canvasWrap.value?.setPointerCapture?.(event.pointerId)
+  } else if (activeTool.value === 'Pen') {
+    event.preventDefault()
+    if (penDraft.value?.points.length && closeEnoughToFirst(point) && penDraft.value.points.length > 2) {
+      finishPen(true)
+      return
+    }
+    const next: ShapePathPoint = {
+      id: crypto.randomUUID(),
+      position: [point.x, point.y],
+      handleIn: [point.x, point.y],
+      handleOut: [point.x, point.y],
+    }
+    if (penDraft.value) penDraft.value.points.push(next)
+    else penDraft.value = { points: [next] }
+    penDrag = { pointerId: event.pointerId, pointId: next.id }
+    canvasWrap.value?.setPointerCapture?.(event.pointerId)
   }
 }
 
@@ -223,10 +617,32 @@ function onViewportWheel(event: WheelEvent) {
 }
 
 function onViewportPointerMove(event: PointerEvent) {
+  if (rigDrag) {
+    updateRigDrag(event)
+    return
+  }
   if (viewportPanState) {
     viewportPan.value = {
       x: viewportPanState.originX + event.clientX - viewportPanState.startX,
       y: viewportPanState.originY + event.clientY - viewportPanState.startY,
+    }
+    return
+  }
+  if (shapeDraw.value && shapeDraw.value.pointerId === event.pointerId) {
+    const point = projectPointAt(event)
+    if (point) {
+      shapeDraw.value.current = point
+      shapeDraw.value.shift = event.shiftKey
+      shapeDraw.value.alt = event.altKey
+    }
+    return
+  }
+  if (penDrag?.pointerId === event.pointerId && penDraft.value) {
+    const point = projectPointAt(event)
+    const anchor = penDraft.value.points.find((item) => item.id === penDrag?.pointId)
+    if (point && anchor) {
+      anchor.handleOut = [point.x, point.y]
+      anchor.handleIn = [anchor.position[0] * 2 - point.x, anchor.position[1] * 2 - point.y]
     }
     return
   }
@@ -267,18 +683,56 @@ function onViewportPointerMove(event: PointerEvent) {
   }
 }
 
-function endViewportTransform() {
+function endViewportTransform(event?: PointerEvent) {
+  if (rigDrag && (!event || rigDrag.pointerId === event.pointerId)) {
+    if (canvasWrap.value?.hasPointerCapture?.(rigDrag.pointerId)) canvasWrap.value.releasePointerCapture(rigDrag.pointerId)
+    endRigDrag()
+  }
+  if (shapeDraw.value && (!event || shapeDraw.value.pointerId === event.pointerId)) {
+    const state = shapeDraw.value
+    const bounds = shapeDrawBounds(state)
+    const moved = Math.hypot((event?.clientX ?? state.startClientX) - state.startClientX, (event?.clientY ?? state.startClientY) - state.startClientY) > 3
+    if (moved && bounds.width > 1 && bounds.height > 1) store.addGeneratedLayer('shape', bounds.x, bounds.y, state.kind, { width: bounds.width, height: bounds.height })
+    if (canvasWrap.value?.hasPointerCapture?.(state.pointerId)) canvasWrap.value.releasePointerCapture(state.pointerId)
+    shapeDraw.value = null
+    activeTool.value = 'Select'
+  }
+  if (penDrag && (!event || penDrag.pointerId === event.pointerId)) {
+    if (canvasWrap.value?.hasPointerCapture?.(penDrag.pointerId)) canvasWrap.value.releasePointerCapture(penDrag.pointerId)
+    penDrag = null
+  }
   if (viewportTransformState?.moved) store.markChanged()
+  if (viewportPanState && canvasWrap.value?.hasPointerCapture?.(viewportPanState.pointerId)) canvasWrap.value.releasePointerCapture(viewportPanState.pointerId)
   viewportTransformState = null
   viewportPanState = null
   isViewportPanning.value = false
   activeTransformMode.value = null
 }
 
+function onViewerKeydown(event: KeyboardEvent) {
+  if ((event.target as HTMLElement)?.matches('input, textarea')) return
+  if (activeTool.value !== 'Pen') return
+  if (event.key === 'Enter' && penDraft.value?.points.length) {
+    event.preventDefault()
+    finishPen(false)
+  } else if (event.key === 'Escape') {
+    event.preventDefault()
+    penDraft.value = null
+    penDrag = null
+    activeTool.value = 'Select'
+  } else if ((event.key === 'Backspace' || event.key === 'Delete') && penDraft.value?.points.length) {
+    event.preventDefault()
+    penDraft.value.points.pop()
+    if (!penDraft.value.points.length) penDraft.value = null
+  }
+}
+
 onMounted(async () => {
   await nextTick()
   if (!canvas.value) return
-  renderer = new CanvasCompositionRenderer(canvas.value, '/demo/aurora-ridge.png')
+  const { HybridWebGLRenderBackend } = await import('@/engine/rendering/HybridWebGLRenderBackend')
+  renderer = new HybridWebGLRenderBackend(canvas.value, '/demo/aurora-ridge.png')
+  await renderer.initialize({ ...previewRenderSize.value, pixelRatio: 1 })
   if (canvasWrap.value) {
     resizeObserver = new ResizeObserver(([entry]) => {
       if (!entry) return
@@ -288,23 +742,31 @@ onMounted(async () => {
   }
   window.addEventListener('pointermove', onViewportPointerMove)
   window.addEventListener('pointerup', endViewportTransform)
-  window.setTimeout(draw, 80)
+  window.addEventListener('pointercancel', endViewportTransform)
+  window.addEventListener('keydown', onViewerKeydown)
+  draw()
 })
 
 onBeforeUnmount(() => {
+  disposed = true
+  if (drawFrame) cancelAnimationFrame(drawFrame)
   resizeObserver?.disconnect()
   window.removeEventListener('pointermove', onViewportPointerMove)
   window.removeEventListener('pointerup', endViewportTransform)
+  window.removeEventListener('pointercancel', endViewportTransform)
+  window.removeEventListener('keydown', onViewerKeydown)
+  void renderer?.dispose()
+  renderer = null
 })
 
-watch([currentTime, layers], draw, { deep: true })
+watch([currentTime, project, layers, scenes3D, nodes, nodeConnections, renderRootNodeId, rigs], draw, { deep: true })
 </script>
 
 <template>
   <section class="viewer-panel">
     <div class="viewer-toolbar">
       <div class="tool-group">
-        <IconButton v-for="tool in tools" :key="tool.name" :icon="tool.icon" :label="tool.name" :active="activeTool === tool.name" @click="activeTool = tool.name" />
+        <IconButton v-for="tool in tools" :key="tool.name" :icon="tool.icon" :label="tool.name" :active="activeTool === tool.name" @click="selectTool(tool.name)" />
       </div>
       <span class="toolbar-divider" />
       <IconButton :icon="BoxSelect" label="Safe guides" :active="showGuides" @click="showGuides = !showGuides" />
@@ -321,9 +783,29 @@ watch([currentTime, layers], draw, { deep: true })
       <IconButton :icon="Maximize2" label="Full screen viewer" />
     </div>
 
-    <div ref="canvasWrap" class="canvas-viewport" :class="{ 'show-grid': showGrid, panning: isViewportPanning, 'hand-tool': activeTool === 'Hand', 'zoom-tool': activeTool === 'Zoom' }" @pointerdown="onViewportPointerDown" @wheel="onViewportWheel" @auxclick.prevent>
+    <div ref="canvasWrap" class="canvas-viewport" :class="{ 'show-grid': showGrid, panning: isViewportPanning, 'hand-tool': activeTool === 'Hand', 'zoom-tool': activeTool === 'Zoom', 'drawing-tool': activeTool === 'Rectangle' || activeTool === 'Ellipse', 'pen-tool': activeTool === 'Pen', 'rig-tool': activeTool === 'Rig' }" @pointerdown="onViewportPointerDown" @dblclick.prevent="activeTool === 'Pen' && finishPenFromDoubleClick()" @wheel="onViewportWheel" @auxclick.prevent>
       <div class="canvas-stage" :style="stageStyle">
-        <canvas ref="canvas" width="1280" height="720" aria-label="Composition preview" />
+        <canvas ref="canvas" :width="previewRenderSize.width" :height="previewRenderSize.height" aria-label="Composition preview" />
+        <div v-if="shapeDraw" class="shape-draw-preview" :style="shapePreviewStyle" />
+        <svg v-if="penDraft" class="pen-draft-overlay" :viewBox="`0 0 ${project.width} ${project.height}`" preserveAspectRatio="none" aria-label="Path being drawn">
+          <path :d="penDraftPath" />
+          <g v-for="point in penDraft.points" :key="point.id">
+            <line :x1="point.handleIn[0]" :y1="point.handleIn[1]" :x2="point.handleOut[0]" :y2="point.handleOut[1]" />
+            <circle class="handle" :cx="point.handleIn[0]" :cy="point.handleIn[1]" r="5" />
+            <circle class="handle" :cx="point.handleOut[0]" :cy="point.handleOut[1]" r="5" />
+            <circle class="anchor" :cx="point.position[0]" :cy="point.position[1]" r="7" />
+          </g>
+        </svg>
+        <svg v-if="rigLayer && (activeTool === 'Rig' || rigBoneShapes.length)" class="rig-overlay" :class="{ passive: activeTool !== 'Rig' }" :viewBox="`0 0 ${project.width} ${project.height}`" preserveAspectRatio="none" aria-label="Rig skeleton">
+          <g :transform="rigGroupTransform">
+            <rect class="rig-bounds" x="-1" y="-1" width="2" height="2" />
+            <g v-for="shape in rigBoneShapes" :key="shape.id" class="rig-bone" :class="{ selected: shape.id === selectedRigBoneId }">
+              <line :x1="shape.head.x" :y1="shape.head.y" :x2="shape.tip.x" :y2="shape.tip.y" />
+              <circle class="rig-head" :cx="shape.head.x" :cy="shape.head.y" :r="rigHandleRadius" />
+              <circle class="rig-tip" :cx="shape.tip.x" :cy="shape.tip.y" :r="rigHandleRadius * .8" />
+            </g>
+          </g>
+        </svg>
         <div v-if="showGuides" class="safe-guides"><span /><span /></div>
         <button
           v-for="layer in interactiveLayers"
@@ -336,10 +818,10 @@ watch([currentTime, layers], draw, { deep: true })
           @pointerdown="beginLayerMove($event, layer)"
         />
         <div
-          v-if="selectedLayer && ['text', 'shape', 'image', 'video', 'cluster'].includes(selectedLayer.type)"
+          v-if="activeSelection && ['text', 'shape', 'image', 'video', 'cluster'].includes(activeSelection.type)"
           ref="transformBox"
           class="transform-box"
-          :class="[activeTransformMode, { 'background-layer': selectedLayer.type === 'video' }]"
+          :class="[activeTransformMode, { 'background-layer': activeSelection.type === 'video' }]"
           :style="selectionStyle"
           title="Drag to move"
           @pointerdown="beginViewportTransform($event, 'move')"
@@ -356,7 +838,7 @@ watch([currentTime, layers], draw, { deep: true })
         </div>
       </div>
       <div class="viewport-badge"><span class="live-dot" /> Active camera</div>
-      <div class="viewport-help">Middle-drag: pan · Wheel: zoom<span v-if="['Text', 'Rectangle', 'Ellipse'].includes(activeTool)"> · Click composition to create {{ activeTool.toLowerCase() }}</span></div>
+      <div class="viewport-help">Middle-drag: pan · Wheel: zoom<span v-if="activeTool === 'Text'"> · Click composition to create text</span><span v-else-if="activeTool === 'Rectangle' || activeTool === 'Ellipse'"> · Drag to draw · Shift: equal sides · Alt: from centre</span><span v-else-if="activeTool === 'Pen'"> · Click: corner · Drag: Bézier handles · Click first point to close · Enter: finish</span><span v-else-if="activeTool === 'Rig'"> · Drag empty space: new bone (chains to selection, Alt for a root) · Drag tip: rotate · Drag head: shift · Shift+drag: edit rest pose</span></div>
     </div>
 
     <div class="viewer-controls">
@@ -383,10 +865,14 @@ watch([currentTime, layers], draw, { deep: true })
 .tool-group { display: flex; gap: 1px; }.toolbar-divider { width: 1px; height: 20px; margin: 0 4px; background: var(--border-subtle); }.toolbar-spacer { flex: 1; }.viewport-zoom-label { width: 32px; color: var(--text-muted); font-size: 8px; text-align: center; }
 .viewer-select { display: flex; height: 25px; align-items: center; gap: 6px; padding: 0 6px; color: var(--text-secondary); background: #171920; border: 1px solid var(--border-strong); border-radius: 4px; font: inherit; font-size: 9.5px; cursor: pointer; }
 .viewer-select:hover { color: var(--text-primary); background: var(--bg-hover); }
-.canvas-viewport { position: relative; display: flex; min-height: 0; flex: 1; align-items: center; justify-content: center; padding: 24px; overflow: hidden; background-color: #08090c; background-image: linear-gradient(45deg, #0c0e13 25%, transparent 25%), linear-gradient(-45deg, #0c0e13 25%, transparent 25%), linear-gradient(45deg, transparent 75%, #0c0e13 75%), linear-gradient(-45deg, transparent 75%, #0c0e13 75%); background-position: 0 0, 0 8px, 8px -8px, -8px 0; background-size: 16px 16px; }
+.canvas-viewport { position: relative; display: flex; min-height: 0; flex: 1; align-items: center; justify-content: center; padding: 24px; overflow: hidden; background-color: #08090c; background-image: linear-gradient(45deg, #0c0e13 25%, transparent 25%), linear-gradient(-45deg, #0c0e13 25%, transparent 25%), linear-gradient(45deg, transparent 75%, #0c0e13 75%), linear-gradient(-45deg, transparent 75%, #0c0e13 75%); background-position: 0 0, 0 8px, 8px -8px, -8px 0; background-size: 16px 16px; touch-action: none; }
+.canvas-viewport.drawing-tool, .canvas-viewport.pen-tool, .canvas-viewport.rig-tool { cursor: crosshair; }.canvas-viewport.drawing-tool .layer-hit-target, .canvas-viewport.drawing-tool .transform-box, .canvas-viewport.pen-tool .layer-hit-target, .canvas-viewport.pen-tool .transform-box, .canvas-viewport.rig-tool .layer-hit-target, .canvas-viewport.rig-tool .transform-box { pointer-events: none; }
 .canvas-viewport.show-grid::after { position: absolute; inset: 0; background-image: linear-gradient(rgb(142 154 225 / .08) 1px, transparent 1px), linear-gradient(90deg, rgb(142 154 225 / .08) 1px, transparent 1px); background-size: 36px 36px; content: ''; pointer-events: none; }
-.canvas-viewport.hand-tool { cursor: grab; }.canvas-viewport.zoom-tool { cursor: zoom-in; }.canvas-viewport.panning { cursor: grabbing; user-select: none; }.canvas-stage { position: relative; flex: 0 0 auto; aspect-ratio: 16 / 9; box-shadow: 0 15px 45px rgb(0 0 0 / .55), 0 0 0 1px #30333d; transform-origin: center; }
+.canvas-viewport.hand-tool { cursor: grab; }.canvas-viewport.zoom-tool { cursor: zoom-in; }.canvas-viewport.panning { cursor: grabbing; user-select: none; }.canvas-stage { position: relative; flex: 0 0 auto; box-shadow: 0 15px 45px rgb(0 0 0 / .55), 0 0 0 1px #30333d; transform-origin: center; }
 .canvas-stage canvas { display: block; width: 100%; height: 100%; }
+.shape-draw-preview { position: absolute; z-index: 12; background: rgb(140 155 255 / .16); border: 1px solid #a5b4fc; box-shadow: 0 0 0 1px rgb(13 15 24 / .55); pointer-events: none; }
+.pen-draft-overlay { position: absolute; z-index: 12; inset: 0; width: 100%; height: 100%; overflow: visible; pointer-events: none; }.pen-draft-overlay path { fill: rgb(140 155 255 / .1); stroke: #a5b4fc; stroke-width: 3; vector-effect: non-scaling-stroke; }.pen-draft-overlay line { stroke: #717da9; stroke-width: 1; vector-effect: non-scaling-stroke; }.pen-draft-overlay circle.handle { fill: #151821; stroke: #8c9bff; stroke-width: 2; vector-effect: non-scaling-stroke; }.pen-draft-overlay circle.anchor { fill: #e0e7ff; stroke: #4f5d9d; stroke-width: 2; vector-effect: non-scaling-stroke; }
+.rig-overlay.passive { opacity: .38; }.rig-overlay { position: absolute; z-index: 13; inset: 0; width: 100%; height: 100%; overflow: visible; pointer-events: none; }.rig-overlay .rig-bounds { fill: rgb(199 154 224 / .05); stroke: rgb(199 154 224 / .45); stroke-dasharray: 6 4; stroke-width: 1; vector-effect: non-scaling-stroke; }.rig-bone line { stroke: #c79ae0; stroke-linecap: round; stroke-width: 3; vector-effect: non-scaling-stroke; }.rig-bone.selected line { stroke: #ffd9a0; stroke-width: 4; }.rig-head { fill: #1a1420; stroke: #c79ae0; stroke-width: 2; vector-effect: non-scaling-stroke; }.rig-tip { fill: #c79ae0; stroke: #1a1420; stroke-width: 1; vector-effect: non-scaling-stroke; }.rig-bone.selected .rig-head { stroke: #ffd9a0; }.rig-bone.selected .rig-tip { fill: #ffd9a0; }
 .safe-guides { position: absolute; inset: 5%; border: 1px solid rgb(230 233 246 / .22); pointer-events: none; }.safe-guides span:first-child { position: absolute; inset: 5%; border: 1px dashed rgb(230 233 246 / .15); }.safe-guides span:last-child::before, .safe-guides span:last-child::after { position: absolute; top: 50%; left: 50%; background: rgb(230 233 246 / .18); content: ''; }.safe-guides span:last-child::before { width: 1px; height: 12px; transform: translateY(-6px); }.safe-guides span:last-child::after { width: 12px; height: 1px; transform: translateX(-6px); }
 .layer-hit-target { position: absolute; z-index: 2; padding: 0; background: transparent; border: 0; outline: 0; cursor: move; touch-action: none; }.layer-hit-target:hover { box-shadow: inset 0 0 0 1px rgb(165 180 252 / .45); }.layer-hit-target.selected { pointer-events: none; }.transform-box { position: absolute; z-index: 4; width: 48%; height: 13%; border: 1px solid #9aa8ff; box-shadow: 0 0 0 1px rgb(20 24 39 / .45); cursor: move; touch-action: none; user-select: none; }.transform-box.background-layer { z-index: 1; }.transform-box.move { cursor: grabbing; }.transform-box.scale { cursor: nwse-resize; }.transform-box.rotate { cursor: crosshair; }.handle { position: absolute; z-index: 3; width: 8px; height: 8px; background: #dce2ff; border: 1px solid #6978d0; pointer-events: auto; }.handle:hover { background: #fff; box-shadow: 0 0 0 2px rgb(154 168 255 / .25); }.h-1 { top: -5px; left: -5px; cursor: nwse-resize; }.h-2 { top: -5px; left: 50%; cursor: ns-resize; }.h-3 { top: -5px; right: -5px; cursor: nesw-resize; }.h-4 { top: 50%; right: -5px; cursor: ew-resize; }.h-5 { right: -5px; bottom: -5px; cursor: nwse-resize; }.h-6 { bottom: -5px; left: 50%; cursor: ns-resize; }.h-7 { bottom: -5px; left: -5px; cursor: nesw-resize; }.h-8 { top: 50%; left: -5px; cursor: ew-resize; }.rotation-line { position: absolute; bottom: -29px; left: 50%; width: 11px; height: 29px; border-left: 1px solid #9aa8ff; pointer-events: auto; cursor: crosshair; }.rotation-line::after { position: absolute; bottom: -1px; left: -5px; width: 9px; height: 9px; background: #dce2ff; border: 1px solid #6978d0; border-radius: 50%; content: ''; }.rotation-line:hover::after { background: #fff; box-shadow: 0 0 0 2px rgb(154 168 255 / .25); }.anchor-point { position: absolute; top: 50%; left: 50%; display: grid; color: #edc68b; transform: translate(-50%, -50%); pointer-events: none; }
 .viewport-badge { position: absolute; top: 8px; left: 9px; display: flex; align-items: center; gap: 5px; padding: 4px 7px; color: #9ba0aa; background: rgb(12 14 19 / .72); border: 1px solid #262a32; border-radius: 3px; font-size: 8.5px; backdrop-filter: blur(5px); }.live-dot { width: 5px; height: 5px; border-radius: 50%; background: #7eb89f; }

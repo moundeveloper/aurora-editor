@@ -1,14 +1,16 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { storeToRefs } from 'pinia'
 import {
   AudioLines, Box, ChevronDown, ChevronRight, Film, FolderClosed, Grid2X2,
-  Image, List, Plus, Search, SlidersHorizontal, Sparkles, Star, Upload,
+  Image, List, Pencil, Plus, Search, SlidersHorizontal, Sparkles, Star, Trash2, Upload,
 } from '@lucide/vue'
-import { useEditorStore } from '@/stores/editor'
+import { useEditorStore, type ClusterSettings } from '@/stores/editor'
 import type { MediaAsset } from '@/models/editor'
 import IconButton from './common/IconButton.vue'
 import PanelHeader from './common/PanelHeader.vue'
+import MDialog from './common/MDialog.vue'
+import ClusterSettingsDialog from './common/ClusterSettingsDialog.vue'
 
 const store = useEditorStore()
 const { assets } = storeToRefs(store)
@@ -18,12 +20,19 @@ const query = ref('')
 const gridView = ref(true)
 const dragging = ref(false)
 const fileInput = ref<HTMLInputElement>()
+const selectedAssetId = ref<string | null>(null)
+const assetMenu = ref<{ assetId: string; x: number; y: number } | null>(null)
+const deleteAsset = ref<MediaAsset | null>(null)
+const editClusterAsset = ref<MediaAsset | null>(null)
 const tabs = ['Media', 'Effects', 'Presets']
 const folders = [
   { name: 'All Media', icon: FolderClosed },
   { name: 'Videos', icon: Film },
   { name: 'Images', icon: Image },
   { name: 'Audio', icon: AudioLines },
+  { name: '3D Scenes', icon: Box },
+  { name: '3D Models', icon: Box },
+  { name: 'Environments', icon: Sparkles },
   { name: 'Compositions', icon: Box },
   { name: 'Favorites', icon: Star },
 ]
@@ -35,32 +44,138 @@ const filteredAssets = computed(() => assets.value.filter((asset) => {
   const matchFolder = activeFolder.value === 'All Media'
     || activeFolder.value === `${asset.kind[0]?.toUpperCase()}${asset.kind.slice(1)}s`
     || (activeFolder.value === 'Compositions' && asset.kind === 'composition')
+    || (activeFolder.value === '3D Scenes' && asset.kind === 'scene3d')
+    || (activeFolder.value === '3D Models' && asset.kind === 'model3d')
+    || (activeFolder.value === 'Environments' && asset.kind === 'hdr')
   return matchQuery && matchFolder
 }))
 
 function iconFor(kind: MediaAsset['kind']) {
-  return kind === 'audio' ? AudioLines : kind === 'image' ? Image : kind === 'composition' ? Box : Film
+  return kind === 'audio' ? AudioLines : kind === 'image' || kind === 'texture' ? Image : kind === 'model3d' || kind === 'composition' || kind === 'scene3d' ? Box : kind === 'hdr' ? Sparkles : Film
 }
 
 function onFiles(files: FileList | null) {
   if (files?.length) store.addFiles(files)
 }
 
-function onDrop(event: DragEvent) {
+/**
+ * Only a drag carrying files from outside the app is an import. Dragging a library entry out to the
+ * timeline passes over this panel on its way, and inviting the user to drop it back where it came
+ * from is noise. `types` is the only part of the payload readable during a drag.
+ */
+const carriesFiles = (event: DragEvent) => event.dataTransfer?.types.includes('Files') ?? false
+
+/*
+ * dragenter and dragleave fire for every child crossed, so leaving one child for another reads as a
+ * leave. Counting depth means the overlay only closes once the pointer has actually left the panel.
+ */
+let dragDepth = 0
+
+function onDragEnter(event: DragEvent) {
+  if (!carriesFiles(event)) return
+  dragDepth += 1
+  dragging.value = true
+}
+
+function onDragOver(event: DragEvent) {
+  if (!carriesFiles(event)) return
+  // Claiming the drop is what makes the browser offer a copy cursor rather than refuse it.
+  event.preventDefault()
+  if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy'
+}
+
+function onDragLeave() {
+  dragDepth = Math.max(0, dragDepth - 1)
+  if (!dragDepth) dragging.value = false
+}
+
+function endDrag() {
+  dragDepth = 0
   dragging.value = false
+}
+
+function onDrop(event: DragEvent) {
+  endDrag()
   if (event.dataTransfer?.files.length) store.addFiles(event.dataTransfer.files)
 }
 
 function startDrag(event: DragEvent, id: string) {
   event.dataTransfer?.setData('application/x-aurora-asset', id)
   if (event.dataTransfer) event.dataTransfer.effectAllowed = 'copy'
+  store.draggingAssetId = id
 }
+
+function endAssetDrag() {
+  store.draggingAssetId = null
+  endDrag()
+}
+
+function openAssetMenu(event: MouseEvent, asset: MediaAsset) {
+  event.preventDefault()
+  selectedAssetId.value = asset.id
+  assetMenu.value = {
+    assetId: asset.id,
+    x: Math.min(event.clientX, window.innerWidth - 178),
+    y: Math.min(event.clientY, window.innerHeight - 92),
+  }
+}
+
+function menuAsset() {
+  return assets.value.find((asset) => asset.id === assetMenu.value?.assetId) ?? null
+}
+
+function requestAssetDelete(asset = assets.value.find((item) => item.id === selectedAssetId.value) ?? null) {
+  if (!asset) return
+  deleteAsset.value = asset
+  assetMenu.value = null
+}
+
+function confirmAssetDelete() {
+  if (deleteAsset.value) store.deleteMediaAsset(deleteAsset.value.id)
+  if (selectedAssetId.value === deleteAsset.value?.id) selectedAssetId.value = null
+  deleteAsset.value = null
+}
+
+function requestClusterEdit() {
+  const asset = menuAsset()
+  if (asset?.kind !== 'composition') return
+  editClusterAsset.value = asset
+  assetMenu.value = null
+}
+
+function confirmClusterEdit(settings: ClusterSettings) {
+  if (editClusterAsset.value) store.updateClusterSettings(editClusterAsset.value.id, settings)
+  editClusterAsset.value = null
+}
+
+function dimensionsFor(asset: MediaAsset | null) {
+  const [width, height] = asset?.dimensions?.split('×').map((value) => Number(value.trim())) ?? []
+  return {
+    width: Number.isFinite(width) ? width! : 1920,
+    height: Number.isFinite(height) ? height! : 1080,
+  }
+}
+
+function onWindowPointerDown(event: PointerEvent) {
+  if (!(event.target as Element | null)?.closest('.asset-context-menu')) assetMenu.value = null
+}
+
+// A drag that ends anywhere — dropped, cancelled with Escape, released outside the window — has to
+// clear the overlay, and no element-level handler sees all of those.
+onMounted(() => {
+  window.addEventListener('dragend', endDrag)
+  window.addEventListener('pointerdown', onWindowPointerDown, true)
+})
+onBeforeUnmount(() => {
+  window.removeEventListener('dragend', endDrag)
+  window.removeEventListener('pointerdown', onWindowPointerDown, true)
+})
 </script>
 
 <template>
-  <aside class="asset-panel" @dragover.prevent="dragging = true" @dragleave.self="dragging = false" @drop.prevent="onDrop">
+  <aside class="asset-panel" @dragenter="onDragEnter" @dragover="onDragOver" @dragleave="onDragLeave" @drop.prevent="onDrop">
     <PanelHeader title="Library" subtitle="Project assets">
-      <template #actions><IconButton :icon="Plus" label="Import media" :size="13" @click="fileInput?.click()" /></template>
+      <template #actions><IconButton :icon="Trash2" label="Delete selected media" :size="13" :disabled="!selectedAssetId" @click="requestAssetDelete()" /><IconButton :icon="Plus" label="Import media" :size="13" @click="fileInput?.click()" /></template>
     </PanelHeader>
 
     <div class="panel-tabs" role="tablist">
@@ -94,10 +209,14 @@ function startDrag(event: DragEvent, id: string) {
             v-for="asset in filteredAssets"
             :key="asset.id"
             class="asset-card"
+            :class="{ selected: selectedAssetId === asset.id }"
             type="button"
             draggable="true"
             :title="`${asset.name}\nDrag to timeline`"
+            @click="selectedAssetId = asset.id"
+            @contextmenu="openAssetMenu($event, asset)"
             @dragstart="startDrag($event, asset.id)"
+            @dragend="endAssetDrag"
             @dblclick="store.addAssetToTimeline(asset.id)"
           >
             <span class="asset-thumbnail" :class="asset.kind">
@@ -122,8 +241,35 @@ function startDrag(event: DragEvent, id: string) {
     </div>
 
     <button class="import-dropzone" type="button" @click="fileInput?.click()"><Upload :size="13" /> Import media <span>or drop files</span></button>
-    <input ref="fileInput" class="hidden-input" type="file" multiple accept="video/*,image/*,audio/*,.json" @change="onFiles(($event.target as HTMLInputElement).files)" />
+    <input ref="fileInput" class="hidden-input" type="file" multiple accept="video/*,image/*,audio/*,.json,.glb,.gltf,.hdr,.exr" @change="onFiles(($event.target as HTMLInputElement).files)" />
     <div v-if="dragging" class="drop-overlay"><Upload :size="24" /><strong>Drop to import</strong><span>Media stays on this device</span></div>
+    <Teleport to="body">
+      <div v-if="assetMenu" class="asset-context-menu" :style="{ left: `${assetMenu.x}px`, top: `${assetMenu.y}px` }" role="menu" @contextmenu.prevent>
+        <button v-if="menuAsset()?.kind === 'composition'" type="button" role="menuitem" @click="requestClusterEdit"><Pencil :size="11" /> Cluster settings</button>
+        <button type="button" class="danger" role="menuitem" @click="requestAssetDelete(menuAsset())"><Trash2 :size="11" /> Delete from Library</button>
+      </div>
+    </Teleport>
+    <MDialog
+      :open="Boolean(deleteAsset)"
+      title="Delete Library item"
+      :description="deleteAsset ? `Remove “${deleteAsset.name}” from this project’s Library?` : ''"
+      confirm-label="Delete"
+      danger
+      @close="deleteAsset = null"
+      @confirm="confirmAssetDelete"
+    >
+      <p class="dialog-warning">{{ deleteAsset && store.mediaAssetReferenceCount(deleteAsset.id) ? `${store.mediaAssetReferenceCount(deleteAsset.id)} linked item(s) will be unlinked but kept in the project. ` : '' }}You can undo this action.</p>
+    </MDialog>
+    <ClusterSettingsDialog
+      :open="Boolean(editClusterAsset)"
+      mode="edit"
+      :asset-id="editClusterAsset?.id"
+      :name="editClusterAsset?.name"
+      :width="dimensionsFor(editClusterAsset).width"
+      :height="dimensionsFor(editClusterAsset).height"
+      @close="editClusterAsset = null"
+      @confirm="confirmClusterEdit"
+    />
   </aside>
 </template>
 
@@ -146,7 +292,7 @@ function startDrag(event: DragEvent, id: string) {
 .section-label small { color: var(--text-muted); font-weight: 400; letter-spacing: 0; text-transform: none; }
 .asset-list { padding: 0 6px 8px; }.asset-list.grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 5px; }
 .asset-card { display: flex; min-width: 0; align-items: center; gap: 7px; padding: 4px; overflow: hidden; color: var(--text-secondary); text-align: left; background: transparent; border: 1px solid transparent; border-radius: 4px; cursor: grab; }
-.grid .asset-card { display: block; padding: 3px; }.asset-card:hover { background: var(--bg-hover); border-color: var(--border-strong); }
+.grid .asset-card { display: block; padding: 3px; }.asset-card:hover { background: var(--bg-hover); border-color: var(--border-strong); }.asset-card.selected { color: #dce2ff; background: var(--bg-selected); border-color: var(--accent-border); }
 .asset-thumbnail { position: relative; display: grid; width: 64px; height: 39px; flex: 0 0 auto; place-items: center; overflow: hidden; color: #8993c7; background: #171a23; border: 1px solid #303440; border-radius: 3px; }
 .grid .asset-thumbnail { width: 100%; height: auto; aspect-ratio: 16 / 9; }.asset-thumbnail img { width: 100%; height: 100%; object-fit: cover; }.asset-thumbnail.image img { transform: scale(1.45); }
 .asset-kind { position: absolute; bottom: 2px; left: 3px; display: grid; width: 15px; height: 15px; place-items: center; color: #dce2ff; background: rgb(11 14 21 / .75); border-radius: 2px; backdrop-filter: blur(3px); }
@@ -156,4 +302,5 @@ function startDrag(event: DragEvent, id: string) {
 .browser-list { min-height: 0; flex: 1; padding: 5px; overflow: auto; }.browser-list > button { display: flex; width: 100%; height: 37px; align-items: center; gap: 7px; padding: 0 6px; color: var(--text-secondary); background: transparent; border: 1px solid transparent; border-radius: 4px; font: inherit; text-align: left; cursor: pointer; }.browser-list > button:hover { background: var(--bg-hover); border-color: var(--border-subtle); }.browser-list > button > span:nth-child(2) { display: flex; min-width: 0; flex: 1; flex-direction: column; }.browser-list strong { font-size: 10px; font-weight: 520; }.browser-list small { color: var(--text-muted); font-size: 8.5px; }.effect-icon { display: grid; width: 25px; height: 25px; place-items: center; color: var(--accent); background: var(--bg-selected); border-radius: 4px; }
 .import-dropzone { display: flex; height: 32px; flex: 0 0 auto; align-items: center; justify-content: center; gap: 5px; margin: 6px; color: var(--text-secondary); background: #171a21; border: 1px dashed #3a3f4c; border-radius: 4px; font: inherit; font-size: 9.5px; cursor: pointer; }.import-dropzone:hover { color: var(--text-primary); border-color: var(--accent-border); }.import-dropzone span { color: var(--text-muted); }.hidden-input { display: none; }
 .drop-overlay { position: absolute; z-index: 5; inset: 4px; display: flex; align-items: center; justify-content: center; flex-direction: column; gap: 6px; color: #dbe0ff; background: rgb(28 32 49 / .92); border: 1px dashed var(--accent-border); border-radius: 5px; pointer-events: none; }.drop-overlay span { color: var(--text-muted); font-size: 10px; }
+:global(.asset-context-menu) { position: fixed; z-index: 600; display: grid; width: 170px; padding: 4px; background: #171920; border: 1px solid #3b3f4b; border-radius: 4px; box-shadow: 0 10px 26px rgb(0 0 0 / .5); }:global(.asset-context-menu button) { display: flex; height: 26px; align-items: center; gap: 7px; padding: 0 7px; color: var(--text-secondary); background: transparent; border: 0; border-radius: 3px; font: inherit; font-size: 9px; text-align: left; cursor: pointer; }:global(.asset-context-menu button:hover) { color: #eef0ff; background: var(--bg-selected); }:global(.asset-context-menu button.danger) { color: #d88991; }.dialog-warning { margin: 0; color: var(--text-secondary); font-size: 9px; line-height: 1.45; }
 </style>
