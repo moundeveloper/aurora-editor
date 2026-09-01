@@ -68,6 +68,7 @@ compiles it into persistent runtime resources and updates only animated values p
 | 2D rigs | Persistent mesh with animated vertex positions |
 | 3D primitives, models, materials, influences | Persistent 3D runtime rendered once per source |
 | Cameras, paths, constraints, cuts, lights, shadows | Per-frame 3D runtime update; structural rebuild only when topology changes |
+| Ambient occlusion and colour output | Persistent denoised GTAO pipeline; ACES tone mapping; adaptive sample count |
 | Viewer, node preview, export preview | Same engine and graph semantics with different budgets |
 | GIF/export | Deterministic immediate mode with adaptive quality disabled |
 

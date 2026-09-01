@@ -10,7 +10,7 @@ import { CURRENT_PROJECT_VERSION, deserializeEditorState, serializeEditorState }
 import { createDemoNodeGraph } from '@/engine/nodes/nodeGraph'
 import { createRig, createRigBone } from '@/engine/rig/rigFactory'
 import { AuroraProjectDatabase } from '@/engine/project/AuroraProjectDatabase'
-import type { EditorLayer, EditorProject, SerializedEditorState } from '@/models/editor'
+import type { EditorLayer, EditorProject, Scene3DSettings, SerializedEditorState } from '@/models/editor'
 
 const project: EditorProject = {
   id: 'test-project', name: 'Test', width: 1920, height: 1080, frameRate: 30,
@@ -164,6 +164,40 @@ describe('hybrid project architecture', () => {
     expect(mesh.material.side).toBe(THREE.DoubleSide)
     expect(mesh.frustumCulled).toBe(false)
     registry.dispose()
+  })
+
+  it('fits authored shadow maps to the scene and applies environment lighting', () => {
+    const scene = createDemo3DScene()
+    scene.settings.shadowMapSize = 2048
+    scene.environmentIntensity = 1.5
+    const registry = new ThreeSceneRuntimeRegistry()
+    const runtime = registry.get(scene, 1280, 720, 0)
+    const key = runtime.lights.get('light-key') as THREE.DirectionalLight
+    const ambient = runtime.lights.get('light-ambient') as THREE.AmbientLight
+    const material = (runtime.objects.get('object-aurora-cube') as THREE.Mesh).material as THREE.MeshStandardMaterial
+
+    expect(key.shadow.mapSize.width).toBe(2048)
+    expect(key.shadow.camera.right - key.shadow.camera.left).toBeGreaterThan(10)
+    expect(key.shadow.normalBias).toBeGreaterThan(0)
+    expect(ambient.intensity).toBeCloseTo(.7 * 1.5)
+    expect(material.envMapIntensity).toBeCloseTo(1.5)
+    registry.dispose()
+  })
+
+  it('backfills GTAO settings when an older project is loaded', () => {
+    const fallback: SerializedEditorState = { project, layers, scenes3D: [createDemo3DScene()], assets: [], ...createDemoNodeGraph2() }
+    const legacy = JSON.parse(serializeEditorState(fallback)) as SerializedEditorState
+    const legacySettings = legacy.scenes3D[0]!.settings as Partial<Scene3DSettings>
+    delete legacySettings.ambientOcclusion
+    delete legacySettings.ambientOcclusionIntensity
+    delete legacySettings.ambientOcclusionRadius
+
+    const restored = deserializeEditorState(JSON.stringify(legacy), fallback)
+    expect(restored.scenes3D[0]?.settings).toMatchObject({
+      ambientOcclusion: true,
+      ambientOcclusionIntensity: 1,
+      ambientOcclusionRadius: .35,
+    })
   })
 
   it('keeps bottom-to-top backend ordering in the render plan', () => {

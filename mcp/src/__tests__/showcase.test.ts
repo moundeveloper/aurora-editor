@@ -13,7 +13,11 @@ describe('MCP Neon Singularity authoring', () => {
     expect(restored.project.name).toBe('Protocol Premiere')
     expect(restored.layers.some((layer) => layer.type === 'cluster' && layer.children?.length === 3)).toBe(true)
     expect(restored.scenes3D[0]?.objects).toHaveLength(4)
-    expect(restored.scenes3D[0]?.settings.shadowMapSize).toBe(1024)
+    expect(restored.scenes3D[0]?.settings).toMatchObject({
+      shadowMapSize: 2048,
+      ambientOcclusion: true,
+      ambientOcclusionIntensity: 1.15,
+    })
     expect(restored.scenes3D[0]?.objects.filter((object) => object.castShadow)).toHaveLength(1)
     expect(restored.scenes3D[0]?.cameras[0]?.pathConstraint?.orientation).toBe('look-at')
     expect(restored.nodes.some((node) => node.kind === 'glow')).toBe(true)

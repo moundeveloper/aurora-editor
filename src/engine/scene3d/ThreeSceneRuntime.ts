@@ -112,6 +112,38 @@ function makeLight(definition: AuroraLight): THREE.Light {
   return new THREE.DirectionalLight(definition.color, definition.intensity.value)
 }
 
+function setShadowMapSize(shadow: THREE.LightShadow<THREE.Camera>, requestedSize: number) {
+  const size = Math.pow(2, Math.round(Math.log2(Math.max(256, Math.min(4096, requestedSize)))))
+  if (shadow.mapSize.width === size && shadow.mapSize.height === size) return
+  shadow.map?.dispose()
+  shadow.map = null
+  shadow.mapSize.set(size, size)
+  shadow.needsUpdate = true
+}
+
+/** Fits the shadow volume to authored geometry instead of Three's tiny default camera. */
+function configureShadow(light: THREE.Light, scene: Aurora3DScene, bounds: THREE.Box3) {
+  if (!(light instanceof THREE.DirectionalLight) && !(light instanceof THREE.PointLight)) return
+  setShadowMapSize(light.shadow, scene.settings.shadowMapSize)
+  const sphere = bounds.isEmpty()
+    ? new THREE.Sphere(new THREE.Vector3(), 10)
+    : bounds.getBoundingSphere(new THREE.Sphere())
+  const radius = Math.max(8, Math.min(80, sphere.radius))
+  light.shadow.bias = -0.0002
+  light.shadow.normalBias = Math.max(.015, radius * .0015)
+  light.shadow.radius = 2
+  light.shadow.camera.near = .1
+  light.shadow.camera.far = Math.max(50, radius * 5)
+  if (light instanceof THREE.DirectionalLight) {
+    const camera = light.shadow.camera
+    camera.left = -radius
+    camera.right = radius
+    camera.top = radius
+    camera.bottom = -radius
+  }
+  light.shadow.camera.updateProjectionMatrix()
+}
+
 /**
  * Builds the plane a rig bends, as a grid the skeleton has already deformed.
  *
@@ -405,9 +437,11 @@ export class ThreeSceneRuntimeRegistry {
         object.material.metalness = evaluateNumericProperty(item.material.metalness, time)
         object.material.roughness = evaluateNumericProperty(item.material.roughness, time)
         object.material.emissiveIntensity = evaluateNumericProperty(item.material.emissiveIntensity, time)
+        object.material.envMapIntensity = definition.environmentIntensity
       }
     })
     runtime.root.updateMatrixWorld(true)
+    const sceneBounds = new THREE.Box3().setFromObject(runtime.root)
     definition.cameras.forEach((item) => {
       const camera = runtime.cameras.get(item.id)
       if (!camera) return
@@ -436,9 +470,11 @@ export class ThreeSceneRuntimeRegistry {
       if (!light) return
       light.visible = item.visible
       light.color.set(item.color)
-      light.intensity = evaluateNumericProperty(item.intensity, time)
+      const environmentScale = light instanceof THREE.AmbientLight ? definition.environmentIntensity : 1
+      light.intensity = evaluateNumericProperty(item.intensity, time) * environmentScale
       applyTransform(light, item.transform, time)
       if ('castShadow' in light) light.castShadow = item.castShadow
+      if (item.castShadow) configureShadow(light, definition, sceneBounds)
       if (light instanceof THREE.DirectionalLight) {
         const direction = new THREE.Vector3(0, 0, -1).applyQuaternion(light.quaternion)
         light.target.position.copy(light.position).add(direction)

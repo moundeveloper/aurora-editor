@@ -12,6 +12,7 @@ import { applyMatrix, boneTransforms } from '@/engine/rig/skeleton'
 import { poseOffsetTowards, poseRotationTowards, restAimTowards } from '@/engine/rig/rigPosing'
 import { pathTransformComponents, sampleLocalPath } from '@/engine/scene3d/pathEvaluation'
 import { movePathHandle, movePathPoint, type PathHandleKey, type PathVector } from '@/engine/scene3d/pathEditing'
+import { AuroraSceneRenderPipeline } from '@/engine/rendering/AuroraSceneRenderPipeline'
 import type { Aurora3DObject, Aurora3DPath, Aurora3DPathPoint, Aurora3DScene, AuroraRig } from '@/models/editor'
 import IconButton from './common/IconButton.vue'
 
@@ -35,6 +36,7 @@ const assetMap = computed(() => new Map(assets.value.map((asset) => [asset.id, a
 
 const runtimeRegistry = new ThreeSceneRuntimeRegistry(() => renderViewport())
 let renderer: THREE.WebGLRenderer | null = null
+let scenePipeline: AuroraSceneRenderPipeline | null = null
 let perspectiveCamera: THREE.PerspectiveCamera | null = null
 let orthographicCamera: THREE.OrthographicCamera | null = null
 let editorCamera: THREE.Camera | null = null
@@ -517,7 +519,7 @@ function renderViewportNow() {
   renderer.shadowMap.enabled = sceneDefinition.settings.shadows
   renderer.setScissorTest(false)
   renderer.setViewport(0, 0, host.clientWidth, host.clientHeight)
-  renderer.render(targetRuntime.scene, editorCamera)
+  scenePipeline?.render(targetRuntime.scene, editorCamera, sceneDefinition.settings, host.clientWidth, host.clientHeight, 'screen')
   stats.value = { calls: renderer.info.render.calls, triangles: renderer.info.render.triangles }
 }
 
@@ -971,9 +973,12 @@ onMounted(async () => {
   if (!canvas.value || !viewport.value) return
   renderer = new THREE.WebGLRenderer({ canvas: canvas.value, antialias: true, alpha: false, powerPreference: 'high-performance' })
   renderer.outputColorSpace = THREE.SRGBColorSpace
+  renderer.toneMapping = THREE.ACESFilmicToneMapping
+  renderer.toneMappingExposure = 1
   renderer.setClearColor('#090b10', 1)
   renderer.shadowMap.enabled = true
   renderer.shadowMap.type = THREE.PCFSoftShadowMap
+  scenePipeline = new AuroraSceneRenderPipeline(renderer)
   perspectiveCamera = new THREE.PerspectiveCamera(48, 1, .1, 2000)
   perspectiveCamera.position.set(7, 5, 8)
   orthographicCamera = new THREE.OrthographicCamera(-5.5, 5.5, 5.5, -5.5, .1, 2000)
@@ -1025,6 +1030,8 @@ onBeforeUnmount(() => {
   transform?.dispose()
   transform = null
   runtimeRegistry.dispose()
+  scenePipeline?.dispose()
+  scenePipeline = null
   renderer?.dispose()
   renderer = null
   editorCamera = null

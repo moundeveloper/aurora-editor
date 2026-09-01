@@ -6,6 +6,7 @@ import * as THREE from 'three'
 import { useEditorStore } from '@/stores/editor'
 import { ThreeSceneRuntimeRegistry } from '@/engine/scene3d/ThreeSceneRuntime'
 import { cameraIdAtTime } from '@/engine/scene3d/cameraCuts'
+import { AuroraSceneRenderPipeline } from '@/engine/rendering/AuroraSceneRenderPipeline'
 import MSelect, { type MSelectOption } from './common/MSelect.vue'
 
 const store = useEditorStore()
@@ -17,6 +18,7 @@ const cameraChoice = ref('')
 const followCuts = ref(true)
 const runtimeRegistry = new ThreeSceneRuntimeRegistry(() => renderPreview())
 let renderer: THREE.WebGLRenderer | null = null
+let scenePipeline: AuroraSceneRenderPipeline | null = null
 let resizeObserver: ResizeObserver | null = null
 let previewFrame = 0
 
@@ -65,7 +67,7 @@ function renderPreviewNow() {
     runtime.root.visible = selectedLayer.value?.visible !== false
     const camera = runtime.cameras.get(cameraDefinition.id)
     if (!camera) return
-    renderer.render(runtime.scene, camera)
+    scenePipeline?.render(runtime.scene, camera, sceneDefinition.settings, width, height, 'screen')
     renderError.value = false
   } catch {
     renderError.value = true
@@ -86,8 +88,11 @@ onMounted(async () => {
   try {
     renderer = new THREE.WebGLRenderer({ canvas: canvas.value, antialias: true, alpha: false, powerPreference: 'high-performance' })
     renderer.outputColorSpace = THREE.SRGBColorSpace
+    renderer.toneMapping = THREE.ACESFilmicToneMapping
+    renderer.toneMappingExposure = 1
     renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.5))
     renderer.shadowMap.type = THREE.PCFSoftShadowMap
+    scenePipeline = new AuroraSceneRenderPipeline(renderer)
     resizeObserver = new ResizeObserver(renderPreview)
     resizeObserver.observe(viewport.value)
     renderPreview()
@@ -100,6 +105,8 @@ onBeforeUnmount(() => {
   if (previewFrame) cancelAnimationFrame(previewFrame)
   resizeObserver?.disconnect()
   runtimeRegistry.dispose()
+  scenePipeline?.dispose()
+  scenePipeline = null
   renderer?.dispose()
   renderer = null
 })

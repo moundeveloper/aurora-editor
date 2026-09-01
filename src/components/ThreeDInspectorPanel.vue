@@ -286,8 +286,16 @@ function pointModeLabel(mode: AuroraPathPointMode) {
       </section>
 
       <section class="property-section">
-        <div class="section-header static"><Box :size="12" /><span>Renderer</span><small>WebGL2</small></div>
-        <div class="metadata"><span>Color space</span><strong>sRGB</strong><span>Alpha</span><strong>Premultiplied</strong><span>Scene revision</span><strong>{{ selectedScene?.revision }}</strong></div>
+        <div class="section-header static"><Box :size="12" /><span>Renderer</span><small>WebGL2 · GTAO</small></div>
+        <div v-if="selectedScene" class="property-list">
+          <label class="check-row"><span>Shadows</span><button type="button" :class="{ checked: selectedScene.settings.shadows }" @click="selectedScene.settings.shadows = !selectedScene.settings.shadows; store.markSceneChanged()"><CircleDot :size="10" /></button></label>
+          <label><span>Shadow map</span><NumberField :model-value="selectedScene.settings.shadowMapSize" :min="256" :max="4096" :step="256" label="shadow map size" @update:model-value="selectedScene.settings.shadowMapSize = $event; store.markSceneChanged()" /></label>
+          <label class="check-row"><span>Ambient occlusion</span><button type="button" :class="{ checked: selectedScene.settings.ambientOcclusion }" @click="selectedScene.settings.ambientOcclusion = !selectedScene.settings.ambientOcclusion; store.markSceneChanged()"><CircleDot :size="10" /></button></label>
+          <label><span>AO intensity</span><NumberField :model-value="selectedScene.settings.ambientOcclusionIntensity" :min="0" :max="3" :step=".05" label="ambient occlusion intensity" @update:model-value="selectedScene.settings.ambientOcclusionIntensity = $event; store.markSceneChanged()" /></label>
+          <label><span>AO radius</span><NumberField :model-value="selectedScene.settings.ambientOcclusionRadius" :min=".01" :max="5" :step=".05" label="ambient occlusion radius" @update:model-value="selectedScene.settings.ambientOcclusionRadius = $event; store.markSceneChanged()" /></label>
+          <label><span>Environment light</span><NumberField :model-value="selectedScene.environmentIntensity" :min="0" :max="4" :step=".05" label="environment light intensity" @update:model-value="selectedScene.environmentIntensity = $event; store.markSceneChanged()" /></label>
+        </div>
+        <div class="metadata"><span>Color space</span><strong>sRGB + ACES</strong><span>AO</span><strong>Ground-truth approximation</strong><span>Scene revision</span><strong>{{ selectedScene?.revision }}</strong></div>
       </section>
     </div>
     <div v-else class="empty-state"><Box :size="25" /><strong>No 3D selection</strong><span>Select an object, camera, light, or path in the scene hierarchy.</span></div>

@@ -136,6 +136,9 @@ export function createDemo3DScene(): Aurora3DScene {
     settings: {
       shadows: true,
       shadowMapSize: 1024,
+      ambientOcclusion: true,
+      ambientOcclusionIntensity: 1,
+      ambientOcclusionRadius: .35,
       quality: 'preview',
       backgroundColor: null,
     },
@@ -181,6 +184,9 @@ export function createEmpty3DScene(name = '3D Scene'): Aurora3DScene {
     settings: {
       shadows: true,
       shadowMapSize: 1024,
+      ambientOcclusion: true,
+      ambientOcclusionIntensity: 1,
+      ambientOcclusionRadius: .35,
       quality: 'preview',
       backgroundColor: null,
     },

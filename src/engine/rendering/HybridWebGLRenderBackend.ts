@@ -13,6 +13,7 @@ import { bonePoseMatrices, rigIsActive } from '@/engine/rig/skeleton'
 import { cameraIdAtTime } from '@/engine/scene3d/cameraCuts'
 import { createMaskGeometry, maskAlphaField, maskGeometryKey, type MaskGeometryField } from '@/engine/rendering/maskField'
 import { MediaTextureCache } from '@/engine/rendering/mediaTextures'
+import { AuroraSceneRenderPipeline } from '@/engine/rendering/AuroraSceneRenderPipeline'
 import { mediaUrl } from '../../../shared/contracts.ts'
 
 /** Colour nodes fold into one matrix so a chain of them still costs a single filter pass. */
@@ -143,6 +144,7 @@ export interface HybridRendererStats {
 
 export class HybridWebGLRenderBackend implements RenderBackend {
   private threeRenderer: THREE.WebGLRenderer | null = null
+  private scenePipeline: AuroraSceneRenderPipeline | null = null
   private pixiRenderer: WebGLRenderer | null = null
   private readonly runtimeRegistry = new ThreeSceneRuntimeRegistry()
   private threeLayerTarget: THREE.WebGLRenderTarget | null = null
@@ -200,9 +202,12 @@ export class HybridWebGLRenderBackend implements RenderBackend {
     })
     this.threeRenderer.autoClear = false
     this.threeRenderer.outputColorSpace = THREE.SRGBColorSpace
+    this.threeRenderer.toneMapping = THREE.ACESFilmicToneMapping
+    this.threeRenderer.toneMappingExposure = 1
     this.threeRenderer.shadowMap.enabled = true
     this.threeRenderer.shadowMap.type = THREE.PCFSoftShadowMap
     this.threeRenderer.setClearAlpha(HYBRID_ALPHA_CONTRACT.clearAlpha)
+    this.scenePipeline = new AuroraSceneRenderPipeline(this.threeRenderer)
 
     this.pixiRenderer = new WebGLRenderer()
     await this.pixiRenderer.init({
@@ -295,7 +300,7 @@ export class HybridWebGLRenderBackend implements RenderBackend {
         flushPixi()
         const scene = pass.sceneId ? sceneMap.get(pass.sceneId) : undefined
         if (!scene) return
-        this.renderThreeLayer(layer, scene, request.time, size.width, size.height, request.project.width, request.project.height, pass.effects, layerMap, request.assets ?? [], request.rigs ?? [])
+        this.renderThreeLayer(layer, scene, request.time, size.width, size.height, request.project.width, request.project.height, request.quality, pass.effects, layerMap, request.assets ?? [], request.rigs ?? [])
         threePasses += 1
       } else {
         pixiBatch.push({ pass, layer })
@@ -618,6 +623,7 @@ export class HybridWebGLRenderBackend implements RenderBackend {
     height: number,
     projectWidth: number,
     projectHeight: number,
+    quality: RenderFrameRequest['quality'],
     effects: GraphEffects,
     layerMap: Map<string, EditorLayer>,
     assets: MediaAsset[],
@@ -628,32 +634,45 @@ export class HybridWebGLRenderBackend implements RenderBackend {
     const cameraId = cameraIdAtTime(sceneDefinition, time)
     const camera = cameraId ? runtime.cameras.get(cameraId) : undefined
     if (!camera) return
+    this.threeRenderer.shadowMap.enabled = sceneDefinition.settings.shadows
     const layerOpacity = (evaluateNumericProperty(layer.transform.opacity, time) / 100) * effects.opacity
 
     const maskLayer = effects.mask ? layerMap.get(effects.mask.layerId) : null
     const maskRaster = effects.mask && maskLayer
       ? this.maskRasterFor(maskLayer, effects.mask, time, width, height, projectWidth, projectHeight)
       : null
-    if (maskRaster) {
-      this.threeLayerTarget ??= new THREE.WebGLRenderTarget(width, height, { depthBuffer: true, stencilBuffer: false })
-      if (this.threeLayerTarget.width !== width || this.threeLayerTarget.height !== height) this.threeLayerTarget.setSize(width, height)
-      this.threeLayerTarget.texture.colorSpace = THREE.SRGBColorSpace
-
+    const renderSettings = { ...sceneDefinition.settings, quality }
+    const ambientOcclusion = renderSettings.ambientOcclusion && quality !== 'draft'
+    if (maskRaster || ambientOcclusion) {
+      let sceneTexture: THREE.Texture | null = null
       this.threeRenderer.resetState()
-      this.threeRenderer.setRenderTarget(this.threeLayerTarget)
-      this.threeRenderer.setClearColor(0x000000, 0)
-      this.threeRenderer.clear(true, true, true)
-      this.threeRenderer.render(runtime.scene, camera)
+      if (ambientOcclusion && this.scenePipeline) {
+        sceneTexture = this.scenePipeline.render(runtime.scene, camera, renderSettings, width, height, 'texture')
+      } else {
+        this.threeLayerTarget ??= new THREE.WebGLRenderTarget(width, height, { depthBuffer: true, stencilBuffer: false })
+        if (this.threeLayerTarget.width !== width || this.threeLayerTarget.height !== height) this.threeLayerTarget.setSize(width, height)
+        this.threeLayerTarget.texture.colorSpace = THREE.SRGBColorSpace
+        this.threeRenderer.setRenderTarget(this.threeLayerTarget)
+        this.threeRenderer.setClearColor(0x000000, 0)
+        this.threeRenderer.clear(true, true, true)
+        this.threeRenderer.render(runtime.scene, camera)
+        sceneTexture = this.threeLayerTarget.texture
+      }
+      if (!sceneTexture) return
 
-      maskRaster.threeTexture ??= new THREE.CanvasTexture(maskRaster.canvas)
-      maskRaster.threeTexture.colorSpace = THREE.NoColorSpace
-      maskRaster.threeTexture.minFilter = THREE.LinearFilter
-      maskRaster.threeTexture.magFilter = THREE.LinearFilter
-      this.maskCompositeMaterial.map = this.threeLayerTarget.texture
-      const enablesAlphaMap = !this.maskCompositeMaterial.alphaMap
-      this.maskCompositeMaterial.alphaMap = maskRaster.threeTexture
+      let alphaMap: THREE.Texture | null = null
+      if (maskRaster) {
+        maskRaster.threeTexture ??= new THREE.CanvasTexture(maskRaster.canvas)
+        maskRaster.threeTexture.colorSpace = THREE.NoColorSpace
+        maskRaster.threeTexture.minFilter = THREE.LinearFilter
+        maskRaster.threeTexture.magFilter = THREE.LinearFilter
+        alphaMap = maskRaster.threeTexture
+      }
+      this.maskCompositeMaterial.map = sceneTexture
+      const changesAlphaMode = Boolean(this.maskCompositeMaterial.alphaMap) !== Boolean(alphaMap)
+      this.maskCompositeMaterial.alphaMap = alphaMap
       this.maskCompositeMaterial.opacity = layerOpacity
-      if (enablesAlphaMap) this.maskCompositeMaterial.needsUpdate = true
+      if (changesAlphaMode) this.maskCompositeMaterial.needsUpdate = true
 
       this.threeRenderer.setRenderTarget(null)
       this.threeRenderer.autoClear = false
@@ -714,6 +733,8 @@ export class HybridWebGLRenderBackend implements RenderBackend {
     this.canvas.removeEventListener('webglcontextlost', this.onContextLost)
     this.canvas.removeEventListener('webglcontextrestored', this.onContextRestored)
     this.runtimeRegistry.dispose()
+    this.scenePipeline?.dispose()
+    this.scenePipeline = null
     this.threeLayerTarget?.dispose()
     this.threeLayerTarget = null
     this.maskCompositeQuad.geometry.dispose()

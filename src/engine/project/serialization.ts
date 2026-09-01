@@ -7,7 +7,7 @@ import { createDemoNodeGraph, NODE_DEFINITIONS } from '@/engine/nodes/nodeGraph'
 import { normalizeCameraCuts } from '@/engine/scene3d/cameraCuts'
 import { MAX_RIG_CELLS, MIN_RIG_CELLS } from '@/engine/rig/rigMesh'
 
-export const CURRENT_PROJECT_VERSION = 11
+export const CURRENT_PROJECT_VERSION = 12
 
 export interface EditorStateFallback {
   project: EditorProject
@@ -72,6 +72,16 @@ function clone<T>(value: T): T {
 
 /** Projects saved before 3D paths existed have no `paths` array and no camera constraints to repair. */
 function normalizeScene(scene: Aurora3DScene): Aurora3DScene {
+  scene.settings ??= {
+    shadows: true, shadowMapSize: 1024, ambientOcclusion: true,
+    ambientOcclusionIntensity: 1, ambientOcclusionRadius: .35, quality: 'preview', backgroundColor: null,
+  }
+  scene.settings.shadows = scene.settings.shadows !== false
+  scene.settings.shadowMapSize = Math.max(256, Math.min(4096, finiteOr(scene.settings.shadowMapSize, 1024)))
+  scene.settings.ambientOcclusion = scene.settings.ambientOcclusion !== false
+  scene.settings.ambientOcclusionIntensity = Math.max(0, Math.min(3, finiteOr(scene.settings.ambientOcclusionIntensity, 1)))
+  scene.settings.ambientOcclusionRadius = Math.max(.01, Math.min(5, finiteOr(scene.settings.ambientOcclusionRadius, .35)))
+  scene.environmentIntensity = Math.max(0, finiteOr(scene.environmentIntensity, 1))
   scene.cameraCuts = normalizeCameraCuts(scene, scene.cameraCuts)
   if (!scene.cameras.some((camera) => camera.id === scene.activeCameraId)) scene.activeCameraId = scene.cameraCuts[0]?.cameraId ?? scene.cameras[0]?.id ?? null
   if (!Array.isArray(scene.paths)) scene.paths = []

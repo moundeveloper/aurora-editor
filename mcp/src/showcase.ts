@@ -233,15 +233,16 @@ function createScene(): Aurora3DScene {
     id, name, type, color, visible: true, intensity: numeric(`${id}-intensity`, intensity, type === 'ambient' ? [] : [[0, intensity * .5], [4, intensity * 1.25], [8, intensity * .7], [12, intensity * .5]]),
     transform: transform3D(id, position), castShadow: type === 'directional',
   })
+  const ambient = light('ambient-violet', 'Violet Atmosphere', 'ambient', '#4b42a8', .65, [0, 0, 0])
+  const keyLight = light('key-cyan', 'Cyan Key', 'directional', '#4cf7ff', 4.8, [5, 7, 6])
+  keyLight.transform.rotation.x.value = -50
+  keyLight.transform.rotation.y.value = 34
+  const rim = light('rim-magenta', 'Magenta Rim', 'point', '#ff2bd6', 34, [-4, 2, 2])
 
   return {
     id: 'scene-neon-singularity', name: 'Neon Singularity Stage', objects: [core, fins, satellites, floor],
     cameras: [camera], cameraCuts: [{ id: 'camera-cut-opening', cameraId: camera.id, time: 0 }],
-    lights: [
-      light('ambient-violet', 'Violet Atmosphere', 'ambient', '#4b42a8', .65, [0, 0, 0]),
-      light('key-cyan', 'Cyan Key', 'directional', '#4cf7ff', 4.8, [5, 7, 6]),
-      light('rim-magenta', 'Magenta Rim', 'point', '#ff2bd6', 34, [-4, 2, 2]),
-    ],
+    lights: [ambient, keyLight, rim],
     paths: [{
       id: 'camera-orbit-path', name: 'Hero Orbit', visible: true, color: '#52f5ff',
       transform: transform3D('camera-path', [0, 0, 0]), closed: true, locked: false,
@@ -253,7 +254,10 @@ function createScene(): Aurora3DScene {
       ],
     }],
     activeCameraId: camera.id, environmentIntensity: 1.15,
-    settings: { shadows: true, shadowMapSize: 1024, quality: 'preview', backgroundColor: '#02030d' }, revision: 2,
+    settings: {
+      shadows: true, shadowMapSize: 2048, ambientOcclusion: true,
+      ambientOcclusionIntensity: 1.15, ambientOcclusionRadius: .42, quality: 'preview', backgroundColor: '#02030d',
+    }, revision: 2,
   }
 }
 
@@ -293,7 +297,7 @@ export function createNeonSingularityProject(name = 'Neon Singularity', projectI
   return {
     project: {
       id: projectId, name, width: 1920, height: 1080, frameRate: 30, duration: DURATION,
-      backgroundColor: '#02030d', updatedAt: Date.now(), version: 11,
+      backgroundColor: '#02030d', updatedAt: Date.now(), version: 12,
     },
     layers,
     scenes3D: [createScene()],
@@ -442,17 +446,17 @@ export function createPillarRunProject(name = 'Pillar Run // Drone-07', projectI
   droneLight.transform.position.x = numeric('drone-light-x', 0, flightKeys.map(([time, value]) => [time, value[0]]))
   droneLight.transform.position.y = numeric('drone-light-y', 1.5, flightKeys.map(([time, value]) => [time, value[1] - .7]))
   droneLight.transform.position.z = numeric('drone-light-z', 10, flightKeys.map(([time, value]) => [time, value[2]]))
+  const ambient = light('pillar-ambient', 'Midnight Atmosphere', 'ambient', '#374070', .52, [0, 0, 0])
+  const moon = light('pillar-moon', 'Cold Moon Key', 'directional', '#b9d9ff', 2.6, [5, 11, 8])
+  moon.transform.rotation.x.value = -54
+  moon.transform.rotation.y.value = 28
+  const tunnelFill = light('pillar-magenta', 'Magenta Tunnel Fill', 'point', '#d23cff', 31, [-4, 4, -8])
 
   const scene: Aurora3DScene = {
     id: 'scene-pillar-run', name: 'Neon Canyon Pillar Run',
     objects: [...environment, droneRoot, body, core, armA, armB, ...rotors],
     cameras: [camera], cameraCuts: [{ id: 'cut-drone-launch', cameraId: camera.id, time: 0 }],
-    lights: [
-      light('pillar-ambient', 'Midnight Atmosphere', 'ambient', '#374070', .52, [0, 0, 0]),
-      light('pillar-moon', 'Cold Moon Key', 'directional', '#b9d9ff', 2.6, [5, 11, 8]),
-      light('pillar-magenta', 'Magenta Tunnel Fill', 'point', '#d23cff', 31, [-4, 4, -8]),
-      droneLight,
-    ],
+    lights: [ambient, moon, tunnelFill, droneLight],
     paths: [{
       id: 'path-drone-chase', name: 'Six-Gate Chase Line', visible: true, color: '#35edff',
       transform: transform3D('path-drone-chase', [0, 0, 0]), closed: false, locked: false,
@@ -464,7 +468,10 @@ export function createPillarRunProject(name = 'Pillar Run // Drone-07', projectI
       })),
     }],
     activeCameraId: camera.id, environmentIntensity: 1.1,
-    settings: { shadows: true, shadowMapSize: 1024, quality: 'preview', backgroundColor: '#02040d' }, revision: 1,
+    settings: {
+      shadows: true, shadowMapSize: 2048, ambientOcclusion: true,
+      ambientOcclusionIntensity: 1.35, ambientOcclusionRadius: .55, quality: 'preview', backgroundColor: '#02040d',
+    }, revision: 1,
   }
 
   snapshot.scenes3D = [scene]

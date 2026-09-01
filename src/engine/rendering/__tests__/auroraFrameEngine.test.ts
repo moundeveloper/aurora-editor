@@ -8,7 +8,7 @@ import type { RenderBackend, RenderFrameRequest, RendererInitializationOptions, 
 
 const project: EditorProject = {
   id: 'engine-test', name: 'Engine Test', width: 1920, height: 1080, frameRate: 60,
-  duration: 10, backgroundColor: '#000000', updatedAt: 0, version: 11,
+  duration: 10, backgroundColor: '#000000', updatedAt: 0, version: 12,
 }
 
 const property = (id: string, value: number) => ({ id, value, animated: false, keyframes: [] })

@@ -201,6 +201,9 @@ export interface AuroraLight {
 export interface Scene3DSettings {
   shadows: boolean
   shadowMapSize: number
+  ambientOcclusion: boolean
+  ambientOcclusionIntensity: number
+  ambientOcclusionRadius: number
   quality: 'draft' | 'preview' | 'full'
   backgroundColor: string | null
 }
