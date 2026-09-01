@@ -314,9 +314,11 @@ export function createNeonSingularityProject(name = 'Neon Singularity', projectI
 export function createPillarRunProject(name = 'Pillar Run // Drone-07', projectId: string = randomUUID()): SerializedEditorState {
   const snapshot = createNeonSingularityProject(name, projectId)
 
-  const droneMaterial = material('drone-shell', '#16233b', '#20e9ff', 1.8)
-  droneMaterial.metalness.value = .88
-  droneMaterial.roughness.value = .16
+  // Structural surfaces stay non-emissive so their normals, key light, and shadowing remain visible.
+  // The reactor and gate beacons below are the actual light-emitting elements.
+  const droneMaterial = material('drone-shell', '#263b5e', '#000000', 0)
+  droneMaterial.metalness.value = .62
+  droneMaterial.roughness.value = .32
   const droneRoot: Aurora3DObject = {
     id: 'drone-root', name: 'DRONE-07 Flight Rig', type: 'group', primitive: 'box', visible: true,
     locked: false, castShadow: false, receiveShadow: false, transform: transform3D('drone-root', [0, 2.2, 10]),
@@ -341,33 +343,37 @@ export function createPillarRunProject(name = 'Pillar Run // Drone-07', projectI
   body.transform.scale.x.value = 1.15
   body.transform.scale.y.value = .34
   body.transform.scale.z.value = .82
+  body.receiveShadow = true
   const core = child('drone-core', 'Cyan Reactor Core', 'sphere', [0, -.28, .05], material('drone-core', '#42f5ff', '#20efff', 4.5))
   core.transform.scale.x = numeric('drone-core-scale-x', .32, [[0, .24], [1.2, .38], [2.4, .24], [3.6, .38], [4.8, .24], [6, .38], [7.2, .24], [8.4, .38], [9.6, .24], [10.8, .38], [12, .24]])
   core.transform.scale.y = core.transform.scale.x
   core.transform.scale.z = core.transform.scale.x
   core.castShadow = false
 
-  const armMaterial = material('drone-arms', '#0a1020', '#9b4dff', .7)
-  armMaterial.metalness.value = .92
+  const armMaterial = material('drone-arms', '#151c31', '#000000', 0)
+  armMaterial.metalness.value = .56
+  armMaterial.roughness.value = .38
   const armA = child('drone-arm-a', 'Rotor Arm A', 'box', [0, 0, 0], armMaterial)
   armA.transform.scale.x.value = 1.55
   armA.transform.scale.y.value = .07
   armA.transform.scale.z.value = .09
   armA.transform.rotation.y.value = 28
+  armA.receiveShadow = true
   const armB = child('drone-arm-b', 'Rotor Arm B', 'box', [0, 0, 0], armMaterial)
   armB.transform.scale.x.value = 1.55
   armB.transform.scale.y.value = .07
   armB.transform.scale.z.value = .09
   armB.transform.rotation.y.value = -28
+  armB.receiveShadow = true
 
   const rotorPositions: Array<[number, number, number]> = [[-1.35, .05, -.72], [1.35, .05, -.72], [-1.35, .05, .72], [1.35, .05, .72]]
   const rotors = rotorPositions.flatMap((position, index) => {
-    const hub = child(`drone-rotor-hub-${index + 1}`, `Rotor ${index + 1} Hub`, 'sphere', position, material(`hub-${index}`, '#222a44', '#ff3fe6', 1.6))
+    const hub = child(`drone-rotor-hub-${index + 1}`, `Rotor ${index + 1} Hub`, 'sphere', position, material(`hub-${index}`, '#343c5c', '#000000', 0))
     hub.transform.scale.x.value = .24
     hub.transform.scale.y.value = .12
     hub.transform.scale.z.value = .24
     hub.castShadow = false
-    const blade = child(`drone-rotor-blade-${index + 1}`, `Rotor ${index + 1} Blade`, 'box', [position[0], position[1] + .08, position[2]], material(`blade-${index}`, '#38435f', '#29eaff', .8))
+    const blade = child(`drone-rotor-blade-${index + 1}`, `Rotor ${index + 1} Blade`, 'box', [position[0], position[1] + .08, position[2]], material(`blade-${index}`, '#53617d', '#000000', 0))
     blade.transform.scale.x.value = .58
     blade.transform.scale.y.value = .025
     blade.transform.scale.z.value = .07
@@ -377,18 +383,18 @@ export function createPillarRunProject(name = 'Pillar Run // Drone-07', projectI
   })
 
   const environment: Aurora3DObject[] = []
-  const floor = mesh('runway-floor', 'Wet Obsidian Runway', 'box', [0, -.35, -6], material('runway', '#040713', '#071a31', .16))
+  const floor = mesh('runway-floor', 'Wet Obsidian Runway', 'box', [0, -.35, -6], material('runway', '#070c18', '#000000', 0))
   floor.transform.scale.x.value = 8
   floor.transform.scale.y.value = .16
   floor.transform.scale.z.value = 18
-  floor.material.metalness.value = .78
-  floor.material.roughness.value = .28
+  floor.material.metalness.value = .48
+  floor.material.roughness.value = .34
   floor.castShadow = false
   floor.receiveShadow = true
   environment.push(floor)
 
   const wall = (id: string, x: number) => {
-    const object = mesh(id, x < 0 ? 'Left Canyon Wall' : 'Right Canyon Wall', 'box', [x, 3.4, -6], material(id, '#080d1c', x < 0 ? '#17104a' : '#073f4e', .4))
+    const object = mesh(id, x < 0 ? 'Left Canyon Wall' : 'Right Canyon Wall', 'box', [x, 3.4, -6], material(id, '#10192b', '#000000', 0))
     object.transform.scale.x.value = .18
     object.transform.scale.y.value = 3.8
     object.transform.scale.z.value = 18
@@ -402,16 +408,16 @@ export function createPillarRunProject(name = 'Pillar Run // Drone-07', projectI
   gateDepths.forEach((z, gateIndex) => {
     const accent = gateIndex % 2 ? '#a83cff' : '#17e9ff'
     ;[-4.15, 4.15].forEach((x, sideIndex) => {
-      const pillar = mesh(`pillar-${gateIndex}-${sideIndex}`, `Gate ${gateIndex + 1} ${sideIndex ? 'Right' : 'Left'} Pillar`, 'box', [x, 3.7, z], material(`pillar-${gateIndex}-${sideIndex}`, '#11182b', accent, 1.25))
+      const pillar = mesh(`pillar-${gateIndex}-${sideIndex}`, `Gate ${gateIndex + 1} ${sideIndex ? 'Right' : 'Left'} Pillar`, 'box', [x, 3.7, z], material(`pillar-${gateIndex}-${sideIndex}`, '#24304a', accent, .025))
       pillar.transform.scale.x.value = .68
       pillar.transform.scale.y.value = 3.85
       pillar.transform.scale.z.value = .68
-      pillar.material.metalness.value = .76
-      pillar.material.roughness.value = .26
+      pillar.material.metalness.value = .34
+      pillar.material.roughness.value = .42
       pillar.receiveShadow = true
       environment.push(pillar)
     })
-    const beam = mesh(`gate-beam-${gateIndex}`, `Gate ${gateIndex + 1} Crown`, 'box', [0, 7.45, z], material(`beam-${gateIndex}`, '#0b1020', accent, 1.8))
+    const beam = mesh(`gate-beam-${gateIndex}`, `Gate ${gateIndex + 1} Crown`, 'box', [0, 7.45, z], material(`beam-${gateIndex}`, '#1a243c', accent, .08))
     beam.transform.scale.x.value = 4.8
     beam.transform.scale.y.value = .18
     beam.transform.scale.z.value = .5
@@ -452,8 +458,8 @@ export function createPillarRunProject(name = 'Pillar Run // Drone-07', projectI
   droneLight.transform.position.x = numeric('drone-light-x', 0, flightKeys.map(([time, value]) => [time, value[0]]))
   droneLight.transform.position.y = numeric('drone-light-y', 1.5, flightKeys.map(([time, value]) => [time, value[1] - .7]))
   droneLight.transform.position.z = numeric('drone-light-z', 10, flightKeys.map(([time, value]) => [time, value[2]]))
-  const ambient = light('pillar-ambient', 'Deep Blue Ambient', 'ambient', '#27345f', .24, [0, 0, 0])
-  const moon = light('pillar-moon', 'Cold Moon Key', 'directional', '#c9ddff', 4.2, [7, 12, 10])
+  const ambient = light('pillar-ambient', 'Deep Blue Ambient', 'ambient', '#27345f', .12, [0, 0, 0])
+  const moon = light('pillar-moon', 'Cold Moon Key', 'directional', '#d7e6ff', 5.2, [7, 12, 10])
   moon.transform.rotation.x.value = -58
   moon.transform.rotation.y.value = 32
   const launchPool = light('pillar-launch-cyan', 'Launch Cyan Pool', 'point', '#25ddff', 22, [3.4, 2.8, 6])
@@ -482,7 +488,7 @@ export function createPillarRunProject(name = 'Pillar Run // Drone-07', projectI
         mode: 'smooth' as const,
       })),
     }],
-    activeCameraId: camera.id, environmentIntensity: .9,
+    activeCameraId: camera.id, environmentIntensity: .8,
     settings: {
       shadows: true, shadowMapSize: 2048, ambientOcclusion: true,
       ambientOcclusionIntensity: 1.08, ambientOcclusionRadius: .42, quality: 'preview', backgroundColor: '#02040d',
