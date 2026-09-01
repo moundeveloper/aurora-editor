@@ -96,6 +96,11 @@ const channelDefinitions = computed<ChannelOption[]>(() => {
     rows.push(...rigChannels(selected.value.rigId))
   } else if (selected.kind === 'camera') {
     rows.push({ key: selected.value.fov.id, label: 'Field of view', color: '#8ca9e8', suffix: '°', property: selected.value.fov })
+    const lens = selected.value
+    if (lens.depthOfField && lens.focusDistance && lens.fStop) {
+      rows.push({ key: lens.focusDistance.id, label: 'Focus distance', color: '#c2a0e8', suffix: '', property: lens.focusDistance })
+      rows.push({ key: lens.fStop.id, label: 'Aperture f/', color: '#c2a0e8', suffix: '', property: lens.fStop })
+    }
     const constraint = selected.value.pathConstraint
     if (constraint) {
       rows.push({ key: constraint.progress.id, label: 'Path progress', color: '#7ee0c0', suffix: '', property: constraint.progress })

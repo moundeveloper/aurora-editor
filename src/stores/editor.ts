@@ -1741,6 +1741,27 @@ export const useEditorStore = defineStore('editor', () => {
     return object
   }
 
+  /**
+   * Places an imported mesh in the scene.
+   *
+   * The file keeps its own materials and internal hierarchy, so the object is a host rather than a
+   * primitive: Aurora's PBR sliders and influences do not apply to it.
+   */
+  function add3DModel(assetId?: string) {
+    const scene = selectedScene.value
+    if (!scene) return null
+    const asset = assets.value.find((item) => item.id === assetId && item.kind === 'model3d')
+      ?? assets.value.find((item) => item.kind === 'model3d')
+    if (!asset) return null
+    const object = createPrimitiveObject('model', scene.objects.length + 1)
+    object.name = asset.name.replace(/\.[^.]+$/, '')
+    object.assetId = asset.id
+    scene.objects.push(object)
+    selectedSceneEntityId.value = object.id
+    markSceneChanged(scene)
+    return object
+  }
+
   /** New aimed lights point at the authored content, so adding one lights the scene immediately. */
   function sceneAimTarget(scene: Aurora3DScene): [number, number, number] {
     const roots = scene.objects.filter((object) => !object.parentId)
@@ -1810,7 +1831,7 @@ export const useEditorStore = defineStore('editor', () => {
     )
     if (entity.kind === 'object') {
       const influenceProperties = (entity.value.influences ?? []).flatMap((influence) => influenceParameters(influence).map((item) => item.property))
-      if (entity.value.type !== 'mesh') return [...transformProperties, ...influenceProperties]
+      if (entity.value.type !== 'mesh' || entity.value.primitive === 'model') return [...transformProperties, ...influenceProperties]
       return [
         ...transformProperties,
         entity.value.material.metalness, entity.value.material.roughness,
@@ -1830,7 +1851,10 @@ export const useEditorStore = defineStore('editor', () => {
             objectConstraint.rotationOffset.x, objectConstraint.rotationOffset.y, objectConstraint.rotationOffset.z,
           ]
         : []
-      return [...transformProperties, entity.value.fov, ...constraintProperties, ...objectConstraintProperties]
+      return [
+        ...transformProperties, entity.value.fov, ...constraintProperties, ...objectConstraintProperties,
+        entity.value.focusDistance, entity.value.fStop,
+      ].filter((property): property is AnimatableProperty<number> => Boolean(property))
     }
     if (entity.kind === 'path') return transformProperties
     return [
@@ -1881,7 +1905,7 @@ export const useEditorStore = defineStore('editor', () => {
 
   function set3DObjectMaterial(key: 'metalness' | 'roughness' | 'opacity' | 'emissiveIntensity', value: number) {
     const entity = selectedSceneEntity.value
-    if (entity?.kind !== 'object' || entity.value.type !== 'mesh') return
+    if (entity?.kind !== 'object' || entity.value.type !== 'mesh' || entity.value.primitive === 'model') return
     if (apply3DPropertyValue(entity.value.material[key], value)) markSceneChanged()
   }
 
@@ -1895,10 +1919,63 @@ export const useEditorStore = defineStore('editor', () => {
     return true
   }
 
+  /** Points the scene at a radiance map, which lights every material and can also be the backdrop. */
+  function set3DEnvironmentMap(assetId: string | null) {
+    const scene = selectedScene.value
+    if (!scene) return false
+    const asset = assetId ? assets.value.find((item) => item.id === assetId && item.kind === 'hdr') : undefined
+    if (assetId && !asset) return false
+    if (asset) scene.environmentAssetId = asset.id
+    else {
+      delete scene.environmentAssetId
+      scene.environmentBackground = false
+    }
+    markSceneChanged(scene)
+    return true
+  }
+
+  function set3DEnvironmentBackground(visible: boolean) {
+    const scene = selectedScene.value
+    if (!scene || !scene.environmentAssetId) return false
+    scene.environmentBackground = visible
+    markSceneChanged(scene)
+    return true
+  }
+
+  function set3DObjectModel(assetId: string | null) {
+    const entity = selectedSceneEntity.value
+    if (entity?.kind !== 'object' || entity.value.primitive !== 'model') return false
+    const asset = assetId ? assets.value.find((item) => item.id === assetId && item.kind === 'model3d') : undefined
+    if (assetId && !asset) return false
+    entity.value.assetId = asset?.id
+    markSceneChanged()
+    return true
+  }
+
   function set3DLightIntensity(value: number) {
     const entity = selectedSceneEntity.value
     if (entity?.kind !== 'light') return
     if (apply3DPropertyValue(entity.value.intensity, value)) markSceneChanged()
+  }
+
+  function set3DCameraLens(key: 'focusDistance' | 'fStop', value: number) {
+    const entity = selectedSceneEntity.value
+    const property = entity?.kind === 'camera' ? entity.value[key] : undefined
+    if (!property || !Number.isFinite(value)) return
+    const clamped = key === 'focusDistance'
+      ? Math.max(.01, Math.min(1000, value))
+      : Math.max(1, Math.min(22, value))
+    if (apply3DPropertyValue(property, clamped)) markSceneChanged()
+  }
+
+  function set3DCameraDepthOfField(enabled: boolean) {
+    const entity = selectedSceneEntity.value
+    if (entity?.kind !== 'camera') return false
+    entity.value.depthOfField = enabled
+    entity.value.focusDistance ??= numericProperty(`${entity.value.id}-focus-distance`, 8)
+    entity.value.fStop ??= numericProperty(`${entity.value.id}-f-stop`, 2.8)
+    markSceneChanged()
+    return true
   }
 
   function set3DCameraFov(value: number) {
@@ -1926,7 +2003,9 @@ export const useEditorStore = defineStore('editor', () => {
 
   function add3DInfluence(type: AuroraInfluenceType) {
     const object = selectedObject()
-    if (!object || (object.type !== 'mesh' && type !== 'array')) return null
+    // An imported subtree carries its own geometry, so nothing in the influence stack can reach it.
+    if (!object || object.primitive === 'model') return null
+    if (object.type !== 'mesh' && type !== 'array') return null
     if (!Array.isArray(object.influences)) object.influences = []
     const sameType = object.influences.filter((influence) => influence.type === type).length
     const influence = createInfluence(type, sameType + 1)
@@ -2748,9 +2827,9 @@ export const useEditorStore = defineStore('editor', () => {
     splitLayerAt, splitSelectedLayer, markChanged, saveProjectNow, flushProjectSave, initializePersistence,
     refreshProjects, openProject, createEmptyProject, setProjectFormat, setWorkspace, create3DSceneFromWorkspace, startExport, exportGif, cancelExport,
     publish3DSceneAsset, ensure3DSceneAssets,
-    selectSceneEntity, select3DLayer, markSceneChanged, add3DPrimitive, add3DGroup, ungroup3DObject, add3DImagePlane, add3DLight, add3DCamera, set3DEntityTransform,
+    selectSceneEntity, select3DLayer, markSceneChanged, add3DPrimitive, add3DGroup, ungroup3DObject, add3DImagePlane, add3DModel, add3DLight, add3DCamera, set3DEntityTransform,
     rename3DEntity, set3DEntityVisible, delete3DEntity,
-    update3DEntityTransform, set3DObjectMaterial, set3DObjectImage, set3DLightIntensity, set3DLightCone, set3DCameraFov,
+    update3DEntityTransform, set3DObjectMaterial, set3DObjectImage, set3DObjectModel, set3DLightIntensity, set3DLightCone, set3DEnvironmentMap, set3DEnvironmentBackground, set3DCameraFov, set3DCameraLens, set3DCameraDepthOfField,
     toggle3DKeyframe, keySelected3DTransform, move3DKeyframe, delete3DKeyframe, setActive3DCamera,
     add3DCameraCut, set3DCameraCutCamera, move3DCameraCut, delete3DCameraCut,
     add3DPath, delete3DPath, findScenePath, move3DPathPoint, set3DPathPointAxis, set3DPathPointMode,

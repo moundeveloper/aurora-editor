@@ -277,4 +277,44 @@ describe('rig persistence', () => {
     expect(bone.parentId).toBeUndefined()
     expect(bone.stretch.value).toBe(1)
   })
+
+  it('carries the environment map and camera lens through a save and reload', () => {
+    const scene = createDemo3DScene()
+    scene.environmentAssetId = 'env-1'
+    scene.environmentBackground = true
+    const camera = scene.cameras[0]!
+    camera.depthOfField = true
+    const state: SerializedEditorState = {
+      project, layers: [], scenes3D: [scene], assets: [], nodes: [], nodeConnections: [], rigs: [],
+    }
+
+    const restored = deserializeEditorState(serializeEditorState(state), state).scenes3D[0]!
+
+    expect(restored.environmentAssetId).toBe('env-1')
+    expect(restored.environmentBackground).toBe(true)
+    expect(restored.cameras[0]?.depthOfField).toBe(true)
+  })
+
+  it('backfills lens defaults on every camera, constrained or not', () => {
+    const scene = createDemo3DScene()
+    // The demo camera has no constraint, which is the path the normaliser returns early from.
+    const camera = scene.cameras[0]!
+    delete camera.focusDistance
+    delete camera.fStop
+    delete camera.depthOfField
+    scene.environmentBackground = undefined
+    scene.environmentAssetId = ''
+    const state: SerializedEditorState = {
+      project, layers: [], scenes3D: [scene], assets: [], nodes: [], nodeConnections: [], rigs: [],
+    }
+
+    const restored = deserializeEditorState(serializeEditorState(state), state).scenes3D[0]!
+
+    expect(restored.cameras[0]?.focusDistance?.value).toBe(8)
+    expect(restored.cameras[0]?.fStop?.value).toBe(2.8)
+    // Off by default: an existing project must not suddenly render with a blurred lens.
+    expect(restored.cameras[0]?.depthOfField).toBe(false)
+    expect(restored.environmentAssetId).toBeUndefined()
+    expect(restored.environmentBackground).toBe(false)
+  })
 })

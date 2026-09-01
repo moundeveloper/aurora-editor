@@ -6,6 +6,7 @@ import * as THREE from 'three'
 import { useEditorStore } from '@/stores/editor'
 import { ThreeSceneRuntimeRegistry } from '@/engine/scene3d/ThreeSceneRuntime'
 import { cameraIdAtTime } from '@/engine/scene3d/cameraCuts'
+import { cameraLensAtTime } from '@/engine/scene3d/cameraLens'
 import { AuroraSceneRenderPipeline } from '@/engine/rendering/AuroraSceneRenderPipeline'
 import MSelect, { type MSelectOption } from './common/MSelect.vue'
 
@@ -67,7 +68,8 @@ function renderPreviewNow() {
     runtime.root.visible = selectedLayer.value?.visible !== false
     const camera = runtime.cameras.get(cameraDefinition.id)
     if (!camera) return
-    scenePipeline?.render(runtime.scene, camera, sceneDefinition.settings, width, height, 'screen')
+    const lens = cameraLensAtTime(cameraDefinition, currentTime.value)
+    scenePipeline?.render(runtime.scene, camera, sceneDefinition.settings, width, height, 'screen', lens)
     renderError.value = false
   } catch {
     renderError.value = true

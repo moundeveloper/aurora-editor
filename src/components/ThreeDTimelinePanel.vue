@@ -100,6 +100,11 @@ const channels = computed<ChannelRow[]>(() => {
     })))
   } else if (selected.kind === 'camera') {
     rows.push({ id: selected.value.fov.id, group: 'camera', label: 'Field of view', suffix: '°', color: '#8ca9e8', property: selected.value.fov, groupStart: true })
+    const lens = selected.value
+    if (lens.depthOfField && lens.focusDistance && lens.fStop) {
+      rows.push({ id: lens.focusDistance.id, group: 'lens', label: 'Focus distance', suffix: '', color: '#c2a0e8', property: lens.focusDistance, groupStart: true })
+      rows.push({ id: lens.fStop.id, group: 'lens', label: 'Aperture f/', suffix: '', color: '#c2a0e8', property: lens.fStop, groupStart: false })
+    }
     const constraint = selected.value.pathConstraint
     if (constraint) {
       rows.push({ id: constraint.progress.id, group: 'path', label: 'Path progress', suffix: '', color: '#7ee0c0', property: constraint.progress, groupStart: true })

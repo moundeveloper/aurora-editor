@@ -1,6 +1,6 @@
 import type {
   AnimatableProperty, AnimatableVector3, Aurora3DObject, Aurora3DPath, Aurora3DScene, AuroraCamera,
-  AuroraCameraObjectConstraint, AuroraCameraPathConstraint, AuroraLight, AuroraPBRMaterial, Transform3D,
+  Aurora3DPrimitive, AuroraCameraObjectConstraint, AuroraCameraPathConstraint, AuroraLight, AuroraPBRMaterial, Transform3D,
 } from '@/models/editor'
 
 export function numericProperty(id: string, value: number): AnimatableProperty<number> {
@@ -247,9 +247,9 @@ export function createCameraObjectConstraint(cameraId: string, objectId: string)
   }
 }
 
-export function createPrimitiveObject(primitive: 'box' | 'sphere' | 'plane', index: number): Aurora3DObject {
+export function createPrimitiveObject(primitive: Aurora3DPrimitive, index: number): Aurora3DObject {
   const id = crypto.randomUUID()
-  const label = primitive === 'box' ? 'Cube' : primitive === 'sphere' ? 'Sphere' : 'Plane'
+  const label = primitive === 'box' ? 'Cube' : primitive === 'sphere' ? 'Sphere' : primitive === 'model' ? 'Model' : 'Plane'
   return {
     id,
     name: `${label} ${index}`,

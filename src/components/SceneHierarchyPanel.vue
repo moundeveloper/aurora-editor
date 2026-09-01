@@ -10,7 +10,7 @@ import MSelect, { type MSelectOption } from './common/MSelect.vue'
 import MDialog from './common/MDialog.vue'
 
 const store = useEditorStore()
-const { layers, selectedLayerId, selectedScene, selectedSceneEntityId, currentTime } = storeToRefs(store)
+const { layers, selectedLayerId, selectedScene, selectedSceneEntityId, currentTime, assets } = storeToRefs(store)
 /** The menu drops from whichever control opened it, so it is never detached from its trigger. */
 const addMenu = ref<'header' | 'footer' | null>(null)
 const contextMenu = ref<{ kind: 'layer' | 'entity'; id: string; x: number; y: number } | null>(null)
@@ -19,6 +19,7 @@ const renameValue = ref('')
 const sections = ref({ cameras: true, objects: true, lights: true, paths: true })
 const pickedObjectIds = ref<Set<string>>(new Set())
 const collapsedGroupIds = ref<Set<string>>(new Set())
+const modelAssetCount = computed(() => assets.value.filter((asset) => asset.kind === 'model3d').length)
 const scenePaths = computed(() => selectedScene.value?.paths ?? [])
 const entityCount = computed(() => (selectedScene.value?.objects.length ?? 0) + (selectedScene.value?.cameras.length ?? 0) + (selectedScene.value?.lights.length ?? 0) + scenePaths.value.length)
 const programCameraId = computed(() => selectedScene.value ? cameraIdAtTime(selectedScene.value, currentTime.value) : null)
@@ -294,6 +295,7 @@ function confirmDialog() {
       <button type="button" @click="store.add3DPrimitive('box'); addMenu = null"><Box :size="12" /> Cube</button>
       <button type="button" @click="store.add3DPrimitive('sphere'); addMenu = null"><Circle :size="12" /> Sphere</button>
       <button type="button" @click="store.add3DImagePlane(); addMenu = null"><ImageIcon :size="12" /> Image plane</button>
+      <button type="button" :disabled="!modelAssetCount" :title="modelAssetCount ? 'Place an imported glTF mesh' : 'Import a .glb or .gltf file in the Media library first'" @click="store.add3DModel(); addMenu = null"><Box :size="12" /> Imported mesh <small v-if="modelAssetCount">{{ modelAssetCount }}</small></button>
       <button type="button" @click="addEmptyGroup"><Layers3 :size="12" /> Empty group</button>
       <button type="button" :disabled="Boolean(groupBlockedReason)" :title="groupBlockedReason || `Parent ${groupableCount} selected objects to a new group`" @click="groupPickedObjects"><Layers3 :size="12" /> Group selected <small v-if="groupableCount">{{ groupableCount }}</small></button>
       <button type="button" @click="store.add3DCamera(); addMenu = null"><Camera :size="12" /> Camera</button>

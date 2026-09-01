@@ -128,6 +128,12 @@ export interface AuroraCamera {
   projection: 'perspective' | 'orthographic'
   transform: Transform3D
   fov: AnimatableProperty<number>
+  /** Renders a lens blur outside the focus plane. Off keeps every depth pin-sharp. */
+  depthOfField?: boolean
+  /** Distance to the sharp plane, in scene units. */
+  focusDistance?: AnimatableProperty<number>
+  /** Lens f-number. Lower opens the aperture, shrinking the sharp range and growing the bokeh. */
+  fStop?: AnimatableProperty<number>
   near: number
   far: number
   pathConstraint?: AuroraCameraPathConstraint
@@ -224,6 +230,8 @@ export interface Aurora3DScene {
   paths: Aurora3DPath[]
   activeCameraId: string | null
   environmentAssetId?: string
+  /** Draws the environment map behind the scene instead of the flat background colour. */
+  environmentBackground?: boolean
   environmentIntensity: number
   settings: Scene3DSettings
   revision: number

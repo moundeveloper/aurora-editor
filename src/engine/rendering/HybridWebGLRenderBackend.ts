@@ -11,6 +11,7 @@ import type { AuroraRig, EditorLayer, MediaAsset } from '@/models/editor'
 import { deformRig } from '@/engine/rig/rigMesh'
 import { bonePoseMatrices, rigIsActive } from '@/engine/rig/skeleton'
 import { cameraIdAtTime } from '@/engine/scene3d/cameraCuts'
+import { cameraLensAtTime } from '@/engine/scene3d/cameraLens'
 import { createMaskGeometry, maskAlphaField, maskGeometryKey, type MaskGeometryField } from '@/engine/rendering/maskField'
 import { MediaTextureCache } from '@/engine/rendering/mediaTextures'
 import { AuroraSceneRenderPipeline } from '@/engine/rendering/AuroraSceneRenderPipeline'
@@ -643,11 +644,15 @@ export class HybridWebGLRenderBackend implements RenderBackend {
       : null
     const renderSettings = { ...sceneDefinition.settings, quality }
     const ambientOcclusion = renderSettings.ambientOcclusion && quality !== 'draft'
-    if (maskRaster || ambientOcclusion) {
+    const cameraDefinition = sceneDefinition.cameras.find((item) => item.id === cameraId)
+    // Depth of field is a post pass, so a lens forces the composited route even with no mask and no
+    // ambient occlusion: the direct render below has nowhere to apply one.
+    const lens = quality === 'draft' || !cameraDefinition ? null : cameraLensAtTime(cameraDefinition, time)
+    if (maskRaster || ambientOcclusion || lens) {
       let sceneTexture: THREE.Texture | null = null
       this.threeRenderer.resetState()
-      if (ambientOcclusion && this.scenePipeline) {
-        sceneTexture = this.scenePipeline.render(runtime.scene, camera, renderSettings, width, height, 'texture')
+      if ((ambientOcclusion || lens) && this.scenePipeline) {
+        sceneTexture = this.scenePipeline.render(runtime.scene, camera, renderSettings, width, height, 'texture', lens)
       } else {
         this.threeLayerTarget ??= new THREE.WebGLRenderTarget(width, height, { depthBuffer: true, stencilBuffer: false })
         if (this.threeLayerTarget.width !== width || this.threeLayerTarget.height !== height) this.threeLayerTarget.setSize(width, height)

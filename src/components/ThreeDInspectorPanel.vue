@@ -28,6 +28,14 @@ const imageAssetOptions = computed<MSelectOption[]>(() => [
     .filter((asset) => asset.kind === 'image' || asset.kind === 'texture')
     .map((asset) => ({ value: asset.id, label: asset.name })),
 ])
+const environmentOptions = computed<MSelectOption[]>(() => [
+  { value: '', label: 'No environment' },
+  ...assets.value.filter((asset) => asset.kind === 'hdr').map((asset) => ({ value: asset.id, label: asset.name })),
+])
+const modelAssetOptions = computed<MSelectOption[]>(() => [
+  { value: '', label: 'No model' },
+  ...assets.value.filter((asset) => asset.kind === 'model3d').map((asset) => ({ value: asset.id, label: asset.name })),
+])
 const pathOptions = computed<MSelectOption[]>(() => [
   { value: '', label: 'None' },
   ...scenePaths.value.map((path) => ({ value: path.id, label: path.name })),
@@ -36,9 +44,11 @@ const objectFollowOptions = computed<MSelectOption[]>(() => [
   { value: '', label: 'None' },
   ...(selectedScene.value?.objects ?? []).map((object) => ({ value: object.id, label: object.name })),
 ])
-const availableInfluenceTypes = computed(() => selectedSceneEntity.value?.kind === 'object' && selectedSceneEntity.value.value.type === 'group'
-  ? INFLUENCE_TYPES.filter((type) => type === 'array')
-  : INFLUENCE_TYPES)
+const availableInfluenceTypes = computed(() => {
+  const object = selectedSceneEntity.value?.kind === 'object' ? selectedSceneEntity.value.value : null
+  if (object?.primitive === 'model') return []
+  return object?.type === 'group' ? INFLUENCE_TYPES.filter((type) => type === 'array') : INFLUENCE_TYPES
+})
 const lookAtCandidates = computed(() => {
   const scene = selectedScene.value
   if (!scene) return []
@@ -101,6 +111,15 @@ function pointModeLabel(mode: AuroraPathPointMode) {
         </div>
       </section>
 
+      <section v-if="selectedSceneEntity.kind === 'object' && selectedSceneEntity.value.primitive === 'model'" class="property-section">
+        <div class="section-header static"><Box :size="12" /><span>Imported mesh</span><small>glTF</small></div>
+        <div class="property-list">
+          <label><span>Model</span><MSelect :model-value="selectedSceneEntity.value.assetId ?? ''" :options="modelAssetOptions" label="Imported mesh file" @update:model-value="store.set3DObjectModel($event || null)" /></label>
+          <p v-if="modelAssetOptions.length === 1" class="section-note">Import a .glb or .gltf file in the Media library, then select it here.</p>
+          <p v-else class="section-note">The file keeps its own materials and node hierarchy, so the PBR sliders and the influence stack do not apply to it. The transform and shadow casting do.</p>
+        </div>
+      </section>
+
       <section v-if="selectedSceneEntity.kind === 'object' && selectedSceneEntity.value.type === 'mesh' && selectedSceneEntity.value.primitive === 'plane'" class="property-section">
         <button class="section-header" type="button" @click="toggle('image')"><ChevronDown :size="12" :class="{ closed: collapsed.image }" /><span>Surface image</span><small>Alpha enabled</small></button>
         <div v-if="!collapsed.image" class="property-list">
@@ -110,7 +129,7 @@ function pointModeLabel(mode: AuroraPathPointMode) {
         </div>
       </section>
 
-      <section v-if="selectedSceneEntity.kind === 'object' && selectedSceneEntity.value.type === 'mesh'" class="property-section">
+      <section v-if="selectedSceneEntity.kind === 'object' && selectedSceneEntity.value.type === 'mesh' && selectedSceneEntity.value.primitive !== 'model'" class="property-section">
         <button class="section-header" type="button" @click="toggle('material')"><ChevronDown :size="12" :class="{ closed: collapsed.material }" /><span>PBR Material</span><small>Standard</small></button>
         <div v-if="!collapsed.material" class="property-list">
           <label><span>Base color</span><input class="color-field" :value="selectedSceneEntity.value.material.baseColor" type="color" @input="selectedSceneEntity.value.material.baseColor = ($event.target as HTMLInputElement).value; store.markSceneChanged()" /></label>
@@ -201,6 +220,20 @@ function pointModeLabel(mode: AuroraPathPointMode) {
           </label>
           <label><span>Near</span><NumberField v-model="selectedSceneEntity.value.near" :min=".001" :step=".1" label="near plane" @update:model-value="store.markSceneChanged()" /></label>
           <label><span>Far</span><NumberField v-model="selectedSceneEntity.value.far" :min="1" :step="10" label="far plane" @update:model-value="store.markSceneChanged()" /></label>
+          <label class="check-row"><span>Depth of field</span><button type="button" :class="{ checked: selectedSceneEntity.value.depthOfField }" :disabled="selectedSceneEntity.value.projection !== 'perspective'" :title="selectedSceneEntity.value.projection === 'perspective' ? 'Blur everything outside the focus plane' : 'An orthographic camera has no lens to defocus'" @click="store.set3DCameraDepthOfField(!selectedSceneEntity.value.depthOfField)"><CircleDot :size="10" /></button></label>
+          <template v-if="selectedSceneEntity.value.depthOfField && selectedSceneEntity.value.focusDistance && selectedSceneEntity.value.fStop">
+            <label class="keyable">
+              <span>Focus distance</span>
+              <NumberField :model-value="propertyValue(selectedSceneEntity.value.focusDistance)" :min=".01" :max="1000" :step=".25" label="focus distance" @update:model-value="store.set3DCameraLens('focusDistance', $event)" />
+              <KeyframeControl :property="selectedSceneEntity.value.focusDistance" label="focus distance" />
+            </label>
+            <label class="keyable">
+              <span>Aperture f/</span>
+              <NumberField :model-value="propertyValue(selectedSceneEntity.value.fStop)" :min="1" :max="22" :step=".1" label="aperture f-number" @update:model-value="store.set3DCameraLens('fStop', $event)" />
+              <KeyframeControl :property="selectedSceneEntity.value.fStop" label="aperture" />
+            </label>
+            <p class="section-note">Lower f-numbers shrink the sharp range and grow the bokeh. The viewport working view stays sharp; focus shows in the camera preview and the render.</p>
+          </template>
           <button class="active-camera" type="button" :disabled="programCameraId === selectedSceneEntity.value.id" @click="store.add3DCameraCut(selectedSceneEntity.value.id)">{{ programCameraId === selectedSceneEntity.value.id ? 'Live program camera' : 'Cut to camera at playhead' }}</button>
         </div>
       </section>
@@ -315,6 +348,9 @@ function pointModeLabel(mode: AuroraPathPointMode) {
           <label><span>AO intensity</span><NumberField :model-value="selectedScene.settings.ambientOcclusionIntensity" :min="0" :max="3" :step=".05" label="ambient occlusion intensity" @update:model-value="selectedScene.settings.ambientOcclusionIntensity = $event; store.markSceneChanged()" /></label>
           <label><span>AO radius</span><NumberField :model-value="selectedScene.settings.ambientOcclusionRadius" :min=".01" :max="5" :step=".05" label="ambient occlusion radius" @update:model-value="selectedScene.settings.ambientOcclusionRadius = $event; store.markSceneChanged()" /></label>
           <label><span>Environment light</span><NumberField :model-value="selectedScene.environmentIntensity" :min="0" :max="4" :step=".05" label="environment light intensity" @update:model-value="selectedScene.environmentIntensity = $event; store.markSceneChanged()" /></label>
+          <label><span>Environment map</span><MSelect :model-value="selectedScene.environmentAssetId ?? ''" :options="environmentOptions" label="Environment radiance map" @update:model-value="store.set3DEnvironmentMap($event || null)" /></label>
+          <label v-if="selectedScene.environmentAssetId" class="check-row"><span>Map as background</span><button type="button" :class="{ checked: selectedScene.environmentBackground }" @click="store.set3DEnvironmentBackground(!selectedScene.environmentBackground)"><CircleDot :size="10" /></button></label>
+          <p v-if="!environmentOptions.length || environmentOptions.length === 1" class="section-note">Import an .hdr or .exr file to light the scene from a radiance map.</p>
         </div>
         <div class="metadata"><span>Color space</span><strong>sRGB + ACES</strong><span>AO</span><strong>Ground-truth approximation</strong><span>Scene revision</span><strong>{{ selectedScene?.revision }}</strong></div>
       </section>

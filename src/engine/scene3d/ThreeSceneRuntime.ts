@@ -52,6 +52,29 @@ function imageAssetFor(object: Aurora3DObject, assets: Map<string, MediaAsset>) 
   return asset?.kind === 'image' || asset?.kind === 'texture' ? asset : undefined
 }
 
+/** The mesh file a model object points at, if it is still present in the library. */
+export function modelAssetFor(object: Aurora3DObject, assets: Map<string, MediaAsset>) {
+  const asset = object.primitive === 'model' && object.assetId ? assets.get(object.assetId) : undefined
+  return asset?.kind === 'model3d' && asset.hash ? asset : undefined
+}
+
+/** The environment map an authored scene points at, if it is still present in the library. */
+export function environmentAssetFor(scene: Aurora3DScene, assets: Map<string, MediaAsset>) {
+  const asset = scene.environmentAssetId ? assets.get(scene.environmentAssetId) : undefined
+  return asset?.kind === 'hdr' && asset.hash ? asset : undefined
+}
+
+/**
+ * Which decoder a radiance file needs. Both formats carry values above 1, which is the whole point
+ * of lighting from one, and each needs its own loader — the shared TextureLoader reads neither.
+ */
+export function environmentDecoderFor(fileName: string): 'rgbe' | 'exr' | null {
+  const extension = fileName.slice(fileName.lastIndexOf('.') + 1).toLowerCase()
+  if (extension === 'hdr') return 'rgbe'
+  if (extension === 'exr') return 'exr'
+  return null
+}
+
 function imageUrl(asset: MediaAsset | undefined) {
   return asset?.hash ? mediaUrl(asset.hash) : asset?.thumbnail
 }
@@ -80,6 +103,9 @@ function makeGeometry(object: Aurora3DObject, assets: Map<string, MediaAsset>): 
 }
 
 function makeObject(definition: Aurora3DObject, assets: Map<string, MediaAsset>): THREE.Object3D {
+  // A model is a host for an imported subtree. It builds no geometry of its own, which keeps the
+  // file's own materials and node hierarchy intact instead of flattening them into one mesh.
+  if (definition.primitive === 'model') return new THREE.Group()
   if (definition.type !== 'mesh') return new THREE.Group()
   const material = new THREE.MeshStandardMaterial({
     color: definition.material.baseColor,
@@ -378,6 +404,10 @@ export class ThreeSceneRuntimeRegistry {
   private runtimes = new Map<string, Scene3DRuntime>()
   private texturePromises = new Map<string, Promise<THREE.Texture | null>>()
   private textures = new Map<string, THREE.Texture>()
+  private environmentPromises = new Map<string, Promise<THREE.Texture | null>>()
+  private environments = new Map<string, THREE.Texture>()
+  private modelPromises = new Map<string, Promise<THREE.Object3D | null>>()
+  private models = new Map<string, THREE.Object3D>()
   private disposed = false
 
   constructor(private readonly onInvalidate?: () => void) {}
@@ -424,6 +454,116 @@ export class ThreeSceneRuntimeRegistry {
     }).catch(() => null)
     this.texturePromises.set(url, loading)
     return loading
+  }
+
+  /**
+   * Loads a radiance map once per URL. The decoders are imported on demand so a project that never
+   * lights from an environment never pays for them.
+   */
+  private ensureEnvironment(url: string, decoder: 'rgbe' | 'exr') {
+    const existing = this.environmentPromises.get(url)
+    if (existing) return existing
+    const loading = (async () => {
+      const Loader = decoder === 'exr'
+        ? (await import('three/addons/loaders/EXRLoader.js')).EXRLoader
+        : (await import('three/addons/loaders/HDRLoader.js')).HDRLoader
+      const texture = await new Loader().loadAsync(url)
+      if (this.disposed) {
+        texture.dispose()
+        return null
+      }
+      // Three builds the filtered probe from an equirectangular map itself, so no PMREM pass, and
+      // therefore no renderer, is needed here.
+      texture.mapping = THREE.EquirectangularReflectionMapping
+      texture.needsUpdate = true
+      this.environments.set(url, texture)
+      return texture
+    })().catch(() => null)
+    this.environmentPromises.set(url, loading)
+    return loading
+  }
+
+  /**
+   * Loads a glTF once per URL and hands out clones. Geometry and materials stay shared between
+   * instances, so twenty copies of a prop cost one parse; SkeletonUtils does the cloning because a
+   * plain Object3D.clone detaches a skinned mesh from its skeleton.
+   */
+  private ensureModel(url: string) {
+    const existing = this.modelPromises.get(url)
+    if (existing) return existing
+    const loading = (async () => {
+      const { GLTFLoader } = await import('three/addons/loaders/GLTFLoader.js')
+      const gltf = await new GLTFLoader().loadAsync(url)
+      if (this.disposed) return null
+      this.models.set(url, gltf.scene)
+      return gltf.scene
+    })().catch(() => null)
+    this.modelPromises.set(url, loading)
+    return loading
+  }
+
+  private async instantiateModel(url: string) {
+    const source = this.models.get(url) ?? await this.ensureModel(url)
+    if (!source) return null
+    const { clone } = await import('three/addons/utils/SkeletonUtils.js')
+    const instance = clone(source)
+    // Shared geometry and materials must survive a runtime teardown, so every cloned node is marked
+    // for the disposer to step over.
+    instance.traverse((node) => { node.userData.auroraModelClone = true })
+    return instance
+  }
+
+  /** Keeps a model host pointed at its authored file, and applies the object's own render flags. */
+  private syncModel(host: THREE.Object3D, definition: Aurora3DObject, assets: Map<string, MediaAsset>, environmentIntensity: number) {
+    const asset = modelAssetFor(definition, assets)
+    const url = asset?.hash ? mediaUrl(asset.hash) : undefined
+    if (host.userData.auroraModelUrl !== url) {
+      host.userData.auroraModelUrl = url
+      host.children.filter((child) => child.userData.auroraModelClone).forEach((child) => child.removeFromParent())
+      if (url) {
+        void this.instantiateModel(url).then((instance) => {
+          if (!instance || host.userData.auroraModelUrl !== url) return
+          host.add(instance)
+          this.onInvalidate?.()
+        })
+      }
+    }
+    host.traverse((node) => {
+      if (!(node instanceof THREE.Mesh)) return
+      node.castShadow = definition.castShadow
+      node.receiveShadow = definition.receiveShadow
+      const materials = Array.isArray(node.material) ? node.material : [node.material]
+      materials.forEach((material) => {
+        if (material instanceof THREE.MeshStandardMaterial) material.envMapIntensity = environmentIntensity
+      })
+    })
+  }
+
+  /** Applies the authored environment map, falling back to the flat background colour without one. */
+  private syncEnvironment(runtime: Scene3DRuntime, definition: Aurora3DScene, assets: Map<string, MediaAsset>) {
+    const scene = runtime.scene
+    const color = definition.settings.backgroundColor ? new THREE.Color(definition.settings.backgroundColor) : null
+    const asset = environmentAssetFor(definition, assets)
+    const decoder = asset ? environmentDecoderFor(asset.name) : null
+    const url = asset?.hash && decoder ? mediaUrl(asset.hash) : undefined
+    scene.environmentIntensity = definition.environmentIntensity
+    scene.backgroundIntensity = definition.environmentIntensity
+    if (!url || !decoder) {
+      scene.environment = null
+      scene.background = color
+      delete scene.userData.auroraEnvironmentUrl
+      return
+    }
+    const ready = this.environments.get(url) ?? null
+    scene.environment = ready
+    scene.background = definition.environmentBackground && ready ? ready : color
+    if (scene.userData.auroraEnvironmentUrl === url) return
+    scene.userData.auroraEnvironmentUrl = url
+    if (ready) return
+    void this.ensureEnvironment(url, decoder).then((texture) => {
+      if (!texture || scene.userData.auroraEnvironmentUrl !== url) return
+      this.onInvalidate?.()
+    })
   }
 
   private syncImageMap(material: THREE.MeshStandardMaterial, definition: Aurora3DObject, assets: Map<string, MediaAsset>) {
@@ -511,12 +651,13 @@ export class ThreeSceneRuntimeRegistry {
 
   private update(runtime: Scene3DRuntime, definition: Aurora3DScene, aspect: number, time: number, assets: Map<string, MediaAsset>, rigs: Map<string, AuroraRig> = new Map()) {
     runtime.revision = definition.revision
-    runtime.scene.background = definition.settings.backgroundColor ? new THREE.Color(definition.settings.backgroundColor) : null
+    this.syncEnvironment(runtime, definition, assets)
     definition.objects.forEach((item) => {
       const object = runtime.objects.get(item.id)
       if (!object) return
       object.visible = item.visible
       applyTransform(object, item.transform, time)
+      if (item.primitive === 'model') this.syncModel(object, item, assets, definition.environmentIntensity)
       if (object instanceof THREE.Mesh) syncGeometry(object, item, item.rigId ? rigs.get(item.rigId) : undefined, assets, time)
       if (object instanceof THREE.Mesh) {
         object.castShadow = item.castShadow
@@ -596,6 +737,17 @@ export class ThreeSceneRuntimeRegistry {
     this.textures.forEach((texture) => texture.dispose())
     this.textures.clear()
     this.texturePromises.clear()
+    this.environments.forEach((texture) => texture.dispose())
+    this.environments.clear()
+    this.environmentPromises.clear()
+    this.models.forEach((model) => model.traverse((node) => {
+      if (!(node instanceof THREE.Mesh)) return
+      node.geometry.dispose()
+      const materials = Array.isArray(node.material) ? node.material : [node.material]
+      materials.forEach((material) => material.dispose())
+    }))
+    this.models.clear()
+    this.modelPromises.clear()
   }
 
   private disposeRuntime(runtime: Scene3DRuntime) {
@@ -607,6 +759,7 @@ export class ThreeSceneRuntimeRegistry {
       }
       if (!(object instanceof THREE.Mesh)) return
       if (object.userData.auroraGroupArrayClone) return
+      if (object.userData.auroraModelClone) return
       const base = object.userData.baseGeometry as THREE.BufferGeometry | undefined
       if (base && base !== object.geometry) base.dispose()
       object.geometry.dispose()

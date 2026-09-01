@@ -82,6 +82,8 @@ function normalizeScene(scene: Aurora3DScene): Aurora3DScene {
   scene.settings.ambientOcclusionIntensity = Math.max(0, Math.min(3, finiteOr(scene.settings.ambientOcclusionIntensity, 1)))
   scene.settings.ambientOcclusionRadius = Math.max(.01, Math.min(5, finiteOr(scene.settings.ambientOcclusionRadius, .35)))
   scene.environmentIntensity = Math.max(0, finiteOr(scene.environmentIntensity, 1))
+  if (typeof scene.environmentAssetId !== 'string' || !scene.environmentAssetId) delete scene.environmentAssetId
+  scene.environmentBackground = scene.environmentBackground === true
   scene.cameraCuts = normalizeCameraCuts(scene, scene.cameraCuts)
   if (!scene.cameras.some((camera) => camera.id === scene.activeCameraId)) scene.activeCameraId = scene.cameraCuts[0]?.cameraId ?? scene.cameras[0]?.id ?? null
   if (!Array.isArray(scene.paths)) scene.paths = []
@@ -119,6 +121,10 @@ function normalizeScene(scene: Aurora3DScene): Aurora3DScene {
   scene.paths = scene.paths.filter((path) => path.points.length >= 2)
   scene.cameras.forEach((camera) => {
     camera.visible = camera.visible !== false
+    // Lens defaults are backfilled before the constraint branches below, which return early.
+    camera.depthOfField = camera.depthOfField === true
+    camera.focusDistance ??= numericProperty(`${camera.id}-focus-distance`, 8)
+    camera.fStop ??= numericProperty(`${camera.id}-f-stop`, 2.8)
     const constraint = camera.pathConstraint
     if (constraint) {
       if (!scene.paths.some((path) => path.id === constraint.pathId)) delete camera.pathConstraint
