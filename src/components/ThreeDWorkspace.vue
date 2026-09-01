@@ -14,11 +14,14 @@ import { pathTransformComponents, sampleLocalPath } from '@/engine/scene3d/pathE
 import { movePathHandle, movePathPoint, type PathHandleKey, type PathVector } from '@/engine/scene3d/pathEditing'
 import { AuroraSceneRenderPipeline } from '@/engine/rendering/AuroraSceneRenderPipeline'
 import { AuroraSolidViewport } from '@/engine/rendering/AuroraSolidViewport'
+import {
+  applyGestureKey, beginGesture, gestureDelta, gestureLabel, type GestureBasis, type GestureMode, type GestureState,
+} from '@/engine/scene3d/transformGesture'
 import type { Aurora3DObject, Aurora3DPath, Aurora3DPathPoint, Aurora3DScene, AuroraRig } from '@/models/editor'
 import IconButton from './common/IconButton.vue'
 
 const store = useEditorStore()
-const { selectedLayer, selectedScene, selectedSceneEntityId, currentTime, playing, assets, rigs } = storeToRefs(store)
+const { selectedLayer, selectedScene, selectedSceneEntity, selectedSceneEntityId, currentTime, playing, assets, rigs } = storeToRefs(store)
 const viewport = ref<HTMLElement>()
 const canvas = ref<HTMLCanvasElement>()
 const transformMode = ref<TransformControlsMode>('translate')
@@ -48,6 +51,17 @@ let editorCamera: THREE.Camera | null = null
 let orbit: OrbitControls | null = null
 /** Orientation the active axis preset landed on, compared against to notice a user orbit. */
 let axisViewOrientation: THREE.Quaternion | null = null
+
+/** A modal transform in progress: the pointer drives it until it is confirmed or cancelled. */
+const gesture = ref<GestureState | null>(null)
+interface GestureAnchor {
+  entityId: string
+  pointer: { x: number; y: number }
+  position: [number, number, number]
+  rotation: [number, number, number]
+  scale: [number, number, number]
+}
+let gestureAnchor: GestureAnchor | null = null
 let transform: TransformControls | null = null
 let runtime: Scene3DRuntime | null = null
 let resizeObserver: ResizeObserver | null = null
@@ -101,7 +115,7 @@ const viewportHelp = computed(() => {
   const light = selectedScene.value?.lights.find((item) => item.id === selectedSceneEntityId.value)
   if (light?.type === 'spot') return 'Drag the gold cone rim to widen or narrow the cone · G/R: move or aim the light'
   if (selectedCamera.value) return 'Ctrl+Alt+C snaps this camera to the current view · Orbit: left-drag · Zoom: wheel'
-  return 'Orbit: left-drag · Pan: middle-drag · Zoom: wheel · G/R/S: transform'
+  return 'G/R/S: move, rotate, scale · then X/Y/Z to constrain, or type a number · . frames the selection'
 })
 
 function makeCameraOutline(id: string) {
@@ -735,7 +749,128 @@ function syncAxisViewLabel() {
   if (editorCamera.quaternion.angleTo(axisViewOrientation) > .02) cameraView.value = 'User'
 }
 
+/**
+ * How the pointer maps into the scene for the active view.
+ *
+ * A perspective camera covers more world per pixel the further the subject is, so the scale is
+ * taken at the orbit target. An orthographic view has one scale everywhere.
+ */
+function currentGestureBasis(): GestureBasis {
+  const host = viewport.value
+  const height = Math.max(1, host?.clientHeight ?? 1)
+  if (!editorCamera || !orbit) return { right: [1, 0, 0], up: [0, 1, 0], unitsPerPixel: .01 }
+  editorCamera.updateMatrixWorld(true)
+  const matrix = editorCamera.matrixWorld
+  const right = new THREE.Vector3().setFromMatrixColumn(matrix, 0).normalize()
+  const up = new THREE.Vector3().setFromMatrixColumn(matrix, 1).normalize()
+  let unitsPerPixel = .01
+  if (editorCamera instanceof THREE.PerspectiveCamera) {
+    const distance = Math.max(.1, editorCamera.position.distanceTo(orbit.target))
+    unitsPerPixel = (2 * distance * Math.tan(THREE.MathUtils.degToRad(editorCamera.fov) / 2)) / height
+  } else if (editorCamera instanceof THREE.OrthographicCamera) {
+    unitsPerPixel = (editorCamera.top - editorCamera.bottom) / (height * editorCamera.zoom)
+  }
+  return { right: right.toArray(), up: up.toArray(), unitsPerPixel }
+}
+
+const gestureStatus = computed(() => gesture.value ? gestureLabel(gesture.value, currentGestureBasis()) : '')
+
+/** Starts a modal transform on the selected entity, anchored to its current values. */
+function startGesture(mode: GestureMode, event?: PointerEvent) {
+  const entity = selectedSceneEntity.value
+  if (!entity || activePathPoint.value) return false
+  const transformOf = entity.value.transform
+  const read = (section: 'position' | 'rotation' | 'scale') => (['x', 'y', 'z'] as const)
+    .map((axis) => evaluateNumericProperty(transformOf[section][axis], currentTime.value)) as [number, number, number]
+  gestureAnchor = {
+    entityId: entity.value.id,
+    pointer: { x: event?.clientX ?? 0, y: event?.clientY ?? 0 },
+    position: read('position'),
+    rotation: read('rotation'),
+    scale: read('scale'),
+  }
+  gesture.value = beginGesture(mode)
+  if (orbit) orbit.enabled = false
+  if (transform) transform.enabled = false
+  renderViewport()
+  return true
+}
+
+function applyGesture() {
+  const state = gesture.value
+  const anchor = gestureAnchor
+  if (!state || !anchor) return
+  const delta = gestureDelta(state, currentGestureBasis())
+  store.update3DEntityTransform(anchor.entityId, {
+    position: anchor.position.map((value, index) => value + delta.translate[index]!) as [number, number, number],
+    rotation: anchor.rotation.map((value, index) => value + delta.rotate[index]!) as [number, number, number],
+    scale: anchor.scale.map((value, index) => value * delta.scale[index]!) as [number, number, number],
+  })
+  renderViewport()
+}
+
+function endGesture(outcome: 'confirm' | 'cancel') {
+  const anchor = gestureAnchor
+  if (outcome === 'cancel' && anchor) {
+    store.update3DEntityTransform(anchor.entityId, {
+      position: anchor.position, rotation: anchor.rotation, scale: anchor.scale,
+    })
+  }
+  gesture.value = null
+  gestureAnchor = null
+  if (orbit) orbit.enabled = true
+  if (transform) transform.enabled = true
+  attachSelection()
+  renderViewport()
+}
+
+function onGesturePointerMove(event: PointerEvent) {
+  const state = gesture.value
+  if (!state || !gestureAnchor) return
+  gesture.value = {
+    ...state,
+    screen: { x: event.clientX - gestureAnchor.pointer.x, y: event.clientY - gestureAnchor.pointer.y },
+  }
+  applyGesture()
+}
+
+/** Frames the selection, so a lost or off-screen entity is one key away. */
+function frameSelected() {
+  const entity = selectedSceneEntity.value
+  if (!entity || !runtime || !editorCamera || !orbit) return
+  const target = runtime.objects.get(entity.value.id)
+    ?? runtime.cameras.get(entity.value.id)
+    ?? runtime.lights.get(entity.value.id)
+  if (!target) return
+  target.updateMatrixWorld(true)
+  const bounds = new THREE.Box3().setFromObject(target)
+  const center = bounds.isEmpty() ? target.getWorldPosition(new THREE.Vector3()) : bounds.getCenter(new THREE.Vector3())
+  const radius = bounds.isEmpty() ? 1 : Math.max(.5, bounds.getBoundingSphere(new THREE.Sphere()).radius)
+  const direction = editorCamera.position.clone().sub(orbit.target)
+  const distance = editorCamera instanceof THREE.PerspectiveCamera
+    ? radius / Math.max(.05, Math.sin(THREE.MathUtils.degToRad(editorCamera.fov) / 2)) * 1.2
+    : Math.max(1, direction.length())
+  orbit.target.copy(center)
+  editorCamera.position.copy(center).add(direction.normalize().multiplyScalar(distance))
+  editorCamera.lookAt(center)
+  orbit.update()
+  renderViewport()
+}
+
+/** Blender's toggle: a gizmo aligned to the world, or to the entity's own axes. */
+const gizmoSpace = ref<'world' | 'local'>('world')
+function toggleGizmoSpace() {
+  gizmoSpace.value = gizmoSpace.value === 'world' ? 'local' : 'world'
+  transform?.setSpace(gizmoSpace.value)
+  renderViewport()
+}
+
 function rememberPickStart(event: PointerEvent) {
+  if (gesture.value) {
+    endGesture(event.button === 0 ? 'confirm' : 'cancel')
+    skipNextPick = true
+    return
+  }
   if (event.button !== 0) {
     pickStart = null
     finishTransformInteraction()
@@ -1052,15 +1187,41 @@ function onWindowBlur() {
 
 function onKeydown(event: KeyboardEvent) {
   if ((event.target as HTMLElement)?.matches('input, textarea')) return
+  // A running gesture owns the keyboard: axis letters and digits belong to it, not to the shortcuts.
+  if (gesture.value) {
+    const result = applyGestureKey(gesture.value, event.key, event.shiftKey)
+    if (result.outcome) {
+      event.preventDefault()
+      endGesture(result.outcome)
+      return
+    }
+    if (result.handled) {
+      event.preventDefault()
+      gesture.value = { ...result.state, snap: event.ctrlKey }
+      applyGesture()
+      return
+    }
+    return
+  }
   if (event.ctrlKey && event.altKey && event.key.toLowerCase() === 'c') {
     event.preventDefault()
     alignCameraToView()
     return
   }
   if (event.ctrlKey || event.metaKey || event.altKey) return
-  if (event.key.toLowerCase() === 'g') setTransformMode('translate')
-  if (event.key.toLowerCase() === 'r') setTransformMode('rotate')
-  if (event.key.toLowerCase() === 's') setTransformMode('scale')
+  const modes: Record<string, GestureMode> = { g: 'translate', r: 'rotate', s: 'scale' }
+  const mode = modes[event.key.toLowerCase()]
+  if (mode) {
+    setTransformMode(mode)
+    // The gizmo stays available; the gesture is the keyboard-driven path onto the same transform.
+    if (startGesture(mode)) event.preventDefault()
+    return
+  }
+  if (event.key === '.') {
+    event.preventDefault()
+    frameSelected()
+    return
+  }
   if (event.key.toLowerCase() === 'z') {
     viewportShading.value = viewportShading.value === 'rendered' ? 'solid' : 'rendered'
     renderViewport()
@@ -1107,6 +1268,7 @@ onMounted(async () => {
   window.addEventListener('keydown', onKeydown)
   window.addEventListener('pointermove', onPathDragMove)
   window.addEventListener('pointermove', onGizmoDragMove)
+  window.addEventListener('pointermove', onGesturePointerMove)
   window.addEventListener('pointerup', onGlobalPointerEnd, true)
   window.addEventListener('pointercancel', onGlobalPointerEnd, true)
   window.addEventListener('blur', onWindowBlur)
@@ -1117,6 +1279,7 @@ onBeforeUnmount(() => {
   if (viewportFrame) cancelAnimationFrame(viewportFrame)
   resizeObserver?.disconnect()
   window.removeEventListener('keydown', onKeydown)
+  window.removeEventListener('pointermove', onGesturePointerMove)
   window.removeEventListener('pointermove', onPathDragMove)
   window.removeEventListener('pointermove', onGizmoDragMove)
   window.removeEventListener('pointerup', onGlobalPointerEnd, true)
@@ -1149,6 +1312,7 @@ watch([selectedLayer, selectedScene, currentTime, selectedSceneEntityId, assets,
         <IconButton :icon="Move3D" label="Move (G)" :active="transformMode === 'translate'" @click="setTransformMode('translate')" />
         <IconButton :icon="Rotate3D" label="Rotate (R)" :active="transformMode === 'rotate'" @click="setTransformMode('rotate')" />
         <IconButton :icon="Scaling" label="Scale (S)" :active="transformMode === 'scale'" @click="setTransformMode('scale')" />
+        <button type="button" class="view-button" :class="{ active: gizmoSpace === 'local' }" :aria-pressed="gizmoSpace === 'local'" :title="gizmoSpace === 'local' ? 'Gizmo follows the entity own axes · click for world axes' : 'Gizmo follows the world axes · click for the entity own axes'" @click="toggleGizmoSpace">{{ gizmoSpace === 'local' ? 'Local' : 'Global' }}</button>
       </div>
       <span class="toolbar-divider" />
       <IconButton :icon="Camera" :label="cameraAlignLabel" :disabled="!selectedCamera || cameraAlignBlocked" @click="alignCameraToView" />
@@ -1180,6 +1344,7 @@ watch([selectedLayer, selectedScene, currentTime, selectedSceneEntityId, assets,
       </div>
       <div class="viewport-badge"><View :size="10" /> {{ cameraView }}{{ cameraView === 'Perspective' ? '' : ' · Orthographic' }} · {{ viewportShading === 'solid' ? 'Solid' : 'Rendered' }}</div>
       <div class="viewport-axis"><span class="x">X</span><span class="y">Y</span><span class="z">Z</span></div>
+      <div v-if="gestureStatus" class="viewport-gesture">{{ gestureStatus }}<small>click or Enter to confirm · Esc to cancel · X/Y/Z axis · Shift+axis plane · Ctrl snap · type a number</small></div>
       <div class="viewport-help">{{ viewportHelp }}</div>
     </div>
 
@@ -1202,4 +1367,6 @@ watch([selectedLayer, selectedScene, currentTime, selectedSceneEntityId, assets,
 .three-viewport { position: relative; min-height: 0; flex: 1; overflow: hidden; background: #090b10; }.three-viewport canvas { display: block; width: 100%; height: 100%; outline: none; touch-action: none; }.viewport-badge, .viewport-help { position: absolute; padding: 4px 6px; color: #858b99; background: rgb(12 14 20 / .78); border: 1px solid #292d37; border-radius: 3px; font-size: 7.5px; pointer-events: none; backdrop-filter: blur(4px); }.viewport-badge { top: 8px; left: 9px; display: flex; align-items: center; gap: 4px; }.viewport-help { right: 9px; bottom: 8px; }.viewport-axis { position: absolute; top: 9px; right: 10px; display: flex; gap: 3px; font-size: 7px; font-weight: 700; }.viewport-axis span { display: grid; width: 15px; height: 15px; place-items: center; color: #eef0f8; background: #252a35; border: 1px solid #3a404d; border-radius: 50%; }.viewport-axis .x { color: #ff9ca8; }.viewport-axis .y { color: #8bd5ad; }.viewport-axis .z { color: #91adff; }
 .scene-empty-state { position: absolute; top: 50%; left: 50%; display: flex; width: min(330px, calc(100% - 40px)); flex-direction: column; align-items: center; gap: 7px; padding: 18px; color: var(--text-muted); text-align: center; background: rgb(18 21 29 / .92); border: 1px solid #343948; border-radius: 5px; box-shadow: 0 16px 40px rgb(0 0 0 / .35); transform: translate(-50%, -50%); }.scene-empty-state > span { display: grid; width: 38px; height: 38px; place-items: center; color: #cbd3ff; background: #262d48; border: 1px solid #586593; border-radius: 4px; }.scene-empty-state strong { color: var(--text-primary); font-size: 11px; }.scene-empty-state small { max-width: 260px; font-size: 8.5px; line-height: 1.5; }.scene-empty-state button { display: inline-flex; height: 27px; align-items: center; gap: 5px; margin-top: 2px; padding: 0 9px; color: #11131a; background: var(--button-accent); border: 1px solid #a8b2ff; border-radius: 4px; font: inherit; font-size: 9px; font-weight: 650; cursor: pointer; }.scene-empty-state button:hover { background: var(--button-accent-hover); }
 .three-status { display: flex; height: 27px; flex: 0 0 auto; align-items: center; gap: 10px; padding: 0 8px; color: var(--text-muted); background: #111319; border-top: 1px solid var(--border-subtle); font-size: 7.5px; }.three-status span { display: flex; align-items: center; gap: 4px; white-space: nowrap; }.three-status .status-spacer { flex: 1; }.three-status strong { color: #7eb89f; font-size: 7px; letter-spacing: .08em; }.three-status strong.playing { color: #c3cafd; }
+.viewport-gesture { position: absolute; top: 50%; left: 50%; z-index: 4; display: flex; flex-direction: column; gap: 3px; padding: 6px 10px; color: #f2f5ff; font-size: 10px; font-variant-numeric: tabular-nums; background: rgb(16 20 32 / .92); border: 1px solid var(--accent-border); border-radius: 4px; transform: translate(-50%, -50%); pointer-events: none; }
+.viewport-gesture small { color: var(--text-muted); font-size: 8px; }
 </style>
