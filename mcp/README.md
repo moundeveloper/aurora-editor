@@ -23,6 +23,10 @@ The server currently provides:
 - `aurora_project_create_showcase` — author and activate the Neon Singularity hybrid animation.
 - `aurora_project_create_pillar_run` — author and activate the DRONE-07 cinematic pillar run.
 - `aurora_scene_object_influence_upsert` — add or update array, radial-array, mirror, subdivision, displacement, or twist influences on an existing mesh or group.
+- `aurora_scene_camera_lens_set` — switch depth of field on for a camera and set its focus distance and f-number, either as values or as keyframed curves.
+- `aurora_scene_light_upsert` — add or update an ambient, directional, point, or spot light, including a spot's cone angle, range, and edge softness.
+- `aurora_scene_environment_set` — light a scene from an imported `.hdr` or `.exr` radiance map, optionally drawing it as the background.
+- `aurora_scene_model_add` — place an imported `.glb` or `.gltf` mesh in a scene.
 
 For a protocol-level smoke test that launches the server and calls its authoring tool through an MCP
 client:

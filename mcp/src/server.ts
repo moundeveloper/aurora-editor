@@ -6,6 +6,11 @@ import { ProjectRepository } from '../../server/src/projects/ProjectRepository.t
 import { ensureVault, vaultLayout } from '../../server/src/storage/paths.ts'
 import { createNeonSingularityProject, createPillarRunProject } from './showcase.ts'
 import { MCP_INFLUENCE_TYPES, upsertProjectInfluence } from './influenceMutation.ts'
+import {
+  MCP_LIGHT_TYPES, addProjectModel, setProjectCameraLens, setProjectEnvironment, upsertProjectLight,
+} from './sceneMutation.ts'
+
+const HEX_COLOUR = /^#[0-9a-fA-F]{6}$/
 
 export async function createAuroraMcpServer(root?: string) {
   const layout = await ensureVault(vaultLayout(root))
@@ -115,6 +120,122 @@ export async function createAuroraMcpServer(root?: string) {
       return { isError: true, content: [{ type: 'text', text: error instanceof Error ? error.message : String(error) }] }
     }
   })
+
+  const animatable = (description: string) => z.object({
+    value: z.number().optional(),
+    keyframes: z.array(z.object({ time: z.number().min(0), value: z.number() })).optional()
+      .describe('Animation curve; two or more entries animate the channel, an empty list clears it'),
+  }).optional().describe(description)
+
+  /** Either a fixed triple, or a per-axis curve for a light or object that has to travel. */
+  const vector3 = (description: string) => z.union([
+    z.tuple([z.number(), z.number(), z.number()]),
+    z.object({ x: animatable('X channel'), y: animatable('Y channel'), z: animatable('Z channel') }),
+  ]).optional().describe(`${description}. Either [x, y, z], or per-axis channels that accept keyframes`)
+
+  /** Every mutation tool loads, edits, and saves the same document the editor writes. */
+  async function mutate<T>(projectId: string, apply: (snapshot: SerializedEditorState) => T) {
+    const stored = await projects.load(projectId)
+    if (!stored) return { isError: true as const, content: [{ type: 'text' as const, text: `Unknown Aurora project: ${projectId}` }] }
+    try {
+      const summary = apply(stored as unknown as SerializedEditorState)
+      await projects.save(stored)
+      return { content: [{ type: 'text' as const, text: JSON.stringify(summary, null, 2) }] }
+    } catch (error) {
+      return { isError: true as const, content: [{ type: 'text' as const, text: error instanceof Error ? error.message : String(error) }] }
+    }
+  }
+
+  server.registerTool('aurora_scene_camera_lens_set', {
+    title: 'Set a camera lens focus and aperture',
+    description: 'Switches depth of field on for a perspective camera and sets its focus distance and f-number. Both channels take keyframes, so a focus pull can be authored in one call. Lower f-numbers shrink the sharp range and grow the bokeh.',
+    inputSchema: z.object({
+      projectId: z.string().min(1).describe('Aurora project id'),
+      sceneId: z.string().min(1).describe('3D scene id from aurora_project_get'),
+      cameraId: z.string().min(1).describe('Camera id from aurora_project_get'),
+      depthOfField: z.boolean().optional().describe('Off keeps every depth pin-sharp'),
+      focusDistance: animatable('Distance to the sharp plane, in scene units'),
+      fStop: animatable('Lens f-number, 1 to 22'),
+    }),
+    annotations: { destructiveHint: false, idempotentHint: true },
+  }, async (mutation) => mutate(mutation.projectId, (snapshot) => {
+    const { scene, camera } = setProjectCameraLens(snapshot, mutation)
+    return {
+      projectId: mutation.projectId, sceneId: scene.id, cameraId: camera.id,
+      depthOfField: camera.depthOfField, focusDistance: camera.focusDistance, fStop: camera.fStop,
+      sceneRevision: scene.revision,
+    }
+  }))
+
+  server.registerTool('aurora_scene_light_upsert', {
+    title: 'Add or update a light',
+    description: 'Adds or updates an ambient, directional, point, or spot light. A spot also takes a cone angle, range, and edge softness. Local -Z is the beam, so rotation is what aims a directional or spot light. A spot range of zero lights to infinity; any other value hard-stops the beam at that distance however bright it is.',
+    inputSchema: z.object({
+      projectId: z.string().min(1).describe('Aurora project id'),
+      sceneId: z.string().min(1).describe('3D scene id from aurora_project_get'),
+      lightId: z.string().min(1).optional().describe('Existing light id to update, or a stable id for a new light'),
+      type: z.enum(MCP_LIGHT_TYPES).describe('Light type'),
+      name: z.string().min(1).max(128).optional(),
+      color: z.string().regex(HEX_COLOUR).optional().describe('Hex colour such as #2cecff'),
+      visible: z.boolean().optional(),
+      castShadow: z.boolean().optional(),
+      intensity: animatable('Light intensity'),
+      position: vector3('Scene-space position'),
+      rotation: vector3('Euler degrees; local -Z is the beam direction'),
+      angle: animatable('Spot only: cone half-angle in degrees, 1 to 89'),
+      distance: animatable('Spot only: range in scene units, or 0 for unlimited'),
+      penumbra: animatable('Spot only: cone edge softness, 0 to 1'),
+    }),
+    annotations: { destructiveHint: false, idempotentHint: false },
+  }, async (mutation) => mutate(mutation.projectId, (snapshot) => {
+    const { scene, light } = upsertProjectLight(snapshot, mutation)
+    return { projectId: mutation.projectId, sceneId: scene.id, light, sceneRevision: scene.revision }
+  }))
+
+  server.registerTool('aurora_scene_environment_set', {
+    title: 'Light a scene from a radiance map',
+    description: 'Points a 3D scene at an imported .hdr or .exr asset, which lights every material and can also be drawn as the background. Pass a null assetId to drop back to the flat background colour.',
+    inputSchema: z.object({
+      projectId: z.string().min(1).describe('Aurora project id'),
+      sceneId: z.string().min(1).describe('3D scene id from aurora_project_get'),
+      assetId: z.string().min(1).nullable().describe('Imported asset of kind hdr, or null to clear'),
+      background: z.boolean().optional().describe('Draw the map behind the scene instead of the flat colour'),
+      intensity: z.number().min(0).max(8).optional().describe('Environment strength'),
+    }),
+    annotations: { destructiveHint: false, idempotentHint: true },
+  }, async (mutation) => mutate(mutation.projectId, (snapshot) => {
+    const { scene } = setProjectEnvironment(snapshot, mutation)
+    return {
+      projectId: mutation.projectId, sceneId: scene.id, environmentAssetId: scene.environmentAssetId ?? null,
+      environmentBackground: scene.environmentBackground, environmentIntensity: scene.environmentIntensity,
+      sceneRevision: scene.revision,
+    }
+  }))
+
+  server.registerTool('aurora_scene_model_add', {
+    title: 'Place an imported glTF mesh',
+    description: 'Adds an imported .glb or .gltf asset to a 3D scene as a model object. The file keeps its own materials and node hierarchy, so Aurora material and influence edits do not apply to it; its transform and shadow flags do.',
+    inputSchema: z.object({
+      projectId: z.string().min(1).describe('Aurora project id'),
+      sceneId: z.string().min(1).describe('3D scene id from aurora_project_get'),
+      assetId: z.string().min(1).describe('Imported asset of kind model3d'),
+      objectId: z.string().min(1).optional().describe('Stable id for the new object'),
+      name: z.string().min(1).max(128).optional(),
+      parentId: z.string().min(1).optional().describe('Group object to parent this mesh to'),
+      position: vector3('Scene-space position'),
+      rotation: vector3('Euler degrees'),
+      scale: vector3('Per-axis scale'),
+      castShadow: z.boolean().optional(),
+      receiveShadow: z.boolean().optional(),
+    }),
+    annotations: { destructiveHint: false, idempotentHint: false },
+  }, async (mutation) => mutate(mutation.projectId, (snapshot) => {
+    const { scene, object } = addProjectModel(snapshot, mutation)
+    return {
+      projectId: mutation.projectId, sceneId: scene.id, objectId: object.id, name: object.name,
+      assetId: object.assetId, sceneRevision: scene.revision,
+    }
+  }))
 
   return { server, projects, layout }
 }

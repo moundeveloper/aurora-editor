@@ -65,7 +65,7 @@ describe('MCP Pillar Run authoring', () => {
     expect(gateGroups.every((group) => group.influences[0]?.type === 'array' && group.influences[0].parameters.count?.value === 3)).toBe(true)
     expect(gateGroups.every((group) => scene.objects.filter((object) => object.parentId === group.id).length === 4)).toBe(true)
     expect(scene.objects.filter((object) => object.parentId === drone.id).length).toBeGreaterThanOrEqual(10)
-    expect(scene.lights).toHaveLength(7)
+    expect(scene.lights).toHaveLength(8)
     expect(scene.lights.filter((light) => light.type === 'point')).toHaveLength(4)
     expect(scene.lights.find((light) => light.id === 'pillar-moon')).toMatchObject({ castShadow: true, color: '#d7e6ff' })
     expect(scene.settings).toMatchObject({ shadowMapSize: 2048, ambientOcclusionIntensity: 1.08, ambientOcclusionRadius: .42 })
@@ -73,6 +73,29 @@ describe('MCP Pillar Run authoring', () => {
     expect(scene.paths[0]?.points).toHaveLength(6)
     expect(evaluateNumericProperty(drone.transform.position.z, 0)).toBeCloseTo(10)
     expect(evaluateNumericProperty(drone.transform.position.z, 12)).toBeCloseTo(-22)
+
+    // The floodlight is a real spot: it tracks the drone from a boom above it, aims down and
+    // forward across the pillars, and opens its cone across the run.
+    const searchlight = scene.lights.find((light) => light.id === 'drone-searchlight')
+    expect(searchlight?.type).toBe('spot')
+    expect(searchlight?.castShadow).toBe(true)
+    expect(searchlight?.transform.rotation.x.value).toBe(-42)
+    // Above and ahead of the airframe: mounted on it, the drone's own body blocks the beam.
+    expect(evaluateNumericProperty(searchlight!.transform.position.y, 0))
+      .toBeCloseTo(evaluateNumericProperty(drone.transform.position.y, 0) + 4.2)
+    expect(evaluateNumericProperty(searchlight!.transform.position.z, 0)).toBeCloseTo(11.5)
+    expect(evaluateNumericProperty(searchlight!.transform.position.z, 12)).toBeCloseTo(-20.5)
+    expect(evaluateNumericProperty(searchlight!.angle!, 0)).toBeCloseTo(18)
+    expect(evaluateNumericProperty(searchlight!.angle!, 12)).toBeCloseTo(30)
+    // Zero range keeps the beam reaching the floor from altitude.
+    expect(searchlight?.distance?.value).toBe(0)
+
+    // The chase camera racks focus from the near pillars to the drone, then out to the finish.
+    const camera = scene.cameras[0]!
+    expect(camera.depthOfField).toBe(true)
+    expect(evaluateNumericProperty(camera.focusDistance!, 0)).toBeCloseTo(3.2)
+    expect(evaluateNumericProperty(camera.focusDistance!, 12)).toBeCloseTo(24)
+    expect(evaluateNumericProperty(camera.fStop!, 0)).toBeCloseTo(2)
   })
 
   it('lets MCP mutation add or update array influences on existing groups', () => {

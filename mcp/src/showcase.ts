@@ -465,6 +465,11 @@ export function createPillarRunProject(name = 'Pillar Run // Drone-07', projectI
     transform: transform3D('camera-drone-chase', [0, 3.1, 16]),
     fov: numeric('drone-camera-fov', 48, [[0, 54], [2.4, 43], [4.8, 50], [7.2, 42], [9.6, 48], [12, 38]]),
     near: .08, far: 160,
+    // A shallow lens racked across the run: the near pillars carry the opening, the rack lands on
+    // the drone as it launches, and the last two seconds pull through to the finish portal.
+    depthOfField: true,
+    focusDistance: numeric('drone-camera-focus', 3.2, [[0, 3.2], [1.6, 3.2], [3.2, 9], [8.8, 9], [12, 24]]),
+    fStop: numeric('drone-camera-f-stop', 2.2, [[0, 2], [3.2, 2.8], [12, 2.2]]),
     pathConstraint: {
       pathId: 'path-drone-chase', progress: numeric('drone-camera-progress', 0, [[0, 0], [12, 1]]),
       bank: numeric('drone-camera-bank', 0, [[0, 0], [2.4, 7], [4.8, -9], [7.2, 8], [9.6, -7], [12, 0]]),
@@ -486,6 +491,25 @@ export function createPillarRunProject(name = 'Pillar Run // Drone-07', projectI
   droneLight.transform.position.x = numeric('drone-light-x', 0, flightKeys.map(([time, value]) => [time, value[0]]))
   droneLight.transform.position.y = numeric('drone-light-y', 1.5, flightKeys.map(([time, value]) => [time, value[1] - .7]))
   droneLight.transform.position.z = numeric('drone-light-z', 10, flightKeys.map(([time, value]) => [time, value[2]]))
+  // A chase floodlight tracking the drone from above: a real spot with an animated cone, its own
+  // shadows, and a beam that rakes the canyon walls as the run unfolds.
+  //
+  // It rides a boom above and behind the drone rather than on the airframe. Mounted on the drone
+  // itself the beam is swallowed by the drone's own shadow-casting body, and the runway below is
+  // near-black half-metal that returns almost nothing to a grazing camera — so from there the
+  // light measures as contributing exactly nothing, however bright it is.
+  const searchlight = light('drone-searchlight', 'DRONE-07 Chase Floodlight', 'spot', '#eaf7ff', 420, [0, 6.4, 11.5])
+  searchlight.castShadow = true
+  searchlight.intensity = numeric('drone-searchlight-intensity', 340, [[0, 340], [2.4, 470], [7.2, 520], [12, 620]])
+  // Local -Z is the beam. Tilted down and forward, it crosses the pillars ahead of the drone.
+  searchlight.transform.rotation.x.value = -42
+  searchlight.transform.position.x = numeric('drone-searchlight-x', 0, flightKeys.map(([time, value]) => [time, value[0]]))
+  searchlight.transform.position.y = numeric('drone-searchlight-y', 6.4, flightKeys.map(([time, value]) => [time, value[1] + 4.2]))
+  searchlight.transform.position.z = numeric('drone-searchlight-z', 11.5, flightKeys.map(([time, value]) => [time, value[2] + 1.5]))
+  searchlight.angle = numeric('drone-searchlight-angle', 18, [[0, 18], [4.8, 26], [9.6, 22], [12, 30]])
+  // Zero range means the beam never falls off, so it still reaches the walls from the boom.
+  searchlight.distance = numeric('drone-searchlight-distance', 0)
+  searchlight.penumbra = numeric('drone-searchlight-penumbra', .3, [[0, .3], [6, .45], [12, .35]])
   const ambient = light('pillar-ambient', 'Deep Blue Ambient', 'ambient', '#27345f', .12, [0, 0, 0])
   const moon = light('pillar-moon', 'Cold Moon Key', 'directional', '#d7e6ff', 5.2, [7, 12, 10])
   moon.transform.rotation.x.value = -58
@@ -505,7 +529,7 @@ export function createPillarRunProject(name = 'Pillar Run // Drone-07', projectI
     id: 'scene-pillar-run', name: 'Neon Canyon Pillar Run',
     objects: [...environment, droneRoot, body, core, armA, armB, ...rotors],
     cameras: [camera], cameraCuts: [{ id: 'cut-drone-launch', cameraId: camera.id, time: 0 }],
-    lights: [ambient, moon, rim, launchPool, tunnelFill, finishPool, droneLight],
+    lights: [ambient, moon, rim, launchPool, tunnelFill, finishPool, droneLight, searchlight],
     paths: [{
       id: 'path-drone-chase', name: 'Six-Gate Chase Line', visible: true, color: '#35edff',
       transform: transform3D('path-drone-chase', [0, 0, 0]), closed: false, locked: false,
