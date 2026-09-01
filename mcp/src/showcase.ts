@@ -382,8 +382,9 @@ export function createPillarRunProject(name = 'Pillar Run // Drone-07', projectI
   floor.transform.scale.y.value = .16
   floor.transform.scale.z.value = 18
   floor.material.metalness.value = .78
-  floor.material.roughness.value = .22
+  floor.material.roughness.value = .28
   floor.castShadow = false
+  floor.receiveShadow = true
   environment.push(floor)
 
   const wall = (id: string, x: number) => {
@@ -391,6 +392,8 @@ export function createPillarRunProject(name = 'Pillar Run // Drone-07', projectI
     object.transform.scale.x.value = .18
     object.transform.scale.y.value = 3.8
     object.transform.scale.z.value = 18
+    object.castShadow = false
+    object.receiveShadow = true
     return object
   }
   environment.push(wall('wall-left', -8.2), wall('wall-right', 8.2))
@@ -404,7 +407,8 @@ export function createPillarRunProject(name = 'Pillar Run // Drone-07', projectI
       pillar.transform.scale.y.value = 3.85
       pillar.transform.scale.z.value = .68
       pillar.material.metalness.value = .76
-      pillar.material.roughness.value = .2
+      pillar.material.roughness.value = .26
+      pillar.receiveShadow = true
       environment.push(pillar)
     })
     const beam = mesh(`gate-beam-${gateIndex}`, `Gate ${gateIndex + 1} Crown`, 'box', [0, 7.45, z], material(`beam-${gateIndex}`, '#0b1020', accent, 1.8))
@@ -412,6 +416,7 @@ export function createPillarRunProject(name = 'Pillar Run // Drone-07', projectI
     beam.transform.scale.y.value = .18
     beam.transform.scale.z.value = .5
     beam.castShadow = false
+    beam.receiveShadow = true
     environment.push(beam)
     const beacon = mesh(`gate-beacon-${gateIndex}`, `Gate ${gateIndex + 1} Beacon`, 'sphere', [0, 7.25, z], material(`beacon-${gateIndex}`, accent, accent, 3.8))
     beacon.transform.scale.x.value = .16
@@ -442,21 +447,31 @@ export function createPillarRunProject(name = 'Pillar Run // Drone-07', projectI
     id, name: label, type, color, visible: true, intensity: numeric(`${id}-intensity`, intensity),
     transform: transform3D(id, position), castShadow: type === 'directional',
   })
-  const droneLight = light('drone-follow-light', 'Drone Cyan Underglow', 'point', '#2cecff', 24, [0, 2, 10])
+  const droneLight = light('drone-follow-light', 'Drone Cyan Underglow', 'point', '#2cecff', 18, [0, 2, 10])
+  droneLight.intensity = numeric('drone-follow-light-intensity', 18, [[0, 15], [2.4, 22], [4.8, 17], [7.2, 23], [9.6, 18], [12, 26]])
   droneLight.transform.position.x = numeric('drone-light-x', 0, flightKeys.map(([time, value]) => [time, value[0]]))
   droneLight.transform.position.y = numeric('drone-light-y', 1.5, flightKeys.map(([time, value]) => [time, value[1] - .7]))
   droneLight.transform.position.z = numeric('drone-light-z', 10, flightKeys.map(([time, value]) => [time, value[2]]))
-  const ambient = light('pillar-ambient', 'Midnight Atmosphere', 'ambient', '#374070', .52, [0, 0, 0])
-  const moon = light('pillar-moon', 'Cold Moon Key', 'directional', '#b9d9ff', 2.6, [5, 11, 8])
-  moon.transform.rotation.x.value = -54
-  moon.transform.rotation.y.value = 28
-  const tunnelFill = light('pillar-magenta', 'Magenta Tunnel Fill', 'point', '#d23cff', 31, [-4, 4, -8])
+  const ambient = light('pillar-ambient', 'Deep Blue Ambient', 'ambient', '#27345f', .24, [0, 0, 0])
+  const moon = light('pillar-moon', 'Cold Moon Key', 'directional', '#c9ddff', 4.2, [7, 12, 10])
+  moon.transform.rotation.x.value = -58
+  moon.transform.rotation.y.value = 32
+  const launchPool = light('pillar-launch-cyan', 'Launch Cyan Pool', 'point', '#25ddff', 22, [3.4, 2.8, 6])
+  launchPool.intensity = numeric('pillar-launch-cyan-intensity', 22, [[0, 28], [3, 18], [6, 14], [12, 10]])
+  const tunnelFill = light('pillar-mid-magenta', 'Mid-course Magenta Pool', 'point', '#d23cff', 24, [-3.5, 3.4, -6])
+  tunnelFill.intensity = numeric('pillar-mid-magenta-intensity', 24, [[0, 14], [4, 20], [7, 30], [10, 18], [12, 12]])
+  const finishPool = light('pillar-finish-cyan', 'Finish Portal Cyan Pool', 'point', '#50f4ff', 26, [1.8, 4.2, -18])
+  finishPool.intensity = numeric('pillar-finish-cyan-intensity', 26, [[0, 8], [6, 14], [9, 24], [12, 36]])
+  const rim = light('pillar-drone-rim', 'Drone Magenta Rim', 'directional', '#bd58ff', 1.15, [-7, 6, -2])
+  rim.castShadow = false
+  rim.transform.rotation.x.value = -34
+  rim.transform.rotation.y.value = -48
 
   const scene: Aurora3DScene = {
     id: 'scene-pillar-run', name: 'Neon Canyon Pillar Run',
     objects: [...environment, droneRoot, body, core, armA, armB, ...rotors],
     cameras: [camera], cameraCuts: [{ id: 'cut-drone-launch', cameraId: camera.id, time: 0 }],
-    lights: [ambient, moon, tunnelFill, droneLight],
+    lights: [ambient, moon, rim, launchPool, tunnelFill, finishPool, droneLight],
     paths: [{
       id: 'path-drone-chase', name: 'Six-Gate Chase Line', visible: true, color: '#35edff',
       transform: transform3D('path-drone-chase', [0, 0, 0]), closed: false, locked: false,
@@ -467,10 +482,10 @@ export function createPillarRunProject(name = 'Pillar Run // Drone-07', projectI
         mode: 'smooth' as const,
       })),
     }],
-    activeCameraId: camera.id, environmentIntensity: 1.1,
+    activeCameraId: camera.id, environmentIntensity: .9,
     settings: {
       shadows: true, shadowMapSize: 2048, ambientOcclusion: true,
-      ambientOcclusionIntensity: 1.35, ambientOcclusionRadius: .55, quality: 'preview', backgroundColor: '#02040d',
+      ambientOcclusionIntensity: 1.08, ambientOcclusionRadius: .42, quality: 'preview', backgroundColor: '#02040d',
     }, revision: 1,
   }
 
