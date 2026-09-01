@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
 import { storeToRefs } from 'pinia'
-import { Box, Camera, ChevronDown, ChevronUp, CircleDot, Image as ImageIcon, Lock, Plus, RotateCcw, SlidersHorizontal, Spline, Sun, Target, Trash2 } from '@lucide/vue'
+import { Box, Camera, ChevronDown, ChevronUp, CircleDot, Image as ImageIcon, Layers3, Lock, Plus, RotateCcw, SlidersHorizontal, Spline, Sun, Target, Trash2 } from '@lucide/vue'
 import { useEditorStore } from '@/stores/editor'
 import type { AnimatableProperty, Aurora3DPathPoint, AuroraPathPointMode } from '@/models/editor'
 import { evaluateNumericProperty } from '@/engine/animation/evaluateProperty'
@@ -36,6 +36,9 @@ const objectFollowOptions = computed<MSelectOption[]>(() => [
   { value: '', label: 'None' },
   ...(selectedScene.value?.objects ?? []).map((object) => ({ value: object.id, label: object.name })),
 ])
+const availableInfluenceTypes = computed(() => selectedSceneEntity.value?.kind === 'object' && selectedSceneEntity.value.value.type === 'group'
+  ? INFLUENCE_TYPES.filter((type) => type === 'array')
+  : INFLUENCE_TYPES)
 const lookAtCandidates = computed(() => {
   const scene = selectedScene.value
   if (!scene) return []
@@ -77,8 +80,8 @@ function pointModeLabel(mode: AuroraPathPointMode) {
       <template #icon><SlidersHorizontal :size="13" /></template>
     </PanelHeader>
     <div v-if="selectedSceneEntity" class="entity-summary">
-      <span class="entity-icon"><Box v-if="selectedSceneEntity.kind === 'object'" :size="14" /><Camera v-else-if="selectedSceneEntity.kind === 'camera'" :size="14" /><Spline v-else-if="selectedSceneEntity.kind === 'path'" :size="14" /><Sun v-else :size="14" /></span>
-      <span><strong :title="entity?.name">{{ entity?.name }}</strong><small>{{ selectedSceneEntity.kind }} · {{ selectedScene?.name }}</small></span>
+      <span class="entity-icon"><Layers3 v-if="selectedSceneEntity.kind === 'object' && selectedSceneEntity.value.type === 'group'" :size="14" /><Box v-else-if="selectedSceneEntity.kind === 'object'" :size="14" /><Camera v-else-if="selectedSceneEntity.kind === 'camera'" :size="14" /><Spline v-else-if="selectedSceneEntity.kind === 'path'" :size="14" /><Sun v-else :size="14" /></span>
+      <span><strong :title="entity?.name">{{ entity?.name }}</strong><small>{{ selectedSceneEntity.kind === 'object' && selectedSceneEntity.value.type === 'group' ? 'group' : selectedSceneEntity.kind }} · {{ selectedScene?.name }}</small></span>
     </div>
 
     <div v-if="selectedSceneEntity && transform" class="inspector-scroll">
@@ -98,7 +101,7 @@ function pointModeLabel(mode: AuroraPathPointMode) {
         </div>
       </section>
 
-      <section v-if="selectedSceneEntity.kind === 'object' && selectedSceneEntity.value.primitive === 'plane'" class="property-section">
+      <section v-if="selectedSceneEntity.kind === 'object' && selectedSceneEntity.value.type === 'mesh' && selectedSceneEntity.value.primitive === 'plane'" class="property-section">
         <button class="section-header" type="button" @click="toggle('image')"><ChevronDown :size="12" :class="{ closed: collapsed.image }" /><span>Surface image</span><small>Alpha enabled</small></button>
         <div v-if="!collapsed.image" class="property-list">
           <label><span>Image</span><MSelect :model-value="selectedSceneEntity.value.assetId ?? ''" :options="imageAssetOptions" label="Image on plane" @update:model-value="store.set3DObjectImage($event || null)" /></label>
@@ -107,7 +110,7 @@ function pointModeLabel(mode: AuroraPathPointMode) {
         </div>
       </section>
 
-      <section v-if="selectedSceneEntity.kind === 'object'" class="property-section">
+      <section v-if="selectedSceneEntity.kind === 'object' && selectedSceneEntity.value.type === 'mesh'" class="property-section">
         <button class="section-header" type="button" @click="toggle('material')"><ChevronDown :size="12" :class="{ closed: collapsed.material }" /><span>PBR Material</span><small>Standard</small></button>
         <div v-if="!collapsed.material" class="property-list">
           <label><span>Base color</span><input class="color-field" :value="selectedSceneEntity.value.material.baseColor" type="color" @input="selectedSceneEntity.value.material.baseColor = ($event.target as HTMLInputElement).value; store.markSceneChanged()" /></label>
@@ -122,7 +125,7 @@ function pointModeLabel(mode: AuroraPathPointMode) {
       </section>
 
       <RigPanel
-        v-if="selectedSceneEntity.kind === 'object'"
+        v-if="selectedSceneEntity.kind === 'object' && selectedSceneEntity.value.type === 'mesh'"
         :rig-id="selectedSceneEntity.value.rigId"
         scope="object"
         :unavailable="selectedSceneEntity.value.primitive === 'plane' ? undefined : 'Rigs bend a flat card, so they attach to image planes.'"
@@ -146,7 +149,7 @@ function pointModeLabel(mode: AuroraPathPointMode) {
             </label>
           </article>
           <div class="influence-add">
-            <button v-for="type in INFLUENCE_TYPES" :key="type" type="button" :title="INFLUENCE_DEFINITIONS[type].description" @click="store.add3DInfluence(type)"><Plus :size="10" /> {{ INFLUENCE_DEFINITIONS[type].label }}</button>
+            <button v-for="type in availableInfluenceTypes" :key="type" type="button" :title="INFLUENCE_DEFINITIONS[type].description" @click="store.add3DInfluence(type)"><Plus :size="10" /> {{ INFLUENCE_DEFINITIONS[type].label }}</button>
           </div>
         </div>
       </section>
@@ -246,6 +249,24 @@ function pointModeLabel(mode: AuroraPathPointMode) {
             <NumberField :model-value="propertyValue(selectedSceneEntity.value.intensity)" :min="0" :step=".1" label="intensity" @update:model-value="store.set3DLightIntensity($event)" />
             <KeyframeControl :property="selectedSceneEntity.value.intensity" label="intensity" />
           </label>
+          <template v-if="selectedSceneEntity.value.type === 'spot' && selectedSceneEntity.value.angle && selectedSceneEntity.value.distance && selectedSceneEntity.value.penumbra">
+            <label class="keyable">
+              <span>Cone angle</span>
+              <NumberField :model-value="propertyValue(selectedSceneEntity.value.angle)" :min="1" :max="89" :step="1" label="spot cone angle" @update:model-value="store.set3DLightCone('angle', $event)" />
+              <KeyframeControl :property="selectedSceneEntity.value.angle" label="spot cone angle" />
+            </label>
+            <label class="keyable">
+              <span>Range</span>
+              <NumberField :model-value="propertyValue(selectedSceneEntity.value.distance)" :min="0" :max="1000" :step=".25" label="spot light range, zero for unlimited" @update:model-value="store.set3DLightCone('distance', $event)" />
+              <KeyframeControl :property="selectedSceneEntity.value.distance" label="spot light range" />
+            </label>
+            <label class="keyable">
+              <span>Soft edge</span>
+              <NumberField :model-value="propertyValue(selectedSceneEntity.value.penumbra)" :min="0" :max="1" :step=".05" label="spot light soft edge" @update:model-value="store.set3DLightCone('penumbra', $event)" />
+              <KeyframeControl :property="selectedSceneEntity.value.penumbra" label="spot light soft edge" />
+            </label>
+            <p class="section-note">Range 0 lights to infinity. Any other value hard-stops the beam at that distance, however bright it is. Drag the cone rim in the viewport to widen the cone.</p>
+          </template>
           <label class="check-row"><span>Cast shadows</span><button type="button" :class="{ checked: selectedSceneEntity.value.castShadow }" @click="selectedSceneEntity.value.castShadow = !selectedSceneEntity.value.castShadow; store.markSceneChanged()"><CircleDot :size="10" /></button></label>
         </div>
       </section>

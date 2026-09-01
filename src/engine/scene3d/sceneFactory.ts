@@ -264,3 +264,47 @@ export function createPrimitiveObject(primitive: 'box' | 'sphere' | 'plane', ind
     influences: [],
   }
 }
+
+/** A transform-only scene node. Children retain their local transforms and inherit this one. */
+export function createGroupObject(index: number): Aurora3DObject {
+  const id = crypto.randomUUID()
+  return {
+    id,
+    name: `Group ${index}`,
+    type: 'group',
+    // Groups do not build geometry, but keeping a complete object record makes old project readers
+    // and shared animation tooling treat their transform exactly like any other scene object.
+    primitive: 'box',
+    visible: true,
+    locked: false,
+    castShadow: false,
+    receiveShadow: false,
+    transform: makeTransform3D(id),
+    material: makePBRMaterial(`${id}-material`, '#8c94a8'),
+    influences: [],
+  }
+}
+
+/**
+ * Euler degrees for a transform whose local -Z axis points at `target`.
+ *
+ * Directional and spot lights are aimed by their transform rotation: the renderer derives the beam
+ * from local -Z, so a light authored with a bare identity rotation shines sideways past the scene.
+ *
+ * The renderer composes rotations in Three's default XYZ order, which makes the beam
+ * `(-sin ry, cos ry · sin rx, -cos ry · cos rx)`. Solving that for a unit aim direction with the
+ * roll left at zero keeps the inspector readable: a light needs no roll about its own beam.
+ */
+export function aimRotationDegrees(position: readonly [number, number, number], target: readonly [number, number, number] = [0, 0, 0]) {
+  const toTarget = [target[0] - position[0], target[1] - position[1], target[2] - position[2]] as const
+  const length = Math.hypot(...toTarget)
+  if (length < 1e-4) return [0, 0, 0] as [number, number, number]
+  const [x, y, z] = toTarget.map((axis) => axis / length) as [number, number, number]
+  // Keeping the pitch within a quarter turn fixes the sign of cos(ry) against the aim's own Z.
+  const cosRotationY = (z === 0 ? 1 : -Math.sign(z)) * Math.sqrt(Math.max(0, 1 - x * x))
+  const rotationY = Math.atan2(-x, cosRotationY)
+  const rotationX = Math.abs(cosRotationY) < 1e-6
+    ? 0
+    : Math.asin(Math.max(-1, Math.min(1, y / cosRotationY)))
+  return [rotationX * 180 / Math.PI, rotationY * 180 / Math.PI, 0] as [number, number, number]
+}

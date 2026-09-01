@@ -112,6 +112,35 @@ function parameterValue(influence: AuroraInfluence, key: string, time: number) {
   return property ? evaluateNumericProperty(property, time) : fallback
 }
 
+export interface LinearArrayCopy {
+  index: number
+  matrix: THREE.Matrix4
+}
+
+/** Shared by mesh geometry arrays and transform-only group arrays. */
+export function linearArrayCopies(influence: AuroraInfluence, time: number): LinearArrayCopy[] {
+  if (!influence.enabled || influence.type !== 'array') return []
+  const count = Math.max(1, Math.min(32, Math.round(parameterValue(influence, 'count', time))))
+  const offset = new THREE.Vector3(
+    parameterValue(influence, 'offsetX', time),
+    parameterValue(influence, 'offsetY', time),
+    parameterValue(influence, 'offsetZ', time),
+  )
+  const rotationStep = THREE.MathUtils.degToRad(parameterValue(influence, 'rotationStep', time))
+  const scaleStep = parameterValue(influence, 'scaleStep', time)
+  return Array.from({ length: count }, (_, index) => {
+    const scale = Math.pow(scaleStep, index)
+    return {
+      index,
+      matrix: new THREE.Matrix4().compose(
+        offset.clone().multiplyScalar(index),
+        new THREE.Quaternion().setFromEuler(new THREE.Euler(0, rotationStep * index, 0)),
+        new THREE.Vector3(scale, scale, scale),
+      ),
+    }
+  })
+}
+
 /** Rebuilding geometry is expensive, so the runtime only does it when this signature changes. */
 export function influenceSignature(influences: AuroraInfluence[] | undefined, time: number) {
   if (!influences?.length) return 'none'
@@ -155,25 +184,13 @@ function valueNoise(x: number, y: number, z: number, seed: number) {
 const vertexCount = (geometry: THREE.BufferGeometry) => geometry.getAttribute('position')?.count ?? 0
 
 function applyArray(geometry: THREE.BufferGeometry, influence: AuroraInfluence, time: number) {
-  const count = Math.max(1, Math.round(parameterValue(influence, 'count', time)))
-  if (count <= 1) return geometry
-  const offset = new THREE.Vector3(
-    parameterValue(influence, 'offsetX', time),
-    parameterValue(influence, 'offsetY', time),
-    parameterValue(influence, 'offsetZ', time),
-  )
-  const rotationStep = THREE.MathUtils.degToRad(parameterValue(influence, 'rotationStep', time))
-  const scaleStep = parameterValue(influence, 'scaleStep', time)
+  const transforms = linearArrayCopies(influence, time)
+  if (transforms.length <= 1) return geometry
   const copies: THREE.BufferGeometry[] = []
-  for (let index = 0; index < count; index += 1) {
+  for (const { index, matrix } of transforms) {
     if (vertexCount(geometry) * (index + 1) > MAX_VERTICES) break
     const copy = geometry.clone()
-    const scale = Math.pow(scaleStep, index)
-    copy.applyMatrix4(new THREE.Matrix4().compose(
-      offset.clone().multiplyScalar(index),
-      new THREE.Quaternion().setFromEuler(new THREE.Euler(0, rotationStep * index, 0)),
-      new THREE.Vector3(scale, scale, scale),
-    ))
+    copy.applyMatrix4(matrix)
     copies.push(copy)
   }
   const merged = copies.length > 1 ? mergeGeometries(copies) : copies[0]!

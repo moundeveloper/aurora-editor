@@ -109,6 +109,12 @@ const channelDefinitions = computed<ChannelOption[]>(() => {
     }
   } else if (selected.kind === 'light') {
     rows.push({ key: selected.value.intensity.id, label: 'Intensity', color: '#d3aa72', suffix: '', property: selected.value.intensity })
+    const spot = selected.value
+    if (spot.type === 'spot' && spot.angle && spot.distance && spot.penumbra) {
+      rows.push({ key: spot.angle.id, label: 'Cone angle', color: '#ffd37a', suffix: '°', property: spot.angle })
+      rows.push({ key: spot.distance.id, label: 'Cone range', color: '#ffd37a', suffix: '', property: spot.distance })
+      rows.push({ key: spot.penumbra.id, label: 'Cone softness', color: '#ffd37a', suffix: '', property: spot.penumbra })
+    }
   }
   return rows
 })

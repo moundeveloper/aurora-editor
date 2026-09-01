@@ -191,9 +191,15 @@ export interface AuroraLight {
   id: string
   name: string
   visible: boolean
-  type: 'ambient' | 'directional' | 'point'
+  type: 'ambient' | 'directional' | 'point' | 'spot'
   color: string
   intensity: AnimatableProperty<number>
+  /** Spot cone half-angle in degrees. Optional so projects authored before spot lights remain valid. */
+  angle?: AnimatableProperty<number>
+  /** Maximum illuminated distance. Zero means unbounded in Three, but authored spots use a finite range. */
+  distance?: AnimatableProperty<number>
+  /** Fraction of the cone edge blended from full intensity to darkness. */
+  penumbra?: AnimatableProperty<number>
   transform: Transform3D
   castShadow: boolean
 }

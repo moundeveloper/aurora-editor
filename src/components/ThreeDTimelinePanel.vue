@@ -127,6 +127,12 @@ const channels = computed<ChannelRow[]>(() => {
     }
   } else if (selected.kind === 'light') {
     rows.push({ id: selected.value.intensity.id, group: 'light', label: 'Intensity', suffix: '', color: '#d3aa72', property: selected.value.intensity, groupStart: true })
+    const spot = selected.value
+    if (spot.type === 'spot' && spot.angle && spot.distance && spot.penumbra) {
+      rows.push({ id: spot.angle.id, group: 'light-cone', label: 'Cone angle', suffix: '°', color: '#ffd37a', property: spot.angle, groupStart: true })
+      rows.push({ id: spot.distance.id, group: 'light-cone', label: 'Cone range', suffix: '', color: '#ffd37a', property: spot.distance, groupStart: false })
+      rows.push({ id: spot.penumbra.id, group: 'light-cone', label: 'Cone softness', suffix: '', color: '#ffd37a', property: spot.penumbra, groupStart: false })
+    }
   }
   return rows
 })

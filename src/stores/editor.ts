@@ -1,5 +1,6 @@
 import { computed, ref, toRaw } from 'vue'
 import { defineStore } from 'pinia'
+import * as THREE from 'three'
 import type {
   AnimatableProperty, Aurora3DObject, Aurora3DScene, AuroraCamera, AuroraInfluenceType, AuroraLight, AuroraRig, AuroraRigBone,
   AuroraObjectFollowOrientation, AuroraPathOrientation, AuroraPathPointMode,
@@ -12,7 +13,7 @@ import { CURRENT_PROJECT_VERSION, deserializeEditorState, serializeEditorState }
 import { auroraProjectLibrary } from '@/services/projectLibrary'
 import { importAsset, mediaUrl } from '@/services/mediaLibrary'
 import { kindForFile } from '../../shared/contracts.ts'
-import { create3DPath, createCameraObjectConstraint, createCameraPathConstraint, createDemo3DScene, createEmpty3DScene, createPrimitiveObject, makeTransform3D, numericProperty } from '@/engine/scene3d/sceneFactory'
+import { aimRotationDegrees, create3DPath, createCameraObjectConstraint, createCameraPathConstraint, createDemo3DScene, createEmpty3DScene, createGroupObject, createPrimitiveObject, makeTransform3D, numericProperty } from '@/engine/scene3d/sceneFactory'
 import { createRig, createRigBone, type RigBoneChannelKey } from '@/engine/rig/rigFactory'
 import { MAX_RIG_CELLS, MIN_RIG_CELLS } from '@/engine/rig/rigMesh'
 import {
@@ -1617,6 +1618,109 @@ export const useEditorStore = defineStore('editor', () => {
     return object
   }
 
+  /** Creates a transform-only parent and optionally places existing objects beneath it. */
+  function add3DGroup(objectIds: string[] = []) {
+    const scene = selectedScene.value
+    if (!scene) return null
+    const selected = new Set(objectIds)
+    const group = createGroupObject(scene.objects.filter((item) => item.type === 'group').length + 1)
+    // If both a parent and its descendant were selected, grouping only the parent preserves the
+    // existing subtree instead of needlessly flattening it under the new group.
+    const byId = new Map(scene.objects.map((object) => [object.id, object]))
+    const roots = scene.objects.filter((object) => {
+      if (!selected.has(object.id)) return false
+      const visited = new Set<string>()
+      for (let parent = object.parentId ? byId.get(object.parentId) : undefined; parent; parent = parent.parentId ? byId.get(parent.parentId) : undefined) {
+        if (visited.has(parent.id)) break
+        visited.add(parent.id)
+        if (selected.has(parent.id)) return false
+      }
+      return true
+    })
+    const parentIds = new Set(roots.map((object) => object.parentId ?? ''))
+    // A transform can preserve sibling coordinates exactly. Objects from unrelated parent spaces
+    // need an explicit reparent operation, so they are not silently moved by this grouping action.
+    if (parentIds.size > 1) return null
+    const sharedParentId = roots[0]?.parentId
+    if (sharedParentId) group.parentId = sharedParentId
+    if (roots.length) {
+      ;(['x', 'y', 'z'] as const).forEach((axis) => {
+        const center = roots.reduce((sum, object) => sum + evaluateNumericProperty(object.transform.position[axis], currentTime.value), 0) / roots.length
+        group.transform.position[axis].value = center
+        roots.forEach((object) => {
+          const position = object.transform.position[axis]
+          position.value -= center
+          position.keyframes.forEach((keyframe) => { keyframe.value -= center })
+        })
+      })
+    }
+    scene.objects.push(group)
+    roots.forEach((object) => { object.parentId = group.id })
+    selectedSceneEntityId.value = group.id
+    markSceneChanged(scene)
+    return group
+  }
+
+  function composeGroupAndChildTransform(group: Aurora3DObject, child: Aurora3DObject) {
+    const channels = (transform: Aurora3DObject['transform']) => (['position', 'rotation', 'scale'] as const)
+      .flatMap((section) => (['x', 'y', 'z'] as const).map((axis) => transform[section][axis]))
+    const times = new Set<number>([currentTime.value])
+    ;[...channels(group.transform), ...channels(child.transform)].forEach((property) => {
+      if (property.animated) property.keyframes.forEach((keyframe) => times.add(keyframe.time))
+    })
+    const sample = (transform: Aurora3DObject['transform'], time: number) => new THREE.Matrix4().compose(
+      new THREE.Vector3(...(['x', 'y', 'z'] as const).map((axis) => evaluateNumericProperty(transform.position[axis], time)) as [number, number, number]),
+      new THREE.Quaternion().setFromEuler(new THREE.Euler(...(['x', 'y', 'z'] as const).map((axis) => THREE.MathUtils.degToRad(evaluateNumericProperty(transform.rotation[axis], time))) as [number, number, number], 'XYZ')),
+      new THREE.Vector3(...(['x', 'y', 'z'] as const).map((axis) => evaluateNumericProperty(transform.scale[axis], time)) as [number, number, number]),
+    )
+    const sortedTimes = [...times].sort((a, b) => a - b)
+    const samples = sortedTimes.map((time) => {
+      const position = new THREE.Vector3()
+      const rotation = new THREE.Quaternion()
+      const scale = new THREE.Vector3()
+      sample(group.transform, time).multiply(sample(child.transform, time)).decompose(position, rotation, scale)
+      const euler = new THREE.Euler().setFromQuaternion(rotation, 'XYZ')
+      return {
+        time,
+        position: [position.x, position.y, position.z],
+        rotation: [THREE.MathUtils.radToDeg(euler.x), THREE.MathUtils.radToDeg(euler.y), THREE.MathUtils.radToDeg(euler.z)],
+        scale: [scale.x, scale.y, scale.z],
+      } as const
+    })
+    ;(['position', 'rotation', 'scale'] as const).forEach((section) => {
+      ;(['x', 'y', 'z'] as const).forEach((axis, axisIndex) => {
+        const property = child.transform[section][axis]
+        const values = samples.map((item) => item[section][axisIndex])
+        property.value = values[sortedTimes.indexOf(currentTime.value)] ?? values[0]!
+        property.animated = sortedTimes.length > 1
+        property.keyframes = property.animated
+          ? sortedTimes.map((time, index) => ({ id: crypto.randomUUID(), time, value: values[index]!, interpolation: 'linear' }))
+          : []
+      })
+    })
+  }
+
+  function releaseGroupChildren(scene: Aurora3DScene, group: Aurora3DObject) {
+    scene.objects.forEach((object) => {
+      if (object.parentId !== group.id) return
+      composeGroupAndChildTransform(group, object)
+      if (group.parentId) object.parentId = group.parentId
+      else delete object.parentId
+    })
+  }
+
+  /** Removes a group node and releases its direct children back to the group's parent. */
+  function ungroup3DObject(groupId: string) {
+    const scene = selectedScene.value
+    const group = scene?.objects.find((object) => object.id === groupId && object.type === 'group')
+    if (!scene || !group) return false
+    releaseGroupChildren(scene, group)
+    scene.objects = scene.objects.filter((object) => object.id !== group.id)
+    selectedSceneEntityId.value = group.parentId ?? scene.objects[0]?.id ?? scene.cameras[0]?.id ?? ''
+    markSceneChanged(scene)
+    return true
+  }
+
   /** Creates an image card whose media can be changed later in the inspector. */
   function add3DImagePlane(assetId?: string) {
     const scene = selectedScene.value
@@ -1637,6 +1741,15 @@ export const useEditorStore = defineStore('editor', () => {
     return object
   }
 
+  /** New aimed lights point at the authored content, so adding one lights the scene immediately. */
+  function sceneAimTarget(scene: Aurora3DScene): [number, number, number] {
+    const roots = scene.objects.filter((object) => !object.parentId)
+    if (!roots.length) return [0, 0, 0]
+    const mean = (axis: 'x' | 'y' | 'z') => roots
+      .reduce((sum, object) => sum + evaluateNumericProperty(object.transform.position[axis], currentTime.value), 0) / roots.length
+    return [mean('x'), mean('y'), mean('z')]
+  }
+
   function add3DLight(type: AuroraLight['type']) {
     const scene = selectedScene.value
     if (!scene) return null
@@ -1647,9 +1760,20 @@ export const useEditorStore = defineStore('editor', () => {
       visible: true,
       type,
       color: type === 'ambient' ? '#c5ccff' : '#ffffff',
-      intensity: numericProperty(`${id}-intensity`, type === 'point' ? 18 : 1.5),
+      intensity: numericProperty(`${id}-intensity`, type === 'spot' ? 80 : type === 'point' ? 18 : 1.5),
       transform: makeTransform3D(id, type === 'ambient' ? [0, 0, 0] : [4, 5, 3]),
       castShadow: type !== 'ambient',
+    }
+    if (type === 'spot') {
+      light.angle = numericProperty(`${id}-angle`, 32)
+      light.distance = numericProperty(`${id}-distance`, 0)
+      light.penumbra = numericProperty(`${id}-penumbra`, .25)
+    }
+    if (type === 'directional' || type === 'spot') {
+      const [rotationX, rotationY, rotationZ] = aimRotationDegrees([4, 5, 3], sceneAimTarget(scene))
+      light.transform.rotation.x.value = rotationX
+      light.transform.rotation.y.value = rotationY
+      light.transform.rotation.z.value = rotationZ
     }
     scene.lights.push(light)
     selectedSceneEntityId.value = light.id
@@ -1686,6 +1810,7 @@ export const useEditorStore = defineStore('editor', () => {
     )
     if (entity.kind === 'object') {
       const influenceProperties = (entity.value.influences ?? []).flatMap((influence) => influenceParameters(influence).map((item) => item.property))
+      if (entity.value.type !== 'mesh') return [...transformProperties, ...influenceProperties]
       return [
         ...transformProperties,
         entity.value.material.metalness, entity.value.material.roughness,
@@ -1708,7 +1833,13 @@ export const useEditorStore = defineStore('editor', () => {
       return [...transformProperties, entity.value.fov, ...constraintProperties, ...objectConstraintProperties]
     }
     if (entity.kind === 'path') return transformProperties
-    return [...transformProperties, entity.value.intensity]
+    return [
+      ...transformProperties,
+      entity.value.intensity,
+      entity.value.angle,
+      entity.value.distance,
+      entity.value.penumbra,
+    ].filter((property): property is AnimatableProperty<number> => Boolean(property))
   }
 
   function findSelected3DProperty(propertyId: string) {
@@ -1750,7 +1881,7 @@ export const useEditorStore = defineStore('editor', () => {
 
   function set3DObjectMaterial(key: 'metalness' | 'roughness' | 'opacity' | 'emissiveIntensity', value: number) {
     const entity = selectedSceneEntity.value
-    if (entity?.kind !== 'object') return
+    if (entity?.kind !== 'object' || entity.value.type !== 'mesh') return
     if (apply3DPropertyValue(entity.value.material[key], value)) markSceneChanged()
   }
 
@@ -1781,9 +1912,21 @@ export const useEditorStore = defineStore('editor', () => {
     return entity?.kind === 'object' ? entity.value : null
   }
 
+  function set3DLightCone(key: 'angle' | 'distance' | 'penumbra', value: number) {
+    const entity = selectedSceneEntity.value
+    const property = entity?.kind === 'light' && entity.value.type === 'spot' ? entity.value[key] : undefined
+    if (!property || !Number.isFinite(value)) return
+    const clamped = key === 'angle'
+      ? Math.max(1, Math.min(89, value))
+      : key === 'distance'
+        ? Math.max(0, Math.min(1000, value))
+        : Math.max(0, Math.min(1, value))
+    if (apply3DPropertyValue(property, clamped)) markSceneChanged()
+  }
+
   function add3DInfluence(type: AuroraInfluenceType) {
     const object = selectedObject()
-    if (!object) return null
+    if (!object || (object.type !== 'mesh' && type !== 'array')) return null
     if (!Array.isArray(object.influences)) object.influences = []
     const sameType = object.influences.filter((influence) => influence.type === type).length
     const influence = createInfluence(type, sameType + 1)
@@ -1871,6 +2014,8 @@ export const useEditorStore = defineStore('editor', () => {
     const cameraIndex = scene.cameras.findIndex((item) => item.id === entityId)
     const lightIndex = scene.lights.findIndex((item) => item.id === entityId)
     if (objectIndex >= 0) {
+      const object = scene.objects[objectIndex]!
+      if (object.type === 'group') releaseGroupChildren(scene, object)
       scene.objects.splice(objectIndex, 1)
       scene.objects.forEach((object) => { if (object.parentId === entityId) delete object.parentId })
       scene.cameras.forEach((camera) => {
@@ -2603,9 +2748,9 @@ export const useEditorStore = defineStore('editor', () => {
     splitLayerAt, splitSelectedLayer, markChanged, saveProjectNow, flushProjectSave, initializePersistence,
     refreshProjects, openProject, createEmptyProject, setProjectFormat, setWorkspace, create3DSceneFromWorkspace, startExport, exportGif, cancelExport,
     publish3DSceneAsset, ensure3DSceneAssets,
-    selectSceneEntity, select3DLayer, markSceneChanged, add3DPrimitive, add3DImagePlane, add3DLight, add3DCamera, set3DEntityTransform,
+    selectSceneEntity, select3DLayer, markSceneChanged, add3DPrimitive, add3DGroup, ungroup3DObject, add3DImagePlane, add3DLight, add3DCamera, set3DEntityTransform,
     rename3DEntity, set3DEntityVisible, delete3DEntity,
-    update3DEntityTransform, set3DObjectMaterial, set3DObjectImage, set3DLightIntensity, set3DCameraFov,
+    update3DEntityTransform, set3DObjectMaterial, set3DObjectImage, set3DLightIntensity, set3DLightCone, set3DCameraFov,
     toggle3DKeyframe, keySelected3DTransform, move3DKeyframe, delete3DKeyframe, setActive3DCamera,
     add3DCameraCut, set3DCameraCutCamera, move3DCameraCut, delete3DCameraCut,
     add3DPath, delete3DPath, findScenePath, move3DPathPoint, set3DPathPointAxis, set3DPathPointMode,

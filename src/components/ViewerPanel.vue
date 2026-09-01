@@ -16,7 +16,7 @@ import { poseOffsetTowards, poseRotationTowards, restAimTowards } from '@/engine
 import IconButton from './common/IconButton.vue'
 
 const store = useEditorStore()
-const { project, currentTime, playing, loop, snap, zoom, layers, timelineLayers, assets, scenes3D, nodes, nodeConnections, renderRootNodeId, renderRevision, rigs, selectedRigBoneId, selectedLayer, selectedLayerId, selectedKeyframeId } = storeToRefs(store)
+const { project, currentTime, playing, loop, snap, zoom, activeClusterId, timelineLayers, assets, scenes3D, nodes, nodeConnections, renderRootNodeId, renderRevision, rigs, selectedRigBoneId, selectedLayer, selectedLayerId, selectedKeyframeId } = storeToRefs(store)
 const canvas = ref<HTMLCanvasElement>()
 const canvasWrap = ref<HTMLElement>()
 const transformBox = ref<HTMLElement>()
@@ -106,7 +106,7 @@ const timecode = computed(() => {
   return [hours, minutes, seconds, frames].map((part) => String(part).padStart(2, '0')).join(':')
 })
 
-const interactiveLayers = computed(() => [...layers.value]
+const interactiveLayers = computed(() => [...timelineLayers.value]
   .filter((layer) => layer.visible && !layer.locked && ['text', 'shape', 'image', 'video', 'cluster'].includes(layer.type) && currentTime.value >= layer.start && currentTime.value < layer.start + layer.duration)
   .reverse())
 
@@ -350,15 +350,19 @@ function endRigDrag() {
 
 async function drawNow() {
   if (!renderer) return
+  // A cluster tab is an isolated composition context. Its children are authored in project time,
+  // so they keep the same playhead value, but the root node graph must not pull sibling layers
+  // back into the frame while the user is editing inside the cluster.
+  const editingCluster = Boolean(activeClusterId.value)
   try {
     await renderer.requestFrame({
       project: project.value,
-      layers: layers.value,
+      layers: timelineLayers.value,
       scenes3D: scenes3D.value,
       assets: assets.value,
-      nodes: nodes.value,
-      nodeConnections: nodeConnections.value,
-      renderRootNodeId: renderRootNodeId.value,
+      nodes: editingCluster ? [] : nodes.value,
+      nodeConnections: editingCluster ? [] : nodeConnections.value,
+      renderRootNodeId: editingCluster ? null : renderRootNodeId.value,
       revision: renderRevision.value,
       rigs: rigs.value,
       time: currentTime.value,
@@ -741,7 +745,7 @@ onBeforeUnmount(() => {
   renderer = null
 })
 
-watch([currentTime, project, layers, scenes3D, nodes, nodeConnections, renderRootNodeId, renderRevision, rigs], draw, { deep: true })
+watch([currentTime, project, activeClusterId, timelineLayers, scenes3D, nodes, nodeConnections, renderRootNodeId, renderRevision, rigs], draw, { deep: true })
 </script>
 
 <template>

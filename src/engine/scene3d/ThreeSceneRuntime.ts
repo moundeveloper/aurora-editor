@@ -1,7 +1,7 @@
 import * as THREE from 'three'
 import { evaluateNumericProperty } from '@/engine/animation/evaluateProperty'
 import { evaluate3DPath } from '@/engine/scene3d/pathEvaluation'
-import { applyInfluences, influenceSignature } from '@/engine/scene3d/influences'
+import { applyInfluences, influenceSignature, linearArrayCopies } from '@/engine/scene3d/influences'
 import { deformRig } from '@/engine/rig/rigMesh'
 import { bonePoseMatrices, rigIsActive, rigPoseSignature, rigRestSignature } from '@/engine/rig/skeleton'
 import { mediaUrl } from '@/services/mediaLibrary'
@@ -108,6 +108,16 @@ function makeCamera(definition: AuroraCamera, aspect: number): THREE.Camera {
 
 function makeLight(definition: AuroraLight): THREE.Light {
   if (definition.type === 'ambient') return new THREE.AmbientLight(definition.color, definition.intensity.value)
+  if (definition.type === 'spot') {
+    return new THREE.SpotLight(
+      definition.color,
+      definition.intensity.value,
+      definition.distance?.value ?? 0,
+      THREE.MathUtils.degToRad(definition.angle?.value ?? 32),
+      definition.penumbra?.value ?? .25,
+      2,
+    )
+  }
   if (definition.type === 'point') return new THREE.PointLight(definition.color, definition.intensity.value, 0, 2)
   return new THREE.DirectionalLight(definition.color, definition.intensity.value)
 }
@@ -123,7 +133,7 @@ function setShadowMapSize(shadow: THREE.LightShadow<THREE.Camera>, requestedSize
 
 /** Fits the shadow volume to authored geometry instead of Three's tiny default camera. */
 function configureShadow(light: THREE.Light, scene: Aurora3DScene, bounds: THREE.Box3) {
-  if (!(light instanceof THREE.DirectionalLight) && !(light instanceof THREE.PointLight)) return
+  if (!(light instanceof THREE.DirectionalLight) && !(light instanceof THREE.PointLight) && !(light instanceof THREE.SpotLight)) return
   setShadowMapSize(light.shadow, scene.settings.shadowMapSize)
   const sphere = bounds.isEmpty()
     ? new THREE.Sphere(new THREE.Vector3(), 10)
@@ -200,6 +210,89 @@ function syncGeometry(mesh: THREE.Mesh, definition: Aurora3DObject, rig: AuroraR
   if (mesh.geometry !== base && mesh.geometry !== next) mesh.geometry.dispose()
   mesh.geometry = next
   mesh.userData.geometrySignature = signature
+}
+
+const GROUP_ARRAY_HELPER = 'aurora-group-array-helper'
+
+/** Clones only authored descendants, never editor handles or another runtime-generated array. */
+function cloneAuthoredSubtree(runtime: Scene3DRuntime, childrenByParent: Map<string, Aurora3DObject[]>, objectId: string): THREE.Object3D | null {
+  const source = runtime.objects.get(objectId)
+  if (!source) return null
+  const clone = source.clone(false)
+  clone.userData = { ...source.userData, auroraGroupArrayClone: true }
+  ;(childrenByParent.get(objectId) ?? []).forEach((child) => {
+    const nested = cloneAuthoredSubtree(runtime, childrenByParent, child.id)
+    if (nested) clone.add(nested)
+  })
+  return clone
+}
+
+function syncArrayClone(runtime: Scene3DRuntime, clone: THREE.Object3D) {
+  const sourceId = clone.userData.auroraId as string | undefined
+  const source = sourceId ? runtime.objects.get(sourceId) : undefined
+  if (source) {
+    clone.position.copy(source.position)
+    clone.quaternion.copy(source.quaternion)
+    clone.scale.copy(source.scale)
+    clone.visible = source.visible
+    if (clone instanceof THREE.Mesh && source instanceof THREE.Mesh) {
+      clone.geometry = source.geometry
+      clone.material = source.material
+      clone.castShadow = source.castShadow
+      clone.receiveShadow = source.receiveShadow
+    }
+  }
+  clone.children.forEach((child) => syncArrayClone(runtime, child))
+}
+
+/**
+ * Linear arrays on transform-only groups repeat the authored child hierarchy. Geometry and
+ * materials stay shared, while every clone mirrors the source's evaluated local transform.
+ */
+function syncGroupArrays(runtime: Scene3DRuntime, definition: Aurora3DScene, time: number) {
+  const childrenByParent = new Map<string, Aurora3DObject[]>()
+  definition.objects.forEach((object) => {
+    if (!object.parentId) return
+    const children = childrenByParent.get(object.parentId) ?? []
+    children.push(object)
+    childrenByParent.set(object.parentId, children)
+  })
+  definition.objects.filter((object) => object.type === 'group').forEach((groupDefinition) => {
+    const group = runtime.objects.get(groupDefinition.id)
+    if (!group) return
+    const influence = groupDefinition.influences?.find((item) => item.enabled && item.type === 'array')
+    const copies = influence ? linearArrayCopies(influence, time).slice(1) : []
+    let helper = group.children.find((child) => child.name === GROUP_ARRAY_HELPER)
+    if (!copies.length) {
+      helper?.removeFromParent()
+      return
+    }
+    const childDefinitions = childrenByParent.get(groupDefinition.id) ?? []
+    const structureSignature = `${copies.length}:${childDefinitions.map((child) => child.id).join(',')}`
+    if (!helper || helper.userData.structureSignature !== structureSignature) {
+      helper?.removeFromParent()
+      helper = new THREE.Group()
+      helper.name = GROUP_ARRAY_HELPER
+      helper.userData.structureSignature = structureSignature
+      helper.userData.auroraGroupArrayHelper = true
+      copies.forEach(() => {
+        const copyRoot = new THREE.Group()
+        copyRoot.matrixAutoUpdate = false
+        childDefinitions.forEach((child) => {
+          const clone = cloneAuthoredSubtree(runtime, childrenByParent, child.id)
+          if (clone) copyRoot.add(clone)
+        })
+        helper!.add(copyRoot)
+      })
+      group.add(helper)
+    }
+    copies.forEach((copy, index) => {
+      const copyRoot = helper!.children[index]!
+      copyRoot.matrix.copy(copy.matrix)
+      copyRoot.matrixWorldNeedsUpdate = true
+      copyRoot.children.forEach((child) => syncArrayClone(runtime, child))
+    })
+  })
 }
 
 function entityWorldPosition(runtime: Scene3DRuntime, entityId: string) {
@@ -411,7 +504,7 @@ export class ThreeSceneRuntimeRegistry {
       light.userData.auroraId = item.id
       runtime.lights.set(item.id, light)
       root.add(light)
-      if (light instanceof THREE.DirectionalLight) root.add(light.target)
+      if (light instanceof THREE.DirectionalLight || light instanceof THREE.SpotLight) root.add(light.target)
     })
     return runtime
   }
@@ -440,6 +533,7 @@ export class ThreeSceneRuntimeRegistry {
         object.material.envMapIntensity = definition.environmentIntensity
       }
     })
+    syncGroupArrays(runtime, definition, time)
     runtime.root.updateMatrixWorld(true)
     const sceneBounds = new THREE.Box3().setFromObject(runtime.root)
     definition.cameras.forEach((item) => {
@@ -474,8 +568,13 @@ export class ThreeSceneRuntimeRegistry {
       light.intensity = evaluateNumericProperty(item.intensity, time) * environmentScale
       applyTransform(light, item.transform, time)
       if ('castShadow' in light) light.castShadow = item.castShadow
+      if (light instanceof THREE.SpotLight) {
+        light.angle = THREE.MathUtils.degToRad(item.angle ? evaluateNumericProperty(item.angle, time) : 32)
+        light.distance = item.distance ? evaluateNumericProperty(item.distance, time) : 0
+        light.penumbra = item.penumbra ? evaluateNumericProperty(item.penumbra, time) : .25
+      }
       if (item.castShadow) configureShadow(light, definition, sceneBounds)
-      if (light instanceof THREE.DirectionalLight) {
+      if (light instanceof THREE.DirectionalLight || light instanceof THREE.SpotLight) {
         const direction = new THREE.Vector3(0, 0, -1).applyQuaternion(light.quaternion)
         light.target.position.copy(light.position).add(direction)
         light.target.updateMatrixWorld(true)
@@ -507,6 +606,7 @@ export class ThreeSceneRuntimeRegistry {
         candidate = candidate.parent
       }
       if (!(object instanceof THREE.Mesh)) return
+      if (object.userData.auroraGroupArrayClone) return
       const base = object.userData.baseGeometry as THREE.BufferGeometry | undefined
       if (base && base !== object.geometry) base.dispose()
       object.geometry.dispose()

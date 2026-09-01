@@ -90,6 +90,25 @@ function normalizeScene(scene: Aurora3DScene): Aurora3DScene {
     if (!Array.isArray(object.influences)) object.influences = []
     object.influences = object.influences.filter((influence) => influence?.type && influence.parameters)
   })
+  const objectById = new Map(scene.objects.map((object) => [object.id, object]))
+  scene.objects.forEach((object) => {
+    if (!object.parentId) return
+    const parent = objectById.get(object.parentId)
+    if (!parent || parent.type !== 'group' || parent.id === object.id) {
+      delete object.parentId
+      return
+    }
+    const visited = new Set([object.id])
+    let ancestor: typeof parent | undefined = parent
+    while (ancestor) {
+      if (visited.has(ancestor.id)) {
+        delete object.parentId
+        break
+      }
+      visited.add(ancestor.id)
+      ancestor = ancestor.parentId ? objectById.get(ancestor.parentId) : undefined
+    }
+  })
   scene.paths.forEach((path) => {
     path.visible = path.visible !== false
     path.color ||= '#7ee0c0'
@@ -125,7 +144,13 @@ function normalizeScene(scene: Aurora3DScene): Aurora3DScene {
     // Older or hand-edited files may contain both; object follow is the newer explicit choice.
     delete camera.pathConstraint
   })
-  scene.lights.forEach((light) => { light.visible = light.visible !== false })
+  scene.lights.forEach((light) => {
+    light.visible = light.visible !== false
+    if (light.type !== 'spot') return
+    light.angle ??= numericProperty(`${light.id}-angle`, 32)
+    light.distance ??= numericProperty(`${light.id}-distance`, 0)
+    light.penumbra ??= numericProperty(`${light.id}-penumbra`, .25)
+  })
   return scene
 }
 
