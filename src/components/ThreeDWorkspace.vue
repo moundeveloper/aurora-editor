@@ -13,6 +13,7 @@ import { poseOffsetTowards, poseRotationTowards, restAimTowards } from '@/engine
 import { pathTransformComponents, sampleLocalPath } from '@/engine/scene3d/pathEvaluation'
 import { movePathHandle, movePathPoint, type PathHandleKey, type PathVector } from '@/engine/scene3d/pathEditing'
 import { AuroraSceneRenderPipeline } from '@/engine/rendering/AuroraSceneRenderPipeline'
+import { AuroraSolidViewport } from '@/engine/rendering/AuroraSolidViewport'
 import type { Aurora3DObject, Aurora3DPath, Aurora3DPathPoint, Aurora3DScene, AuroraRig } from '@/models/editor'
 import IconButton from './common/IconButton.vue'
 
@@ -22,6 +23,7 @@ const viewport = ref<HTMLElement>()
 const canvas = ref<HTMLCanvasElement>()
 const transformMode = ref<TransformControlsMode>('translate')
 const cameraView = ref('Perspective')
+const viewportShading = ref<'rendered' | 'solid'>('rendered')
 const stats = ref({ calls: 0, triangles: 0 })
 interface PathPointSelection { pathId: string; pointId: string; target: PathHandleKey }
 /** Point-level selection lives beside the entity selection; it only applies while its path stays selected. */
@@ -37,6 +39,7 @@ const assetMap = computed(() => new Map(assets.value.map((asset) => [asset.id, a
 const runtimeRegistry = new ThreeSceneRuntimeRegistry(() => renderViewport())
 let renderer: THREE.WebGLRenderer | null = null
 let scenePipeline: AuroraSceneRenderPipeline | null = null
+const solidViewport = new AuroraSolidViewport()
 let perspectiveCamera: THREE.PerspectiveCamera | null = null
 let orthographicCamera: THREE.OrthographicCamera | null = null
 let editorCamera: THREE.Camera | null = null
@@ -516,10 +519,23 @@ function renderViewportNow() {
   syncInfluenceHelpers(targetRuntime, sceneDefinition)
   if (syncScene) attachSelection()
   updateEditorHelpers(targetRuntime)
-  renderer.shadowMap.enabled = sceneDefinition.settings.shadows
+  const solid = viewportShading.value === 'solid'
+  renderer.shadowMap.enabled = sceneDefinition.settings.shadows && !solid
   renderer.setScissorTest(false)
   renderer.setViewport(0, 0, host.clientWidth, host.clientHeight)
-  scenePipeline?.render(targetRuntime.scene, editorCamera, sceneDefinition.settings, host.clientWidth, host.clientHeight, 'screen')
+  const restoreMaterials = solid ? solidViewport.apply(targetRuntime.root) : null
+  try {
+    scenePipeline?.render(
+      targetRuntime.scene,
+      editorCamera,
+      solid ? { ...sceneDefinition.settings, shadows: false, ambientOcclusion: false } : sceneDefinition.settings,
+      host.clientWidth,
+      host.clientHeight,
+      'screen',
+    )
+  } finally {
+    restoreMaterials?.()
+  }
   stats.value = { calls: renderer.info.render.calls, triangles: renderer.info.render.triangles }
 }
 
@@ -966,6 +982,10 @@ function onKeydown(event: KeyboardEvent) {
   if (event.key.toLowerCase() === 'g') setTransformMode('translate')
   if (event.key.toLowerCase() === 'r') setTransformMode('rotate')
   if (event.key.toLowerCase() === 's') setTransformMode('scale')
+  if (event.key.toLowerCase() === 'z') {
+    viewportShading.value = viewportShading.value === 'rendered' ? 'solid' : 'rendered'
+    renderViewport()
+  }
 }
 
 onMounted(async () => {
@@ -1032,6 +1052,7 @@ onBeforeUnmount(() => {
   runtimeRegistry.dispose()
   scenePipeline?.dispose()
   scenePipeline = null
+  solidViewport.dispose()
   renderer?.dispose()
   renderer = null
   editorCamera = null
@@ -1054,6 +1075,9 @@ watch([selectedLayer, selectedScene, currentTime, selectedSceneEntityId, assets,
       <IconButton :icon="Camera" :label="cameraAlignLabel" :disabled="!selectedCamera || cameraAlignBlocked" @click="alignCameraToView" />
       <span class="toolbar-divider" />
       <button v-for="view in (['Perspective', 'Front', 'Right', 'Top'] as const)" :key="view" type="button" class="view-button" :title="view === 'Perspective' ? 'Switch to perspective view' : `Switch to exact ${view.toLowerCase()} orthographic view`" @click="setCameraView(view)">{{ view }}</button>
+      <span class="toolbar-divider" />
+      <button type="button" class="view-button" :class="{ active: viewportShading === 'solid' }" title="Solid shading (Z): ignore scene lights, shadows, emission, opacity, and ambient occlusion" :aria-pressed="viewportShading === 'solid'" @click="viewportShading = 'solid'; renderViewport()">Solid</button>
+      <button type="button" class="view-button" :class="{ active: viewportShading === 'rendered' }" title="Use authored materials, lights, shadows, and ambient occlusion" :aria-pressed="viewportShading === 'rendered'" @click="viewportShading = 'rendered'; renderViewport()">Rendered</button>
       <template v-if="selectedPath">
         <span class="toolbar-divider" />
         <span class="path-label"><Spline :size="11" :style="{ color: selectedPath.color }" /> {{ selectedPath.name }}</span>
@@ -1075,7 +1099,7 @@ watch([selectedLayer, selectedScene, currentTime, selectedSceneEntityId, assets,
         <small>Create a scene here. It will also be saved in the Library so it can be reused like a cluster.</small>
         <button type="button" @click="store.create3DSceneFromWorkspace()"><Plus :size="12" /> Create 3D scene</button>
       </div>
-      <div class="viewport-badge"><View :size="10" /> {{ cameraView }}{{ cameraView === 'Perspective' ? '' : ' · Orthographic' }}</div>
+      <div class="viewport-badge"><View :size="10" /> {{ cameraView }}{{ cameraView === 'Perspective' ? '' : ' · Orthographic' }} · {{ viewportShading === 'solid' ? 'Solid' : 'Rendered' }}</div>
       <div class="viewport-axis"><span class="x">X</span><span class="y">Y</span><span class="z">Z</span></div>
       <div class="viewport-help">{{ viewportHelp }}</div>
     </div>
