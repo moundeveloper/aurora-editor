@@ -1,21 +1,26 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { storeToRefs } from 'pinia'
-import { Check, ChevronDown, CircleCheck, Download, Film, FolderOpen, Gauge, GripVertical, HardDrive, Info, Loader, MonitorUp, MoveHorizontal, Play, TriangleAlert, X } from '@lucide/vue'
+import { Check, CircleCheck, Download, Film, FolderOpen, Gauge, GripVertical, HardDrive, Info, Loader, MonitorUp, MoveHorizontal, Play, TriangleAlert, X } from '@lucide/vue'
 import { useEditorStore } from '@/stores/editor'
 import { estimateGifBytes, gifExportSize, gifFrameCount, MAX_GIF_FRAMES } from '@/engine/rendering/gifPlan'
 import NumberField from './common/NumberField.vue'
 import MSelect, { type MSelectOption } from './common/MSelect.vue'
 import ExportRangePreview from './ExportRangePreview.vue'
+import {
+  videoBitrate, videoExportSize, videoExportSupported, videoFrameCount,
+} from '@/engine/rendering/videoExport'
 
-type ExportFormat = 'mp4' | 'gif'
+type ExportFormat = 'video' | 'gif'
 
 const store = useEditorStore()
 const { project, layers, exportProgress, exportStatus, exportMessage } = storeToRefs(store)
 const filename = ref(`${project.value.name.replace(/\W+/g, '_')}_Final`)
-const includeAudio = ref(true)
-const hardware = ref(true)
-const format = ref<ExportFormat>('mp4')
+const format = ref<ExportFormat>('video')
+const videoWidth = ref(project.value.width)
+const videoFrameRate = ref(Math.round(project.value.frameRate))
+const videoQuality = ref<'web' | 'high' | 'master'>('web')
+const videoCodec = ref<'vp9' | 'av1'>('vp9')
 const gifWidth = ref(Math.min(640, project.value.width))
 const gifFrameRate = ref(Math.min(15, Math.round(project.value.frameRate)))
 const gifColors = ref(128)
@@ -26,6 +31,15 @@ const rangeEnd = ref(project.value.duration)
 const previewTime = ref(0)
 const previewLabel = ref('In')
 const rangeTrack = ref<HTMLElement>()
+const videoCodecOptions: MSelectOption[] = [
+  { value: 'vp9', label: 'VP9' },
+  { value: 'av1', label: 'AV1 · smaller, slower' },
+]
+const videoQualityOptions: MSelectOption[] = [
+  { value: 'web', label: 'Web' },
+  { value: 'high', label: 'High' },
+  { value: 'master', label: 'Master' },
+]
 const rangeOptions: MSelectOption[] = [
   { value: 'entire', label: 'Entire composition' },
   { value: 'custom', label: 'Custom in / out' },
@@ -43,17 +57,32 @@ const exportTimelineLayers = computed(() => layers.value.filter((layer) => !laye
 let rangeDrag: { mode: 'start' | 'end' | 'range'; startX: number; initialStart: number; initialEnd: number } | null = null
 let scrubbing = false
 
-const presets: Array<{ id: string; format: ExportFormat; icon: typeof Film; title: string; detail: string }> = [
-  { id: 'web', format: 'mp4', icon: Film, title: 'Web · High Quality', detail: 'H.264' },
-  { id: 'master', format: 'mp4', icon: MonitorUp, title: 'Master · ProRes', detail: 'Highest quality archive' },
-  { id: 'social', format: 'mp4', icon: Play, title: 'Social · Vertical', detail: 'H.264' },
+interface ExportPreset {
+  id: string
+  format: ExportFormat
+  icon: typeof Film
+  title: string
+  detail: string
+  quality?: 'web' | 'high' | 'master'
+  codec?: 'vp9' | 'av1'
+  maxWidth?: number
+}
+
+const presets: ExportPreset[] = [
+  { id: 'web', format: 'video', icon: Film, title: 'Web · VP9', detail: 'WebM, balanced bitrate', quality: 'web', codec: 'vp9' },
+  { id: 'master', format: 'video', icon: MonitorUp, title: 'Master · VP9', detail: 'WebM, archive bitrate', quality: 'master', codec: 'vp9' },
+  { id: 'social', format: 'video', icon: Play, title: 'Social · 1080 wide', detail: 'WebM, capped at 1080px', quality: 'high', codec: 'vp9', maxWidth: 1080 },
+  { id: 'av1', format: 'video', icon: MonitorUp, title: 'AV1 · Smallest file', detail: 'WebM, slower to encode', quality: 'high', codec: 'av1' },
   { id: 'gif', format: 'gif', icon: Play, title: 'Loop · Animated GIF', detail: 'Rendered in the browser' },
 ]
 const activePreset = ref('web')
 
-function choosePreset(preset: (typeof presets)[number]) {
+function choosePreset(preset: ExportPreset) {
   activePreset.value = preset.id
   format.value = preset.format
+  if (preset.quality) videoQuality.value = preset.quality
+  if (preset.codec) videoCodec.value = preset.codec
+  videoWidth.value = Math.min(project.value.width, preset.maxWidth ?? project.value.width)
 }
 
 const gifSize = computed(() => gifExportSize(project.value, gifWidth.value))
@@ -63,6 +92,13 @@ const gifTruncated = computed(() => selectedDuration.value * gifFrameRate.value 
 const gifEstimate = computed(() => `${(estimateGifBytes(gifSize.value.width, gifSize.value.height, gifFrames.value) / 1024 / 1024).toFixed(1)} MB`)
 const gifDuration = computed(() => (gifFrames.value / Math.max(1, gifFrameRate.value)).toFixed(1))
 const rendering = computed(() => exportStatus.value === 'rendering')
+const videoSize = computed(() => videoExportSize(project.value, videoWidth.value))
+const videoFrames = computed(() => videoFrameCount(selectedDuration.value, videoFrameRate.value))
+const videoEstimate = computed(() => {
+  const bits = videoBitrate(videoSize.value.width, videoSize.value.height, videoFrameRate.value, videoQuality.value)
+  return `${((bits / 8) * (videoFrames.value / Math.max(1, videoFrameRate.value)) / 1024 / 1024).toFixed(1)} MB`
+})
+const videoUnavailable = computed(() => !videoExportSupported())
 
 function formatTime(time: number) {
   const clamped = Math.max(0, time)
@@ -172,8 +208,16 @@ onBeforeUnmount(() => {
 })
 
 function startRender() {
-  if (format.value !== 'gif') {
-    store.startExport()
+  if (format.value === 'video') {
+    void store.exportVideo({
+      filename: filename.value,
+      maxWidth: videoWidth.value,
+      frameRate: videoFrameRate.value,
+      quality: videoQuality.value,
+      codec: videoCodec.value,
+      startTime: selectedStart.value,
+      endTime: selectedEnd.value,
+    })
     return
   }
   void store.exportGif({
@@ -201,10 +245,22 @@ function startRender() {
       <div class="recent-render"><CircleCheck :size="13" /><span><strong>Horizon_v08.mp4</strong><small>Today · 284 MB</small></span></div>
     </div>
     <div class="export-form">
-      <header><div><strong>Export project</strong><span>{{ project.name }} · {{ project.duration.toFixed(1) }} seconds</span></div><span class="capability"><CircleCheck :size="11" /> {{ format === 'gif' ? 'GIF encoder ready' : 'Hardware encoder available' }}</span></header>
+      <header><div><strong>Export project</strong><span>{{ project.name }} · {{ project.duration.toFixed(1) }} seconds</span></div><span class="capability" :class="{ warn: format === 'video' && videoUnavailable }"><CircleCheck :size="11" /> {{ format === 'gif' ? 'GIF encoder ready' : videoUnavailable ? 'No video encoder in this browser' : 'WebCodecs encoder ready' }}</span></header>
       <div class="export-scroll">
-        <section><h3>Output</h3><div class="form-grid"><label>Filename</label><div class="field wide"><input v-model="filename" /><span>.{{ format }}</span></div><label>Destination</label><button class="field wide" type="button"><FolderOpen :size="12" /> Downloads <span>Choose…</span></button></div></section>
-        <section v-if="format === 'mp4'"><h3>Video</h3><div class="form-grid"><label>Format</label><button class="field" type="button">MP4 <ChevronDown :size="11" /></button><label>Codec</label><button class="field" type="button">H.264 <ChevronDown :size="11" /></button><label>Resolution</label><button class="field" type="button">{{ project.width }} × {{ project.height }} <ChevronDown :size="11" /></button><label>Frame rate</label><button class="field" type="button">{{ project.frameRate }} fps <ChevronDown :size="11" /></button><label>Quality</label><button class="field" type="button">High · 24 Mbps <ChevronDown :size="11" /></button><label>Color space</label><button class="field" type="button">Rec. 709 <ChevronDown :size="11" /></button></div></section>
+        <section><h3>Output</h3><div class="form-grid"><label>Filename</label><div class="field wide"><input v-model="filename" /><span>.{{ format === 'gif' ? 'gif' : 'webm' }}</span></div><label>Destination</label><button class="field wide" type="button"><FolderOpen :size="12" /> Downloads <span>Choose…</span></button></div></section>
+        <section v-if="format === 'video'">
+          <h3>Video</h3>
+          <div class="form-grid">
+            <label>Container</label><div class="field">WebM<span>Matroska</span></div>
+            <label>Codec</label><MSelect :model-value="videoCodec" :options="videoCodecOptions" label="Video codec" @update:model-value="videoCodec = $event as 'vp9' | 'av1'" />
+            <label>Width</label><div class="field"><NumberField :model-value="videoWidth" :min="64" :max="project.width" :step="16" label="Video width" @update:model-value="videoWidth = Math.round($event)" /><span>{{ videoSize.width }} × {{ videoSize.height }}</span></div>
+            <label>Frame rate</label><div class="field"><NumberField :model-value="videoFrameRate" :min="1" :max="120" :step="1" label="Video frame rate" @update:model-value="videoFrameRate = Math.round($event)" /><span>fps</span></div>
+            <label>Quality</label><MSelect :model-value="videoQuality" :options="videoQualityOptions" label="Video quality" @update:model-value="videoQuality = $event as 'web' | 'high' | 'master'" />
+            <label>Frames</label><div class="field">{{ videoFrames }} · {{ (videoFrames / Math.max(1, videoFrameRate)).toFixed(1) }}s</div>
+          </div>
+          <p v-if="videoUnavailable" class="format-note"><TriangleAlert :size="11" /> This browser has no WebCodecs video encoder. Chrome, Edge, and Safari 17 or newer can export video; GIF works everywhere.</p>
+          <p class="format-note"><Info :size="11" /> Frame timestamps come from the frame index, not the clock, so the file lasts exactly as long as the range however long the render takes. MP4 would need its own muxer and is not offered yet.</p>
+        </section>
         <section v-if="format === 'gif'">
           <h3>Animated GIF</h3>
           <div class="form-grid">
@@ -217,7 +273,7 @@ function startRender() {
           <p v-if="gifTruncated" class="format-note"><TriangleAlert :size="11" /> Capped at {{ MAX_GIF_FRAMES }} frames — lower the frame rate to cover the whole composition.</p>
           <p class="format-note"><Info :size="11" /> GIF carries no audio and no alpha; each frame is quantised to its own palette.</p>
         </section>
-        <section v-if="format === 'mp4'"><h3>Audio</h3><div class="check-row"><button type="button" :class="{ checked: includeAudio }" @click="includeAudio = !includeAudio"><Check v-if="includeAudio" :size="10" /></button><span><strong>Include audio</strong><small>AAC · 48 kHz · 320 kbps · Stereo</small></span></div></section>
+        <section v-if="format === 'video'"><h3>Audio</h3><p class="format-note"><Info :size="11" /> Video exports carry no audio yet: the mixer is not connected to the renderer, so there is no track to encode.</p></section>
         <section>
           <h3>Range & acceleration</h3>
           <div class="form-grid range-fields">
@@ -228,7 +284,7 @@ function startRender() {
               <span>→</span>
               <label><span>Out</span><NumberField :model-value="selectedEnd" :min="selectedStart + 1 / project.frameRate" :max="project.duration" :step="1 / project.frameRate" label="Export out time" suffix="s" @update:model-value="setRangeBoundary('end', $event)" /></label>
             </div>
-            <label>Frames</label><div class="field">{{ startFrame }} – {{ endFrame }} <span>{{ format === 'gif' ? gifFrames : totalFrames }} frames</span></div>
+            <label>Frames</label><div class="field">{{ startFrame }} – {{ endFrame }} <span>{{ format === 'gif' ? gifFrames : videoFrames }} frames</span></div>
           </div>
 
           <div class="range-editor">
@@ -254,12 +310,12 @@ function startRender() {
             <ExportRangePreview :time="previewTime" :label="previewLabel" />
           </div>
           <p class="range-hint">Click or drag the cursor to preview frames. Arrow keys step one frame; the centre grip moves the selected range.</p>
-          <div v-if="format === 'mp4'" class="check-row"><button type="button" :class="{ checked: hardware }" @click="hardware = !hardware"><Check v-if="hardware" :size="10" /></button><span><strong>Hardware acceleration</strong><small>Use VideoEncoder when supported</small></span></div>
+
         </section>
-        <div class="estimate"><HardDrive :size="15" /><span><strong>Estimated file size</strong><small>{{ format === 'gif' ? `About ${gifEstimate}` : '52–68 MB' }} · {{ selectedDuration.toFixed(1) }}s</small></span><Gauge :size="15" /><span><strong>Estimated render</strong><small>{{ format === 'gif' ? `${gifFrames} frames, encoded here` : 'About 12 seconds' }}</small></span></div>
+        <div class="estimate"><HardDrive :size="15" /><span><strong>Estimated file size</strong><small>About {{ format === 'gif' ? gifEstimate : videoEstimate }} · {{ selectedDuration.toFixed(1) }}s</small></span><Gauge :size="15" /><span><strong>Estimated render</strong><small>{{ format === 'gif' ? gifFrames : videoFrames }} frames, encoded here</small></span></div>
       </div>
       <footer>
-        <div v-if="exportProgress > 0" class="render-progress"><span><i :style="{ width: `${exportProgress}%` }" /></span><small>{{ exportProgress < 100 ? `Rendering frame ${Math.max(1, Math.round(exportProgress / 100 * (format === 'gif' ? gifFrames : totalFrames)))} of ${format === 'gif' ? gifFrames : totalFrames}` : `Export complete${exportMessage ? ` · ${exportMessage}` : ''}` }}</small></div>
+        <div v-if="exportProgress > 0" class="render-progress"><span><i :style="{ width: `${exportProgress}%` }" /></span><small>{{ exportProgress < 100 ? `Rendering frame ${Math.max(1, Math.round(exportProgress / 100 * (format === 'gif' ? gifFrames : videoFrames)))} of ${format === 'gif' ? gifFrames : videoFrames}` : `Export complete${exportMessage ? ` · ${exportMessage}` : ''}` }}</small></div>
         <span v-else-if="exportStatus === 'error'" class="export-note error"><TriangleAlert :size="11" /> {{ exportMessage }}</span>
         <span v-else class="export-note"><Info :size="11" /> Preview and export share the same composition renderer.</span>
         <button v-if="rendering" type="button" class="queue-button" @click="store.cancelExport()"><X :size="12" /> Cancel</button>

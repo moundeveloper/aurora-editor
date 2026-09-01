@@ -2741,19 +2741,22 @@ export const useEditorStore = defineStore('editor', () => {
     return rig.bones.filter((bone) => !descendants.has(bone.id))
   }
 
-  function startExport() {
-    exportProgress.value = 1
-    const interval = window.setInterval(() => {
-      exportProgress.value = Math.min(100, exportProgress.value + 4)
-      if (exportProgress.value >= 100) window.clearInterval(interval)
-    }, 90)
+  /** Everything the offline renderers need, detached from the reactive store. */
+  function exportComposition() {
+    return {
+      project: toRaw(project.value),
+      layers: toRaw(layers.value),
+      scenes3D: toRaw(scenes3D.value),
+      assets: toRaw(assets.value),
+      nodes: toRaw(nodes.value),
+      nodeConnections: toRaw(nodeConnections.value),
+      renderRootNodeId: renderRootNodeId.value,
+      rigs: toRaw(rigs.value),
+    }
   }
 
-  /**
-   * Renders every frame of the composition into an animated GIF and downloads it. Unlike the video
-   * placeholder above, the progress here tracks frames that have actually been encoded.
-   */
-  async function exportGif(options: { filename: string; maxWidth: number; frameRate: number; colors: number; loop: boolean; startTime?: number; endTime?: number }) {
+  /** Shared plumbing for the offline renderers: one at a time, cancellable, with real progress. */
+  async function runExport(label: string, extension: string, filename: string, render: (report: (frame: number, total: number) => void, signal: AbortSignal) => Promise<Blob>) {
     if (exportStatus.value === 'rendering') return
     const controller = new AbortController()
     exportAbort = controller
@@ -2761,29 +2764,12 @@ export const useEditorStore = defineStore('editor', () => {
     exportMessage.value = ''
     exportProgress.value = 1
     try {
-      const { exportProjectGif } = await import('@/engine/rendering/gifExport')
-      const blob = await exportProjectGif({
-        composition: {
-          project: toRaw(project.value),
-          layers: toRaw(layers.value),
-          scenes3D: toRaw(scenes3D.value),
-          assets: toRaw(assets.value),
-          nodes: toRaw(nodes.value),
-          nodeConnections: toRaw(nodeConnections.value),
-          renderRootNodeId: renderRootNodeId.value,
-          rigs: toRaw(rigs.value),
-        },
-        maxWidth: options.maxWidth,
-        frameRate: options.frameRate,
-        colors: options.colors,
-        loop: options.loop,
-        startTime: options.startTime,
-        endTime: options.endTime,
-        signal: controller.signal,
-        onProgress: (frame, total) => { exportProgress.value = Math.max(1, Math.round((frame / total) * 100)) },
-      })
-      const name = options.filename.trim() || project.value.name
-      downloadBlob(blob, name.toLowerCase().endsWith('.gif') ? name : `${name}.gif`)
+      const blob = await render(
+        (frame, total) => { exportProgress.value = Math.max(1, Math.round((frame / total) * 100)) },
+        controller.signal,
+      )
+      const name = filename.trim() || project.value.name
+      downloadBlob(blob, name.toLowerCase().endsWith(extension) ? name : `${name}${extension}`)
       exportProgress.value = 100
       exportStatus.value = 'done'
       exportMessage.value = `${(blob.size / 1024 / 1024).toFixed(1)} MB written`
@@ -2791,10 +2777,46 @@ export const useEditorStore = defineStore('editor', () => {
       const cancelled = error instanceof DOMException && error.name === 'AbortError'
       exportProgress.value = 0
       exportStatus.value = cancelled ? 'idle' : 'error'
-      exportMessage.value = cancelled ? '' : error instanceof Error ? error.message : 'The GIF render failed.'
+      exportMessage.value = cancelled ? '' : error instanceof Error ? error.message : `The ${label} render failed.`
     } finally {
       exportAbort = null
     }
+  }
+
+  /** Renders every frame of the composition into a WebM video and downloads it. */
+  async function exportVideo(options: { filename: string; maxWidth: number; frameRate: number; quality: 'web' | 'high' | 'master'; codec?: 'vp9' | 'vp8' | 'av1'; startTime?: number; endTime?: number }) {
+    await runExport('video', '.webm', options.filename, async (onProgress, signal) => {
+      const { exportProjectVideo } = await import('@/engine/rendering/videoExport')
+      return exportProjectVideo({
+        composition: exportComposition(),
+        maxWidth: options.maxWidth,
+        frameRate: options.frameRate,
+        quality: options.quality,
+        codec: options.codec,
+        startTime: options.startTime,
+        endTime: options.endTime,
+        signal,
+        onProgress,
+      })
+    })
+  }
+
+  /** Renders every frame of the composition into an animated GIF and downloads it. */
+  async function exportGif(options: { filename: string; maxWidth: number; frameRate: number; colors: number; loop: boolean; startTime?: number; endTime?: number }) {
+    await runExport('GIF', '.gif', options.filename, async (onProgress, signal) => {
+      const { exportProjectGif } = await import('@/engine/rendering/gifExport')
+      return exportProjectGif({
+        composition: exportComposition(),
+        maxWidth: options.maxWidth,
+        frameRate: options.frameRate,
+        colors: options.colors,
+        loop: options.loop,
+        startTime: options.startTime,
+        endTime: options.endTime,
+        signal,
+        onProgress,
+      })
+    })
   }
 
   function cancelExport() {
@@ -2825,7 +2847,7 @@ export const useEditorStore = defineStore('editor', () => {
     openClusterTabs, activeClusterId, activeCluster, timelineLayers, clusterTabs,
     enterCluster, activateTimelineTab, closeClusterTab, fitClusterToChildren, publishClusterAsset, ensureClusterAssets, dedupeCompositionAssets,
     splitLayerAt, splitSelectedLayer, markChanged, saveProjectNow, flushProjectSave, initializePersistence,
-    refreshProjects, openProject, createEmptyProject, setProjectFormat, setWorkspace, create3DSceneFromWorkspace, startExport, exportGif, cancelExport,
+    refreshProjects, openProject, createEmptyProject, setProjectFormat, setWorkspace, create3DSceneFromWorkspace, exportVideo, exportGif, cancelExport,
     publish3DSceneAsset, ensure3DSceneAssets,
     selectSceneEntity, select3DLayer, markSceneChanged, add3DPrimitive, add3DGroup, ungroup3DObject, add3DImagePlane, add3DModel, add3DLight, add3DCamera, set3DEntityTransform,
     rename3DEntity, set3DEntityVisible, delete3DEntity,
