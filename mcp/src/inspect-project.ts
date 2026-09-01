@@ -23,14 +23,24 @@ try {
   const project = JSON.parse(text) as {
     project: { id: string; name: string; duration: number }
     layers: unknown[]
-    scenes3D: Array<{ objects: unknown[] }>
+    scenes3D: Array<{ objects: Array<{ id: string; name: string; parentId?: string; type?: string; influences?: Array<{ type: string; parameters: Record<string, { value: number }> }> }> }>
     nodes: unknown[]
   }
+  const objects = project.scenes3D.flatMap((scene) => scene.objects)
+  const groupArrays = objects.flatMap((object) => (object.influences ?? [])
+    .filter((influence) => object.type === 'group' && influence.type === 'array')
+    .map((influence) => ({
+      objectId: object.id,
+      count: influence.parameters.count?.value,
+      offset: [influence.parameters.offsetX?.value, influence.parameters.offsetY?.value, influence.parameters.offsetZ?.value],
+      children: objects.filter((candidate) => candidate.parentId === object.id).length,
+    })))
   process.stdout.write(`${JSON.stringify({
     project: project.project,
     layers: project.layers.length,
     scenes3D: project.scenes3D.length,
     objects3D: project.scenes3D.reduce((total, scene) => total + scene.objects.length, 0),
+    groupArrays,
     nodes: project.nodes.length,
   }, null, 2)}\n`)
 } finally {

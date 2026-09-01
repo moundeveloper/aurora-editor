@@ -310,6 +310,23 @@ export function createNeonSingularityProject(name = 'Neon Singularity', projectI
   }
 }
 
+function arrayInfluence(id: string, count: number, offset: [number, number, number]): AuroraInfluence {
+  return {
+    id,
+    type: 'array',
+    name: `${count}-fold Linear Array`,
+    enabled: true,
+    parameters: {
+      count: numeric(`${id}-count`, count),
+      offsetX: numeric(`${id}-offset-x`, offset[0]),
+      offsetY: numeric(`${id}-offset-y`, offset[1]),
+      offsetZ: numeric(`${id}-offset-z`, offset[2]),
+      rotationStep: numeric(`${id}-rotation-step`, 0),
+      scaleStep: numeric(`${id}-scale-step`, 1),
+    },
+  }
+}
+
 /** A dense but preview-friendly environment authored entirely through Aurora's editable primitives. */
 export function createPillarRunProject(name = 'Pillar Run // Drone-07', projectId: string = randomUUID()): SerializedEditorState {
   const snapshot = createNeonSingularityProject(name, projectId)
@@ -404,33 +421,44 @@ export function createPillarRunProject(name = 'Pillar Run // Drone-07', projectI
   }
   environment.push(wall('wall-left', -8.2), wall('wall-right', 8.2))
 
-  const gateDepths = [7, 2, -3, -8, -13, -18]
-  gateDepths.forEach((z, gateIndex) => {
-    const accent = gateIndex % 2 ? '#a83cff' : '#17e9ff'
-    ;[-4.15, 4.15].forEach((x, sideIndex) => {
-      const pillar = mesh(`pillar-${gateIndex}-${sideIndex}`, `Gate ${gateIndex + 1} ${sideIndex ? 'Right' : 'Left'} Pillar`, 'box', [x, 3.7, z], material(`pillar-${gateIndex}-${sideIndex}`, '#24304a', accent, .025))
+  // Two editable gate assemblies alternate down the course. Each source hierarchy is repeated by
+  // one group-level array instead of storing six hand-authored copies of all four components.
+  const gateAssembly = (id: string, label: string, z: number, accent: string) => {
+    const root: Aurora3DObject = {
+      id, name: `${label} Gate Array`, type: 'group', primitive: 'box', visible: true,
+      locked: false, castShadow: false, receiveShadow: false, transform: transform3D(id, [0, 0, z]),
+      material: material(`${id}-group`, '#24304a', '#000000', 0), influences: [arrayInfluence(`${id}-repeat`, 3, [0, 0, -10])],
+    }
+    const components: Aurora3DObject[] = [-4.15, 4.15].map((x, sideIndex) => {
+      const pillar = mesh(`${id}-pillar-${sideIndex}`, `${label} ${sideIndex ? 'Right' : 'Left'} Pillar`, 'box', [x, 3.7, 0], material(`${id}-pillar-${sideIndex}`, '#24304a', accent, .025))
       pillar.transform.scale.x.value = .68
       pillar.transform.scale.y.value = 3.85
       pillar.transform.scale.z.value = .68
       pillar.material.metalness.value = .34
       pillar.material.roughness.value = .42
       pillar.receiveShadow = true
-      environment.push(pillar)
+      pillar.parentId = root.id
+      return pillar
     })
-    const beam = mesh(`gate-beam-${gateIndex}`, `Gate ${gateIndex + 1} Crown`, 'box', [0, 7.45, z], material(`beam-${gateIndex}`, '#1a243c', accent, .08))
+    const beam = mesh(`${id}-beam`, `${label} Crown`, 'box', [0, 7.45, 0], material(`${id}-beam`, '#1a243c', accent, .08))
     beam.transform.scale.x.value = 4.8
     beam.transform.scale.y.value = .18
     beam.transform.scale.z.value = .5
     beam.castShadow = false
     beam.receiveShadow = true
-    environment.push(beam)
-    const beacon = mesh(`gate-beacon-${gateIndex}`, `Gate ${gateIndex + 1} Beacon`, 'sphere', [0, 7.25, z], material(`beacon-${gateIndex}`, accent, accent, 3.8))
+    beam.parentId = root.id
+    const beacon = mesh(`${id}-beacon`, `${label} Beacon`, 'sphere', [0, 7.25, 0], material(`${id}-beacon`, accent, accent, 3.8))
     beacon.transform.scale.x.value = .16
     beacon.transform.scale.y.value = .16
     beacon.transform.scale.z.value = .16
     beacon.castShadow = false
-    environment.push(beacon)
-  })
+    beacon.parentId = root.id
+    return [root, ...components, beam, beacon]
+  }
+  environment.push(
+    ...gateAssembly('gate-cyan-array', 'Cyan Gates 1 · 3 · 5', 7, '#17e9ff'),
+    ...gateAssembly('gate-magenta-array', 'Magenta Gates 2 · 4 · 6', 2, '#a83cff'),
+  )
 
   const camera: AuroraCamera = {
     id: 'camera-drone-chase', name: 'Drone Chase Camera', visible: true, projection: 'perspective',

@@ -3,6 +3,7 @@ import { evaluateNumericProperty } from '../../../src/engine/animation/evaluateP
 import { evaluateNodeGraph } from '../../../src/engine/nodes/evaluateGraph.ts'
 import { deserializeEditorState } from '../../../src/engine/project/serialization.ts'
 import { createNeonSingularityProject, createPillarRunProject } from '../showcase.ts'
+import { upsertProjectInfluence } from '../influenceMutation.ts'
 
 describe('MCP Neon Singularity authoring', () => {
   it('creates an editable hybrid project with meaningful animation', () => {
@@ -51,14 +52,18 @@ describe('MCP Pillar Run authoring', () => {
 
     expect(snapshot.project.name).toBe('Flight Test')
     expect(scene.name).toBe('Neon Canyon Pillar Run')
-    expect(scene.objects.length).toBeGreaterThanOrEqual(30)
-    expect(scene.objects.filter((object) => object.name.includes('Pillar'))).toHaveLength(12)
+    expect(scene.objects.length).toBeGreaterThanOrEqual(24)
+    expect(scene.objects.filter((object) => object.name.includes('Pillar'))).toHaveLength(4)
     expect(scene.objects.find((object) => object.id === 'runway-floor')).toMatchObject({ castShadow: false, receiveShadow: true })
-    expect(scene.objects.filter((object) => object.name.includes('Pillar') && object.receiveShadow)).toHaveLength(12)
+    expect(scene.objects.filter((object) => object.name.includes('Pillar') && object.receiveShadow)).toHaveLength(4)
     expect(scene.objects.filter((object) => object.name.includes('Pillar')).every((object) => object.material.emissiveIntensity.value < .1)).toBe(true)
     expect(scene.objects.find((object) => object.id === 'drone-body')?.material.emissiveIntensity.value).toBe(0)
     expect(scene.objects.find((object) => object.id === 'drone-core')?.material.emissiveIntensity.value).toBeGreaterThan(4)
-    expect(scene.objects.find((object) => object.id === 'gate-beacon-0')?.material.emissiveIntensity.value).toBeGreaterThan(3)
+    expect(scene.objects.find((object) => object.id === 'gate-cyan-array-beacon')?.material.emissiveIntensity.value).toBeGreaterThan(3)
+    const gateGroups = scene.objects.filter((object) => object.type === 'group' && object.id.startsWith('gate-'))
+    expect(gateGroups).toHaveLength(2)
+    expect(gateGroups.every((group) => group.influences[0]?.type === 'array' && group.influences[0].parameters.count?.value === 3)).toBe(true)
+    expect(gateGroups.every((group) => scene.objects.filter((object) => object.parentId === group.id).length === 4)).toBe(true)
     expect(scene.objects.filter((object) => object.parentId === drone.id).length).toBeGreaterThanOrEqual(10)
     expect(scene.lights).toHaveLength(7)
     expect(scene.lights.filter((light) => light.type === 'point')).toHaveLength(4)
@@ -68,5 +73,22 @@ describe('MCP Pillar Run authoring', () => {
     expect(scene.paths[0]?.points).toHaveLength(6)
     expect(evaluateNumericProperty(drone.transform.position.z, 0)).toBeCloseTo(10)
     expect(evaluateNumericProperty(drone.transform.position.z, 12)).toBeCloseTo(-22)
+  })
+
+  it('lets MCP mutation add or update array influences on existing groups', () => {
+    const snapshot = createPillarRunProject('Mutation Test', 'mutation-test')
+    const result = upsertProjectInfluence(snapshot, {
+      projectId: snapshot.project.id,
+      sceneId: 'scene-pillar-run',
+      objectId: 'gate-cyan-array',
+      type: 'array',
+      influenceId: 'gate-cyan-array-repeat',
+      parameters: { count: 4, offsetZ: -8 },
+    })
+
+    expect(result.influence.parameters.count?.value).toBe(4)
+    expect(result.influence.parameters.offsetZ?.value).toBe(-8)
+    expect(result.influence.parameters.scaleStep?.value).toBe(1)
+    expect(result.scene.revision).toBe(2)
   })
 })

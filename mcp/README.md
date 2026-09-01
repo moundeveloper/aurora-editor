@@ -22,6 +22,7 @@ The server currently provides:
 - `aurora_project_get` — inspect a complete editable project document.
 - `aurora_project_create_showcase` — author and activate the Neon Singularity hybrid animation.
 - `aurora_project_create_pillar_run` — author and activate the DRONE-07 cinematic pillar run.
+- `aurora_scene_object_influence_upsert` — add or update array, radial-array, mirror, subdivision, displacement, or twist influences on an existing mesh or group.
 
 For a protocol-level smoke test that launches the server and calls its authoring tool through an MCP
 client:
