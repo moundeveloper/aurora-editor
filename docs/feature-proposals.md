@@ -1,13 +1,30 @@
 # Feature proposals
 
-A menu, not a plan. Nothing here is implemented. Pick by ID (`P1`, `P7`, …) and I will
-scope the chosen ones properly before writing code.
+This began as a menu rather than a plan. Implementation has since started on the
+`feat/scene-realism` line; the status below is checked against the current tree so the
+original proposals can remain useful without claiming completed work is still absent.
 
 Every item was checked against the current tree, so the "why now" lines describe real
 seams in Aurora rather than generic wish-list entries.
 
 **Effort key** — `S` under a day · `M` two to four days · `L` one to two weeks ·
 `XL` multi-week. Estimates assume the existing architecture holds and include tests.
+
+## Implementation status
+
+| ID | Status | Landed work |
+| --- | --- | --- |
+| P1 | Implemented | Deterministic VP9/AV1 WebM export through WebCodecs and Aurora's own WebM muxer. |
+| P2 | Partial | The persistent node-audio mixer UI exists; Web Audio playback, render mixing, and amplitude drivers remain. |
+| P3 | Implemented | glTF/GLB assets load as hierarchy-preserving, skeleton-safe model objects. |
+| P4 | Implemented | HDR/EXR radiance maps drive scene lighting and optional environment backgrounds. |
+| P7 | Implemented | 3D scenes use shutter-based subframe accumulation, scene and layer toggles, and quality-aware sample counts. |
+| P12 | Implemented | Modal G/R/S gestures support axes, typed values, snapping, framing, and local/global orientation. |
+| P15 | Partial | Spot lights and soft shadow controls exist; area lights and light linking remain. |
+| P16 | Implemented | Keyframeable camera focus distance and f-stop drive the bokeh render pass. |
+| P18 | Partial | Solid and Rendered viewport modes exist; wireframe, matcap, X-ray, and overlays remain. |
+
+All proposals not listed here remain unimplemented.
 
 ---
 

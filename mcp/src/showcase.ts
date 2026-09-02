@@ -256,7 +256,9 @@ function createScene(): Aurora3DScene {
     activeCameraId: camera.id, environmentIntensity: 1.15,
     settings: {
       shadows: true, shadowMapSize: 2048, ambientOcclusion: true,
-      ambientOcclusionIntensity: 1.15, ambientOcclusionRadius: .42, quality: 'preview', backgroundColor: '#02030d',
+      ambientOcclusionIntensity: 1.15, ambientOcclusionRadius: .42,
+      motionBlur: true, motionBlurShutter: 180, motionBlurSamples: 8,
+      quality: 'preview', backgroundColor: '#02030d',
     }, revision: 2,
   }
 }
@@ -543,7 +545,9 @@ export function createPillarRunProject(name = 'Pillar Run // Drone-07', projectI
     activeCameraId: camera.id, environmentIntensity: .8,
     settings: {
       shadows: true, shadowMapSize: 2048, ambientOcclusion: true,
-      ambientOcclusionIntensity: 1.08, ambientOcclusionRadius: .42, quality: 'preview', backgroundColor: '#02040d',
+      ambientOcclusionIntensity: 1.08, ambientOcclusionRadius: .42,
+      motionBlur: true, motionBlurShutter: 180, motionBlurSamples: 8,
+      quality: 'preview', backgroundColor: '#02040d',
     }, revision: 1,
   }
 

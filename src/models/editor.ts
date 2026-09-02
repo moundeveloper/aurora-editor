@@ -216,6 +216,12 @@ export interface Scene3DSettings {
   ambientOcclusion: boolean
   ambientOcclusionIntensity: number
   ambientOcclusionRadius: number
+  /** Accumulates deterministic subframes around the playhead for animated 3D motion. */
+  motionBlur: boolean
+  /** Exposure duration expressed like a physical camera shutter, from 0 to 360 degrees. */
+  motionBlurShutter: number
+  /** Authored full-quality sample count. Preview quality caps this to keep the editor responsive. */
+  motionBlurSamples: number
   quality: 'draft' | 'preview' | 'full'
   backgroundColor: string | null
 }
@@ -263,6 +269,8 @@ export interface EditorLayer {
   shapePath?: ShapePath
   textContent?: string
   sceneId?: string
+  /** A 3D scene can opt this layer out of its scene-level motion-blur pass. Defaults to true. */
+  motionBlur?: boolean
   /** Library entry this cluster publishes itself to, kept in step as the cluster is edited. */
   assetId?: string
   /** False after the user explicitly removes this reusable item from the Library. */

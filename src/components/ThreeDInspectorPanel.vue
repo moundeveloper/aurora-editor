@@ -15,7 +15,7 @@ import MSelect, { type MSelectOption } from './common/MSelect.vue'
 import RigPanel from './common/RigPanel.vue'
 
 const store = useEditorStore()
-const { selectedScene, selectedSceneEntity, currentTime, assets } = storeToRefs(store)
+const { selectedLayer, selectedScene, selectedSceneEntity, currentTime, assets } = storeToRefs(store)
 const collapsed = ref<Record<string, boolean>>({})
 const expandedPoints = ref<Record<string, boolean>>({})
 const entity = computed(() => selectedSceneEntity.value?.value)
@@ -347,12 +347,19 @@ function pointModeLabel(mode: AuroraPathPointMode) {
           <label class="check-row"><span>Ambient occlusion</span><button type="button" :class="{ checked: selectedScene.settings.ambientOcclusion }" @click="selectedScene.settings.ambientOcclusion = !selectedScene.settings.ambientOcclusion; store.markSceneChanged()"><CircleDot :size="10" /></button></label>
           <label><span>AO intensity</span><NumberField :model-value="selectedScene.settings.ambientOcclusionIntensity" :min="0" :max="3" :step=".05" label="ambient occlusion intensity" @update:model-value="selectedScene.settings.ambientOcclusionIntensity = $event; store.markSceneChanged()" /></label>
           <label><span>AO radius</span><NumberField :model-value="selectedScene.settings.ambientOcclusionRadius" :min=".01" :max="5" :step=".05" label="ambient occlusion radius" @update:model-value="selectedScene.settings.ambientOcclusionRadius = $event; store.markSceneChanged()" /></label>
+          <label class="check-row"><span>Motion blur</span><button type="button" :class="{ checked: selectedScene.settings.motionBlur }" @click="selectedScene.settings.motionBlur = !selectedScene.settings.motionBlur; store.markSceneChanged()"><CircleDot :size="10" /></button></label>
+          <template v-if="selectedScene.settings.motionBlur">
+            <label v-if="selectedLayer?.type === '3d-scene'" class="check-row"><span>This scene layer</span><button type="button" :class="{ checked: selectedLayer.motionBlur !== false }" @click="selectedLayer.motionBlur = selectedLayer.motionBlur === false; store.markSceneChanged()"><CircleDot :size="10" /></button></label>
+            <label><span>Shutter angle</span><NumberField :model-value="selectedScene.settings.motionBlurShutter" :min="0" :max="360" :step="15" label="motion blur shutter angle in degrees" @update:model-value="selectedScene.settings.motionBlurShutter = $event; store.markSceneChanged()" /></label>
+            <label><span>Full samples</span><NumberField :model-value="selectedScene.settings.motionBlurSamples" :min="2" :max="16" :step="1" label="full quality motion blur samples" @update:model-value="selectedScene.settings.motionBlurSamples = Math.round($event); store.markSceneChanged()" /></label>
+            <p class="section-note">Preview uses up to 8 samples. Draft disables blur; full quality uses the authored count.</p>
+          </template>
           <label><span>Environment light</span><NumberField :model-value="selectedScene.environmentIntensity" :min="0" :max="4" :step=".05" label="environment light intensity" @update:model-value="selectedScene.environmentIntensity = $event; store.markSceneChanged()" /></label>
           <label><span>Environment map</span><MSelect :model-value="selectedScene.environmentAssetId ?? ''" :options="environmentOptions" label="Environment radiance map" @update:model-value="store.set3DEnvironmentMap($event || null)" /></label>
           <label v-if="selectedScene.environmentAssetId" class="check-row"><span>Map as background</span><button type="button" :class="{ checked: selectedScene.environmentBackground }" @click="store.set3DEnvironmentBackground(!selectedScene.environmentBackground)"><CircleDot :size="10" /></button></label>
           <p v-if="!environmentOptions.length || environmentOptions.length === 1" class="section-note">Import an .hdr or .exr file to light the scene from a radiance map.</p>
         </div>
-        <div class="metadata"><span>Color space</span><strong>sRGB + ACES</strong><span>AO</span><strong>Ground-truth approximation</strong><span>Scene revision</span><strong>{{ selectedScene?.revision }}</strong></div>
+        <div class="metadata"><span>Color space</span><strong>sRGB + ACES</strong><span>AO</span><strong>Ground-truth approximation</strong><span>Full samples</span><strong>{{ selectedScene?.settings.motionBlur && selectedLayer?.motionBlur !== false ? selectedScene.settings.motionBlurSamples : 'Off' }}</strong><span>Scene revision</span><strong>{{ selectedScene?.revision }}</strong></div>
       </section>
     </div>
     <div v-else class="empty-state"><Box :size="25" /><strong>No 3D selection</strong><span>Select an object, camera, light, or path in the scene hierarchy.</span></div>

@@ -7,7 +7,7 @@ import { createDemoNodeGraph, NODE_DEFINITIONS } from '@/engine/nodes/nodeGraph'
 import { normalizeCameraCuts } from '@/engine/scene3d/cameraCuts'
 import { MAX_RIG_CELLS, MIN_RIG_CELLS } from '@/engine/rig/rigMesh'
 
-export const CURRENT_PROJECT_VERSION = 12
+export const CURRENT_PROJECT_VERSION = 13
 
 export interface EditorStateFallback {
   project: EditorProject
@@ -74,13 +74,18 @@ function clone<T>(value: T): T {
 function normalizeScene(scene: Aurora3DScene): Aurora3DScene {
   scene.settings ??= {
     shadows: true, shadowMapSize: 1024, ambientOcclusion: true,
-    ambientOcclusionIntensity: 1, ambientOcclusionRadius: .35, quality: 'preview', backgroundColor: null,
+    ambientOcclusionIntensity: 1, ambientOcclusionRadius: .35,
+    motionBlur: false, motionBlurShutter: 180, motionBlurSamples: 8,
+    quality: 'preview', backgroundColor: null,
   }
   scene.settings.shadows = scene.settings.shadows !== false
   scene.settings.shadowMapSize = Math.max(256, Math.min(4096, finiteOr(scene.settings.shadowMapSize, 1024)))
   scene.settings.ambientOcclusion = scene.settings.ambientOcclusion !== false
   scene.settings.ambientOcclusionIntensity = Math.max(0, Math.min(3, finiteOr(scene.settings.ambientOcclusionIntensity, 1)))
   scene.settings.ambientOcclusionRadius = Math.max(.01, Math.min(5, finiteOr(scene.settings.ambientOcclusionRadius, .35)))
+  scene.settings.motionBlur = scene.settings.motionBlur === true
+  scene.settings.motionBlurShutter = Math.max(0, Math.min(360, finiteOr(scene.settings.motionBlurShutter, 180)))
+  scene.settings.motionBlurSamples = Math.round(Math.max(2, Math.min(16, finiteOr(scene.settings.motionBlurSamples, 8))))
   scene.environmentIntensity = Math.max(0, finiteOr(scene.environmentIntensity, 1))
   if (typeof scene.environmentAssetId !== 'string' || !scene.environmentAssetId) delete scene.environmentAssetId
   scene.environmentBackground = scene.environmentBackground === true

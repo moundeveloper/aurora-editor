@@ -191,12 +191,18 @@ describe('hybrid project architecture', () => {
     delete legacySettings.ambientOcclusion
     delete legacySettings.ambientOcclusionIntensity
     delete legacySettings.ambientOcclusionRadius
+    delete legacySettings.motionBlur
+    delete legacySettings.motionBlurShutter
+    delete legacySettings.motionBlurSamples
 
     const restored = deserializeEditorState(JSON.stringify(legacy), fallback)
     expect(restored.scenes3D[0]?.settings).toMatchObject({
       ambientOcclusion: true,
       ambientOcclusionIntensity: 1,
       ambientOcclusionRadius: .35,
+      motionBlur: false,
+      motionBlurShutter: 180,
+      motionBlurSamples: 8,
     })
   })
 

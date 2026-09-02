@@ -15,6 +15,7 @@ import { cameraLensAtTime } from '@/engine/scene3d/cameraLens'
 import { createMaskGeometry, maskAlphaField, maskGeometryKey, type MaskGeometryField } from '@/engine/rendering/maskField'
 import { MediaTextureCache } from '@/engine/rendering/mediaTextures'
 import { AuroraSceneRenderPipeline } from '@/engine/rendering/AuroraSceneRenderPipeline'
+import { effectiveMotionBlurSamples, motionBlurSampleTimes } from '@/engine/rendering/motionBlur'
 import { mediaUrl } from '../../../shared/contracts.ts'
 
 /** Colour nodes fold into one matrix so a chain of them still costs a single filter pass. */
@@ -301,7 +302,11 @@ export class HybridWebGLRenderBackend implements RenderBackend {
         flushPixi()
         const scene = pass.sceneId ? sceneMap.get(pass.sceneId) : undefined
         if (!scene) return
-        this.renderThreeLayer(layer, scene, request.time, size.width, size.height, request.project.width, request.project.height, request.quality, pass.effects, layerMap, request.assets ?? [], request.rigs ?? [])
+        this.renderThreeLayer(
+          layer, scene, request.time, size.width, size.height, request.project.width, request.project.height,
+          request.project.frameRate, request.project.duration, request.quality, pass.effects, layerMap,
+          request.assets ?? [], request.rigs ?? [],
+        )
         threePasses += 1
       } else {
         pixiBatch.push({ pass, layer })
@@ -624,6 +629,8 @@ export class HybridWebGLRenderBackend implements RenderBackend {
     height: number,
     projectWidth: number,
     projectHeight: number,
+    frameRate: number,
+    projectDuration: number,
     quality: RenderFrameRequest['quality'],
     effects: GraphEffects,
     layerMap: Map<string, EditorLayer>,
@@ -645,13 +652,38 @@ export class HybridWebGLRenderBackend implements RenderBackend {
     const renderSettings = { ...sceneDefinition.settings, quality }
     const ambientOcclusion = renderSettings.ambientOcclusion && quality !== 'draft'
     const cameraDefinition = sceneDefinition.cameras.find((item) => item.id === cameraId)
-    // Depth of field is a post pass, so a lens forces the composited route even with no mask and no
-    // ambient occlusion: the direct render below has nowhere to apply one.
+    const motionBlurSamples = layer.motionBlur === false ? 1 : effectiveMotionBlurSamples(renderSettings, quality)
+    const sampleTimes = motionBlurSampleTimes(
+      time, frameRate, renderSettings.motionBlurShutter, motionBlurSamples,
+      Math.max(0, layer.start), Math.min(projectDuration, layer.start + layer.duration),
+    )
+    const motionBlur = sampleTimes.length > 1
+    // Depth of field and motion blur are post passes, so either forces the composited route even with
+    // no mask or ambient occlusion: the direct render below has nowhere to apply them.
     const lens = quality === 'draft' || !cameraDefinition ? null : cameraLensAtTime(cameraDefinition, time)
-    if (maskRaster || ambientOcclusion || lens) {
+    if (maskRaster || ambientOcclusion || lens || motionBlur) {
       let sceneTexture: THREE.Texture | null = null
       this.threeRenderer.resetState()
-      if ((ambientOcclusion || lens) && this.scenePipeline) {
+      if (motionBlur && this.scenePipeline) {
+        try {
+          sceneTexture = this.scenePipeline.renderMotionBlur(sampleTimes, (sampleTime) => {
+            const sampleRuntime = this.runtimeRegistry.get(sceneDefinition, width, height, sampleTime, assets, rigs)
+            const sampleCameraId = cameraIdAtTime(sceneDefinition, sampleTime)
+            const sampleCamera = sampleCameraId ? sampleRuntime.cameras.get(sampleCameraId) : undefined
+            const sampleCameraDefinition = sceneDefinition.cameras.find((item) => item.id === sampleCameraId)
+            if (!sampleCamera) return null
+            return {
+              scene: sampleRuntime.scene,
+              camera: sampleCamera,
+              lens: quality === 'draft' || !sampleCameraDefinition ? null : cameraLensAtTime(sampleCameraDefinition, sampleTime),
+            }
+          }, renderSettings, width, height)
+        } finally {
+          // Sampling mutates the persistent runtime in place. Put it back at the playhead so selection
+          // overlays and a second pass of the same scene observe the exact requested state.
+          this.runtimeRegistry.get(sceneDefinition, width, height, time, assets, rigs)
+        }
+      } else if ((ambientOcclusion || lens) && this.scenePipeline) {
         sceneTexture = this.scenePipeline.render(runtime.scene, camera, renderSettings, width, height, 'texture', lens)
       } else {
         this.threeLayerTarget ??= new THREE.WebGLRenderTarget(width, height, { depthBuffer: true, stencilBuffer: false })

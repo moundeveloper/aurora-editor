@@ -18,6 +18,12 @@ interface PipelineState {
   perspective: boolean
 }
 
+export interface AuroraMotionBlurSample {
+  scene: THREE.Scene
+  camera: THREE.Camera
+  lens: CameraLens | null
+}
+
 /**
  * One persistent post-process chain per render surface. Beauty, shadows, and GTAO share the same
  * scene/camera and render targets; only dimensions or camera projection rebuild GPU resources.
@@ -27,8 +33,47 @@ export class AuroraSceneRenderPipeline {
   private width = 0
   private height = 0
   private sampleCount = 0
+  private accumulationTarget: THREE.WebGLRenderTarget | null = null
+  private readonly accumulationScene = new THREE.Scene()
+  private readonly accumulationCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1)
+  private readonly accumulationMaterial = new THREE.ShaderMaterial({
+    uniforms: {
+      sampleTexture: { value: null as THREE.Texture | null },
+      sampleWeight: { value: 1 },
+    },
+    vertexShader: `
+      varying vec2 vUv;
+      void main() {
+        vUv = uv;
+        gl_Position = vec4(position.xy, 0.0, 1.0);
+      }
+    `,
+    fragmentShader: `
+      uniform sampler2D sampleTexture;
+      uniform float sampleWeight;
+      varying vec2 vUv;
+      #include <colorspace_pars_fragment>
+      void main() {
+        gl_FragColor = sRGBTransferEOTF(texture2D(sampleTexture, vUv)) * sampleWeight;
+      }
+    `,
+    transparent: true,
+    blending: THREE.CustomBlending,
+    blendEquation: THREE.AddEquation,
+    blendSrc: THREE.OneFactor,
+    blendDst: THREE.OneFactor,
+    blendEquationAlpha: THREE.AddEquation,
+    blendSrcAlpha: THREE.OneFactor,
+    blendDstAlpha: THREE.OneFactor,
+    depthTest: false,
+    depthWrite: false,
+    toneMapped: false,
+  })
+  private readonly accumulationQuad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), this.accumulationMaterial)
 
-  constructor(private readonly renderer: THREE.WebGLRenderer) {}
+  constructor(private readonly renderer: THREE.WebGLRenderer) {
+    this.accumulationScene.add(this.accumulationQuad)
+  }
 
   render(
     scene: THREE.Scene,
@@ -84,10 +129,74 @@ export class AuroraSceneRenderPipeline {
     return state.composer.readBuffer.texture
   }
 
+  /**
+   * Renders and averages complete post-processed samples while each one still owns the composer's
+   * transient output texture. The custom pass decodes sRGB before additive accumulation, leaving a
+   * linear texture for the hybrid compositor to transform exactly once when it reaches the screen.
+   */
+  renderMotionBlur(
+    sampleTimes: number[],
+    prepareSample: (time: number) => AuroraMotionBlurSample | null,
+    settings: Scene3DSettings,
+    width: number,
+    height: number,
+  ): THREE.Texture | null {
+    if (!sampleTimes.length) return null
+    this.ensureAccumulationTarget(width, height)
+    const target = this.accumulationTarget!
+    const previousTarget = this.renderer.getRenderTarget()
+    const previousClearColor = this.renderer.getClearColor(new THREE.Color())
+    const previousClearAlpha = this.renderer.getClearAlpha()
+
+    let rendered = 0
+    try {
+      this.renderer.setRenderTarget(target)
+      this.renderer.setClearColor(0x000000, 0)
+      this.renderer.clear(true, false, false)
+      this.accumulationMaterial.uniforms.sampleWeight!.value = 1 / sampleTimes.length
+
+      sampleTimes.forEach((sampleTime) => {
+        const sample = prepareSample(sampleTime)
+        if (!sample) return
+        const texture = this.render(sample.scene, sample.camera, settings, width, height, 'texture', sample.lens)
+        if (!texture) return
+        this.accumulationMaterial.uniforms.sampleTexture!.value = texture
+        this.renderer.setRenderTarget(target)
+        this.renderer.render(this.accumulationScene, this.accumulationCamera)
+        rendered += 1
+      })
+    } finally {
+      this.renderer.setRenderTarget(previousTarget)
+      this.renderer.setClearColor(previousClearColor, previousClearAlpha)
+    }
+
+    if (!rendered) return null
+    target.texture.colorSpace = THREE.NoColorSpace
+    return target.texture
+  }
+
+  private ensureAccumulationTarget(width: number, height: number) {
+    if (!this.accumulationTarget) {
+      this.accumulationTarget = new THREE.WebGLRenderTarget(width, height, {
+        depthBuffer: false,
+        stencilBuffer: false,
+        type: THREE.HalfFloatType,
+      })
+      this.accumulationTarget.texture.name = 'Aurora.MotionBlurAccumulation'
+      this.accumulationTarget.texture.colorSpace = THREE.NoColorSpace
+      this.accumulationTarget.texture.minFilter = THREE.LinearFilter
+      this.accumulationTarget.texture.magFilter = THREE.LinearFilter
+      return
+    }
+    if (this.accumulationTarget.width !== width || this.accumulationTarget.height !== height) {
+      this.accumulationTarget.setSize(width, height)
+    }
+  }
+
   private ensureState(scene: THREE.Scene, camera: THREE.Camera, width: number, height: number) {
     const perspective = camera instanceof THREE.PerspectiveCamera
     if (!this.state || this.state.perspective !== perspective) {
-      this.dispose()
+      this.disposeComposer()
       const composer = new EffectComposer(this.renderer)
       composer.renderToScreen = false
       const renderPass = new RenderPass(scene, camera)
@@ -113,6 +222,14 @@ export class AuroraSceneRenderPipeline {
   }
 
   dispose() {
+    this.disposeComposer()
+    this.accumulationTarget?.dispose()
+    this.accumulationTarget = null
+    this.accumulationQuad.geometry.dispose()
+    this.accumulationMaterial.dispose()
+  }
+
+  private disposeComposer() {
     if (!this.state) return
     this.state.gtaoPass.dispose()
     this.state.bokehPass.dispose()
