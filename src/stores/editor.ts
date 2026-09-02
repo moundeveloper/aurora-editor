@@ -401,6 +401,9 @@ export const useEditorStore = defineStore('editor', () => {
   const activeClusterId = ref<string | null>(null)
 
   interface EditorHistorySnapshot {
+    id: string
+    label: string
+    createdAt: number
     state: SerializedEditorState
     workspace: WorkspaceId
     currentTime: number
@@ -420,6 +423,7 @@ export const useEditorStore = defineStore('editor', () => {
   const canUndo = computed(() => undoStack.value.length > 0)
   const canRedo = computed(() => redoStack.value.length > 0)
   let historyPresent: EditorHistorySnapshot | null = null
+  let historySequence = 0
   let restoringHistory = false
   /**
    * Depth of in-flight viewport drags.
@@ -430,8 +434,11 @@ export const useEditorStore = defineStore('editor', () => {
    */
   let interactiveEdits = 0
 
-  function captureHistorySnapshot(): EditorHistorySnapshot {
+  function captureHistorySnapshot(label = 'Edit project'): EditorHistorySnapshot {
     return {
+      id: `history-${Date.now()}-${++historySequence}`,
+      label,
+      createdAt: Date.now(),
       state: JSON.parse(serializeEditorState(currentState())) as SerializedEditorState,
       workspace: workspace.value,
       currentTime: currentTime.value,
@@ -450,21 +457,64 @@ export const useEditorStore = defineStore('editor', () => {
   function resetEditorHistory() {
     undoStack.value = []
     redoStack.value = []
-    historyPresent = captureHistorySnapshot()
+    historyPresent = captureHistorySnapshot('Project opened')
   }
 
   function historySignature(snapshot: EditorHistorySnapshot) {
+    const { id: _id, label: _label, createdAt: _createdAt, ...content } = snapshot
     return JSON.stringify({
-      ...snapshot,
+      ...content,
       state: { ...snapshot.state, project: { ...snapshot.state.project, updatedAt: 0 } },
     })
   }
+
+  function layerCount(list: EditorLayer[]): number {
+    return list.reduce((count, layer) => count + 1 + layerCount(layer.children ?? []), 0)
+  }
+
+  function describeHistoryChange(previous: EditorHistorySnapshot, current: EditorHistorySnapshot) {
+    const before = previous.state
+    const after = current.state
+    const beforeLayers = layerCount(before.layers)
+    const afterLayers = layerCount(after.layers)
+    if (afterLayers > beforeLayers) return 'Add layer'
+    if (afterLayers < beforeLayers) return 'Delete layer'
+    if (after.assets.length > before.assets.length) return 'Import asset'
+    if (after.assets.length < before.assets.length) return 'Delete asset'
+    if (after.nodes.length > before.nodes.length) return 'Add node'
+    if (after.nodes.length < before.nodes.length) return 'Delete node'
+    if (after.nodeConnections.length > before.nodeConnections.length) return 'Connect nodes'
+    if (after.nodeConnections.length < before.nodeConnections.length) return 'Disconnect nodes'
+    if (after.scenes3D.length > before.scenes3D.length) return 'Add 3D scene'
+    if (after.scenes3D.length < before.scenes3D.length) return 'Delete 3D scene'
+    if (after.project.duration !== before.project.duration || after.project.width !== before.project.width
+      || after.project.height !== before.project.height || after.project.frameRate !== before.project.frameRate) return 'Change project settings'
+    const selected = findLayerDeep(after.layers, current.selectedLayerId ?? '')
+    return selected ? `Edit ${selected.name}` : `Edit ${current.workspace}`
+  }
+
+  const historyEntries = computed(() => {
+    const sequence = [
+      ...undoStack.value,
+      ...(historyPresent ? [historyPresent] : []),
+      ...[...redoStack.value].reverse(),
+    ]
+    return sequence.map((snapshot, index) => ({
+      id: snapshot.id,
+      label: snapshot.label,
+      createdAt: snapshot.createdAt,
+      workspace: snapshot.workspace,
+      current: snapshot.id === historyPresent?.id,
+      position: index,
+    }))
+  })
 
   function recordHistoryChange() {
     if (restoringHistory || interactiveEdits > 0) return
     const current = captureHistorySnapshot()
     if (historyPresent && historySignature(historyPresent) === historySignature(current)) return
     if (historyPresent) {
+      current.label = describeHistoryChange(historyPresent, current)
       const previousInEditingWorkspace = { ...historyPresent, workspace: current.workspace }
       undoStack.value = [...undoStack.value.slice(-99), previousInEditingWorkspace]
     }
@@ -521,7 +571,7 @@ export const useEditorStore = defineStore('editor', () => {
     undoStack.value = undoStack.value.slice(0, -1)
     redoStack.value = [...redoStack.value.slice(-99), current]
     restoreHistorySnapshot(target)
-    historyPresent = captureHistorySnapshot()
+    historyPresent = target
     scheduleProjectSave()
     return true
   }
@@ -533,7 +583,25 @@ export const useEditorStore = defineStore('editor', () => {
     redoStack.value = redoStack.value.slice(0, -1)
     undoStack.value = [...undoStack.value.slice(-99), current]
     restoreHistorySnapshot(target)
-    historyPresent = captureHistorySnapshot()
+    historyPresent = target
+    scheduleProjectSave()
+    return true
+  }
+
+  /** Restores any visible history state and rebuilds undo/redo around it. */
+  function jumpToHistory(id: string) {
+    const sequence = [
+      ...undoStack.value,
+      ...(historyPresent ? [historyPresent] : []),
+      ...[...redoStack.value].reverse(),
+    ]
+    const targetIndex = sequence.findIndex((snapshot) => snapshot.id === id)
+    if (targetIndex < 0) return false
+    const target = sequence[targetIndex]!
+    undoStack.value = sequence.slice(0, targetIndex)
+    redoStack.value = sequence.slice(targetIndex + 1).reverse()
+    restoreHistorySnapshot(target)
+    historyPresent = target
     scheduleProjectSave()
     return true
   }
@@ -2895,7 +2963,7 @@ export const useEditorStore = defineStore('editor', () => {
     frameCacheStatus, frameCacheFrames, frameCacheProjectId, frameCacheRevision, frameCacheScope,
     frameCacheProgress, frameCacheRange, frameCacheRequestId, frameCacheCancelId, frameCacheClearId,
     workspace, currentTime, playing, loop, autoKey, snap, ripple, selectedLayerId, selectedKeyframeId,
-    canUndo, canRedo, undo, redo, beginInteractiveEdit, endInteractiveEdit,
+    canUndo, canRedo, historyEntries, undo, redo, jumpToHistory, beginInteractiveEdit, endInteractiveEdit,
     selectedNodeId, selectedSceneId, selectedSceneEntityId, zoom, saveStatus, exportProgress, exportStatus, exportMessage, assets, layers, scenes3D,
     nodes, nodeConnections, selectedConnectionId, renderRootNodeId,
     rigs, selectedRigBoneId, selectedLayerRig, selected3DObjectRig, selectedRigBone,

@@ -2,7 +2,7 @@
 import { computed, defineAsyncComponent, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { storeToRefs } from 'pinia'
 import { useRoute, useRouter } from 'vue-router'
-import { Activity, CircleHelp, HardDrive, PanelBottomClose, PanelLeftClose, PanelRightClose, ShieldCheck } from '@lucide/vue'
+import { Activity, CircleHelp, HardDrive, History, PanelBottomClose, PanelLeftClose, PanelRightClose, ShieldCheck } from '@lucide/vue'
 import { useEditorStore } from '@/stores/editor'
 import TopBar from '@/components/TopBar.vue'
 import AssetPanel from '@/components/AssetPanel.vue'
@@ -15,6 +15,7 @@ import MaskEdgePanel from '@/components/MaskEdgePanel.vue'
 import AudioWorkspace from '@/components/AudioWorkspace.vue'
 import ExportWorkspace from '@/components/ExportWorkspace.vue'
 import ProjectBrowser from '@/components/ProjectBrowser.vue'
+import HistoryPanel from '@/components/HistoryPanel.vue'
 
 const ThreeDWorkspace = defineAsyncComponent(() => import('@/components/ThreeDWorkspace.vue'))
 const ThreeDPreviewPanel = defineAsyncComponent(() => import('@/components/ThreeDPreviewPanel.vue'))
@@ -33,6 +34,7 @@ const bottomHeight = ref(258)
 const leftOpen = ref(true)
 const rightOpen = ref(true)
 const bottomOpen = ref(true)
+const historyOpen = ref(false)
 const nodePreviewHeight = computed(() => Math.round(Math.max(120, (rightWidth.value - 28) * 9 / 16 + 50)))
 const maskEditorOpen = computed(() => workspace.value === 'Nodes' && nodes.value.some((node) => node.id === selectedNodeId.value && node.kind === 'mask'))
 const inspectorAvailable = computed(() => workspace.value !== 'Audio')
@@ -129,11 +131,14 @@ onBeforeUnmount(() => {
 
     <main v-else class="export-area"><ExportWorkspace /></main>
 
+    <HistoryPanel v-if="historyOpen" @close="historyOpen = false" />
+
     <footer class="status-bar">
       <div class="panel-toggles">
         <button type="button" :class="{ active: leftOpen }" title="Toggle asset browser" @click="leftOpen = !leftOpen"><PanelLeftClose :size="12" /></button>
         <button type="button" :class="{ active: bottomOpen }" title="Toggle timeline" @click="bottomOpen = !bottomOpen"><PanelBottomClose :size="12" /></button>
         <button v-if="inspectorAvailable" type="button" :class="{ active: rightOpen }" title="Toggle inspector" @click="rightOpen = !rightOpen"><PanelRightClose :size="12" /></button>
+        <button type="button" :class="{ active: historyOpen }" title="Toggle history" @click="historyOpen = !historyOpen"><History :size="12" /></button>
       </div>
       <span class="status-divider" />
       <span><ShieldCheck :size="11" /> Local-first</span>

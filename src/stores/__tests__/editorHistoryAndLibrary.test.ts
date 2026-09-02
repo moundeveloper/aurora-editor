@@ -25,6 +25,26 @@ describe('editor history and Library management', () => {
     expect(store.layers.some((item) => item.id === layer.id)).toBe(true)
   })
 
+  it('exposes named history states and can jump between them without discarding the future', () => {
+    const store = useEditorStore()
+    const initialCount = store.layers.length
+    store.addTimelineLayer('rectangle')
+    store.addTimelineLayer('text')
+
+    expect(store.historyEntries).toHaveLength(3)
+    expect(store.historyEntries.map((entry) => entry.label)).toEqual(['Project opened', 'Add layer', 'Add layer'])
+    const firstEdit = store.historyEntries[1]
+    expect(store.jumpToHistory(firstEdit.id)).toBe(true)
+    expect(store.layers).toHaveLength(initialCount + 1)
+    expect(store.historyEntries.find((entry) => entry.id === firstEdit.id)?.current).toBe(true)
+    expect(store.canRedo).toBe(true)
+
+    const latest = store.historyEntries.at(-1)!
+    expect(store.jumpToHistory(latest.id)).toBe(true)
+    expect(store.layers).toHaveLength(initialCount + 2)
+    expect(store.canRedo).toBe(false)
+  })
+
   it('creates and edits independently sized clusters while rejecting duplicate names', () => {
     const store = useEditorStore()
     const cluster = store.createEmptyCluster({ name: 'Portrait Cards', width: 1080, height: 1920 })!

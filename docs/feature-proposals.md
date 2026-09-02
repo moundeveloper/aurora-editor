@@ -24,6 +24,7 @@ seams in Aurora rather than generic wish-list entries.
 | P16 | Implemented | Keyframeable camera focus distance and f-stop drive the bokeh render pass. |
 | P18 | Partial | Solid and Rendered viewport modes exist; wireframe, matcap, X-ray, and overlays remain. |
 | P27 | Implemented | Revision-safe persistent RGBA frames, background range caching, replay, cancellation, and a timeline cache bar. |
+| P30 | Implemented | Named, workspace-aware undo states are visible in a compact panel and support non-destructive backward/forward jumps. |
 
 All proposals not listed here remain unimplemented.
 
