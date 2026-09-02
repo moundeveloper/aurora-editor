@@ -85,4 +85,26 @@ describe('editor history and Library management', () => {
     expect(layer.assetId).toBeUndefined()
     expect(store.assets.some((asset) => asset.id === 'asset-logo')).toBe(false)
   })
+
+  it('adds, edits, navigates, deletes, and undoes project timeline markers', () => {
+    const store = useEditorStore()
+    store.setTime(2)
+    const first = store.addTimelineMarker('Intro', '#a5b4fc')!
+    store.setTime(7)
+    const second = store.addTimelineMarker('Drop', '#69d49e')!
+
+    expect(store.timelineMarkers.map((marker) => marker.name)).toEqual(['Intro', 'Drop'])
+    store.setTime(4)
+    expect(store.jumpToAdjacentTimelineMarker(-1)).toBe(true)
+    expect(store.currentTime).toBe(2)
+    expect(store.jumpToAdjacentTimelineMarker(1)).toBe(true)
+    expect(store.currentTime).toBe(7)
+
+    expect(store.updateTimelineMarker(second.id, { name: 'Beat drop', time: 6 })).toBe(true)
+    expect(store.timelineMarkers[1]).toMatchObject({ id: second.id, name: 'Beat drop', time: 6 })
+    expect(store.deleteTimelineMarker(first.id)).toBe(true)
+    expect(store.timelineMarkers).toHaveLength(1)
+    expect(store.undo()).toBe(true)
+    expect(store.timelineMarkers.map((marker) => marker.id)).toContain(first.id)
+  })
 })

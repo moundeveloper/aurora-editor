@@ -75,6 +75,12 @@ export const editorProjectSchema = z.object({
   backgroundColor: z.string().min(1).max(64),
   updatedAt: z.number().int().nonnegative(),
   version: z.number().int().positive(),
+  markers: z.array(z.object({
+    id: z.string().min(1).max(256),
+    name: z.string().min(1).max(120),
+    time: z.number().nonnegative(),
+    color: z.string().regex(/^#[0-9a-fA-F]{6}$/),
+  })).default([]),
 })
 export type SharedEditorProject = z.infer<typeof editorProjectSchema>
 

@@ -374,6 +374,15 @@ export interface EditorProject {
   backgroundColor: string
   updatedAt: number
   version: number
+  /** Named composition cues shared by every timeline view. */
+  markers?: TimelineMarker[]
+}
+
+export interface TimelineMarker {
+  id: string
+  name: string
+  time: number
+  color: string
 }
 
 export interface SerializedEditorState {

@@ -6,8 +6,9 @@ import { createCameraObjectConstraint, makePathOffset, numericProperty } from '@
 import { createDemoNodeGraph, NODE_DEFINITIONS } from '@/engine/nodes/nodeGraph'
 import { normalizeCameraCuts } from '@/engine/scene3d/cameraCuts'
 import { MAX_RIG_CELLS, MIN_RIG_CELLS } from '@/engine/rig/rigMesh'
+import { normalizeTimelineMarkers } from '@/engine/animation/timelineMarkers'
 
-export const CURRENT_PROJECT_VERSION = 13
+export const CURRENT_PROJECT_VERSION = 14
 
 export interface EditorStateFallback {
   project: EditorProject
@@ -228,6 +229,7 @@ function pruneRigReferences(layers: EditorLayer[], scenes: Aurora3DScene[], rigs
 
 function cloneFallback(fallback: EditorStateFallback): SerializedEditorState {
   const state = clone(fallback)
+  state.project.markers = normalizeTimelineMarkers(state.project.markers, state.project.duration)
   const graph = normalizeNodeGraph(state.nodes, state.nodeConnections, state.layers)
   const scenes3D = state.scenes3D.map(normalizeScene)
   const rigs = normalizeRigs(state.rigs)
@@ -243,7 +245,11 @@ function sceneHasEntity(scene: Aurora3DScene, entityId: string) {
 
 export function serializeEditorState(state: SerializedEditorState): string {
   return JSON.stringify({
-    project: { ...state.project, version: CURRENT_PROJECT_VERSION },
+    project: {
+      ...state.project,
+      version: CURRENT_PROJECT_VERSION,
+      markers: normalizeTimelineMarkers(state.project.markers, state.project.duration),
+    },
     layers: state.layers,
     scenes3D: state.scenes3D,
     assets: state.assets.map((asset) => ({ ...asset, thumbnail: asset.thumbnail?.startsWith('blob:') ? undefined : asset.thumbnail })),
@@ -301,7 +307,11 @@ export function deserializeEditorState(raw: string | null, fallback: EditorState
     const rigs = normalizeRigs(clone(parsed.rigs ?? []))
     pruneRigReferences(layers, normalizedScenes, rigs)
     return {
-      project: { ...clone(parsed.project), version: CURRENT_PROJECT_VERSION },
+      project: {
+        ...clone(parsed.project),
+        version: CURRENT_PROJECT_VERSION,
+        markers: normalizeTimelineMarkers(parsed.project.markers, parsed.project.duration),
+      },
       ...(() => {
         const graph = normalizeNodeGraph(parsed.nodes, parsed.nodeConnections, layers, parsed.project.version ?? 1)
         return { nodes: clone(graph.nodes), nodeConnections: clone(graph.connections) }

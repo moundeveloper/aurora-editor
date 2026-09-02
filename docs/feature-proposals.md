@@ -19,6 +19,7 @@ seams in Aurora rather than generic wish-list entries.
 | P3 | Implemented | glTF/GLB assets load as hierarchy-preserving, skeleton-safe model objects. |
 | P4 | Implemented | HDR/EXR radiance maps drive scene lighting and optional environment backgrounds. |
 | P7 | Implemented | 3D scenes use shutter-based subframe accumulation, scene and layer toggles, and quality-aware sample counts. |
+| P11 | Implemented | Named, coloured project markers persist, render on the ruler, snap timeline edits, and support previous/next navigation. |
 | P12 | Implemented | Modal G/R/S gestures support axes, typed values, snapping, framing, and local/global orientation. |
 | P15 | Partial | Spot lights and soft shadow controls exist; area lights and light linking remain. |
 | P16 | Implemented | Keyframeable camera focus distance and f-stop drive the bokeh render pass. |

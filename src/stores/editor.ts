@@ -5,7 +5,7 @@ import type {
   AnimatableProperty, Aurora3DObject, Aurora3DScene, AuroraCamera, AuroraInfluenceType, AuroraLight, AuroraRig, AuroraRigBone,
   AuroraObjectFollowOrientation, AuroraPathOrientation, AuroraPathPointMode,
   AuroraCameraCut, EditorLayer, EditorNode, EditorNodeConnection, EditorNodeKind, EditorProject,
-  MediaAsset, SerializedEditorState, ShapePathPoint, WorkspaceId,
+  MediaAsset, SerializedEditorState, ShapePathPoint, TimelineMarker, WorkspaceId,
 } from '@/models/editor'
 import { evaluateNumericProperty } from '@/engine/animation/evaluateProperty'
 import { ensureNumericKeyframe, setNumericPropertyAtTime, toggleNumericKeyframe } from '@/engine/animation/editNumericProperty'
@@ -25,6 +25,7 @@ import { normalizeCameraCuts, sortedCameraCuts } from '@/engine/scene3d/cameraCu
 import {
   canConnect, createDemoNodeGraph, createNode, NODE_DEFINITIONS, syncDynamicInputs, type ConnectionRequest,
 } from '@/engine/nodes/nodeGraph'
+import { adjacentTimelineMarker, DEFAULT_TIMELINE_MARKER_COLOR, normalizeTimelineMarkers } from '@/engine/animation/timelineMarkers'
 
 const property = (id: string, value: number): AnimatableProperty<number> => ({
   id,
@@ -85,6 +86,7 @@ export const useEditorStore = defineStore('editor', () => {
     backgroundColor: '#080b12',
     updatedAt: Date.now(),
     version: 3,
+    markers: [],
   })
   const makeProjectTransform = (prefix: string) => makeTransform(prefix, project.value.width / 2, project.value.height / 2)
   const availableProjects = ref<EditorProject[]>([])
@@ -750,6 +752,7 @@ export const useEditorStore = defineStore('editor', () => {
   }
 
   const selectedLayer = computed(() => findLayerDeep(layers.value, selectedLayerId.value ?? '') ?? timelineLayers.value[0] ?? layers.value[0])
+  const timelineMarkers = computed(() => project.value.markers ?? [])
   const selectedScene = computed(() => scenes3D.value.find((scene) => scene.id === selectedSceneId.value) ?? scenes3D.value[0])
   const selectedSceneEntity = computed(() => {
     const scene = selectedScene.value
@@ -792,6 +795,43 @@ export const useEditorStore = defineStore('editor', () => {
     currentTime.value = Math.max(0, Math.min(project.value.duration, value))
   }
 
+  function addTimelineMarker(name?: string, color = DEFAULT_TIMELINE_MARKER_COLOR, time = currentTime.value) {
+    const marker: TimelineMarker = {
+      id: crypto.randomUUID(),
+      name: name?.trim() || `Marker ${timelineMarkers.value.length + 1}`,
+      time,
+      color,
+    }
+    project.value.markers = normalizeTimelineMarkers([...timelineMarkers.value, marker], project.value.duration)
+    markChanged()
+    return project.value.markers.find((item) => item.id === marker.id) ?? null
+  }
+
+  function updateTimelineMarker(id: string, patch: Partial<Pick<TimelineMarker, 'name' | 'time' | 'color'>>) {
+    const marker = timelineMarkers.value.find((item) => item.id === id)
+    if (!marker) return false
+    const next = normalizeTimelineMarkers([{ ...marker, ...patch }], project.value.duration)[0]
+    if (!next) return false
+    Object.assign(marker, next)
+    project.value.markers = [...timelineMarkers.value].sort((left, right) => left.time - right.time || left.name.localeCompare(right.name))
+    markChanged()
+    return true
+  }
+
+  function deleteTimelineMarker(id: string) {
+    if (!timelineMarkers.value.some((marker) => marker.id === id)) return false
+    project.value.markers = timelineMarkers.value.filter((marker) => marker.id !== id)
+    markChanged()
+    return true
+  }
+
+  function jumpToAdjacentTimelineMarker(direction: -1 | 1) {
+    const marker = adjacentTimelineMarker(timelineMarkers.value, currentTime.value, direction, (0.5 / project.value.frameRate) + 0.0001)
+    if (!marker) return false
+    setTime(marker.time)
+    return true
+  }
+
   function stepFrame(direction: -1 | 1) {
     setTime(currentTime.value + direction / project.value.frameRate)
   }
@@ -805,6 +845,7 @@ export const useEditorStore = defineStore('editor', () => {
     const minimum = 1 / project.value.frameRate
     project.value.duration = Math.max(minimum, Math.min(86400, Number.isFinite(value) ? value : project.value.duration))
     currentTime.value = Math.min(currentTime.value, project.value.duration)
+    project.value.markers = normalizeTimelineMarkers(project.value.markers, project.value.duration)
     markChanged()
   }
 
@@ -2962,7 +3003,7 @@ export const useEditorStore = defineStore('editor', () => {
     project, availableProjects, projectBrowserBusy, projectBrowserError, renderRevision,
     frameCacheStatus, frameCacheFrames, frameCacheProjectId, frameCacheRevision, frameCacheScope,
     frameCacheProgress, frameCacheRange, frameCacheRequestId, frameCacheCancelId, frameCacheClearId,
-    workspace, currentTime, playing, loop, autoKey, snap, ripple, selectedLayerId, selectedKeyframeId,
+    workspace, currentTime, playing, loop, autoKey, snap, ripple, selectedLayerId, selectedKeyframeId, timelineMarkers,
     canUndo, canRedo, historyEntries, undo, redo, jumpToHistory, beginInteractiveEdit, endInteractiveEdit,
     selectedNodeId, selectedSceneId, selectedSceneEntityId, zoom, saveStatus, exportProgress, exportStatus, exportMessage, assets, layers, scenes3D,
     nodes, nodeConnections, selectedConnectionId, renderRootNodeId,
@@ -2974,7 +3015,7 @@ export const useEditorStore = defineStore('editor', () => {
     setNodeSource, setNodeSocketValue, setNodeProperty, toggleNodeMuted, setRenderRootNode,
     ensureMaskSegments, setMaskSegmentFeather, setMaskSegmentFeatherAll, selectedMaskSegment,
     selectedLayer, selectedScene, selectedSceneEntity,
-    togglePlayback, setTime, stepFrame, setProjectDuration, addKeyframe, setLayerValue, addFiles,
+    togglePlayback, setTime, stepFrame, setProjectDuration, addTimelineMarker, updateTimelineMarker, deleteTimelineMarker, jumpToAdjacentTimelineMarker, addKeyframe, setLayerValue, addFiles,
     deleteMediaAsset, mediaAssetReferenceCount,
     importFailures, draggingAssetId, addAssetToTimeline, addGeneratedLayer, addPathLayer, addTimelineLayer, reorderTrack, moveSegmentToTrack, moveSegmentToNewTrack, addEmptyTrack, rippleTrackSegments,
     renameTimelineLayers, setTimelineLayersVisible, deleteTimelineLayers,

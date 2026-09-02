@@ -58,6 +58,17 @@ describe('hybrid project architecture', () => {
     expect(restored.nodes.map((node) => node.kind)).toEqual(['output'])
   })
 
+  it('round-trips named timeline markers and backfills old projects with none', () => {
+    const state: SerializedEditorState = {
+      project: { ...project, markers: [{ id: 'reveal', name: 'Title reveal', time: 3.5, color: '#a5b4fc' }] },
+      layers, scenes3D: [], assets: [], rigs: [], ...createDemoNodeGraph2(),
+    }
+
+    expect(deserializeEditorState(serializeEditorState(state), state).project.markers).toEqual(state.project.markers)
+    const legacy = JSON.stringify({ ...state, project: { ...project, version: 13 } })
+    expect(deserializeEditorState(legacy, state).project.markers).toEqual([])
+  })
+
   it('migrates a version-one project with the demo 3D scene and layer', () => {
     const fallback: SerializedEditorState = { project, layers, scenes3D: [createDemo3DScene()], assets: [], ...createDemoNodeGraph2() }
     const legacy = JSON.stringify({ project: { ...project, version: 1 }, layers: [layers[0]] })
@@ -225,12 +236,16 @@ describe('hybrid project architecture', () => {
     const scene = createDemo3DScene()
     scene.objects[0]!.transform.position.x.value = 3.75
     scene.cameras[0]!.transform.rotation.y.value = 22
-    const state: SerializedEditorState = { project, layers, scenes3D: [scene], assets: [], ...createDemoNodeGraph2() }
+    const state: SerializedEditorState = {
+      project: { ...project, markers: [{ id: 'middle', name: 'Middle', time: 9, color: '#8c9bff' }] },
+      layers, scenes3D: [scene], assets: [], ...createDemoNodeGraph2(),
+    }
     await database.saveSnapshot(state)
     const restored = await database.loadActiveSnapshot()
     expect(restored?.layers.map((layer) => layer.id)).toEqual(layers.map((layer) => layer.id))
     expect(restored?.scenes3D[0]?.objects[0]?.transform.position.x.value).toBe(3.75)
     expect(restored?.scenes3D[0]?.cameras[0]?.transform.rotation.y.value).toBe(22)
+    expect(restored?.project.markers).toEqual(state.project.markers)
     expect(await database.projects.count()).toBe(1)
     expect(await database.layers.count()).toBe(layers.length)
     expect(await database.scenes3D.count()).toBe(1)
