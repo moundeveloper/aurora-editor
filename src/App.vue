@@ -16,6 +16,7 @@ import AudioWorkspace from '@/components/AudioWorkspace.vue'
 import ExportWorkspace from '@/components/ExportWorkspace.vue'
 import ProjectBrowser from '@/components/ProjectBrowser.vue'
 import HistoryPanel from '@/components/HistoryPanel.vue'
+import CommandPalette from '@/components/CommandPalette.vue'
 
 const ThreeDWorkspace = defineAsyncComponent(() => import('@/components/ThreeDWorkspace.vue'))
 const ThreeDPreviewPanel = defineAsyncComponent(() => import('@/components/ThreeDPreviewPanel.vue'))
@@ -35,6 +36,7 @@ const leftOpen = ref(true)
 const rightOpen = ref(true)
 const bottomOpen = ref(true)
 const historyOpen = ref(false)
+const commandPaletteOpen = ref(false)
 const nodePreviewHeight = computed(() => Math.round(Math.max(120, (rightWidth.value - 28) * 9 / 16 + 50)))
 const maskEditorOpen = computed(() => workspace.value === 'Nodes' && nodes.value.some((node) => node.id === selectedNodeId.value && node.kind === 'mask'))
 const inspectorAvailable = computed(() => workspace.value !== 'Audio')
@@ -67,13 +69,11 @@ function stopResize() {
   delete document.body.dataset.resize
 }
 
-function onKeydown(event: KeyboardEvent) {
-  if (homeOpen.value) return
-  if ((event.target as HTMLElement)?.matches('input, textarea')) return
-  if (event.code === 'Space') { event.preventDefault(); store.togglePlayback() }
-  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'b') { event.preventDefault(); store.splitSelectedLayer() }
-  if (event.key === 'ArrowLeft') store.stepFrame(-1)
-  if (event.key === 'ArrowRight') store.stepFrame(1)
+function togglePanel(panel: 'left' | 'right' | 'bottom' | 'history') {
+  if (panel === 'left') leftOpen.value = !leftOpen.value
+  if (panel === 'right') rightOpen.value = !rightOpen.value
+  if (panel === 'bottom') bottomOpen.value = !bottomOpen.value
+  if (panel === 'history') historyOpen.value = !historyOpen.value
 }
 
 watch(() => route.params.projectId, async (projectId) => {
@@ -84,19 +84,18 @@ watch(() => route.params.projectId, async (projectId) => {
 onMounted(() => {
   window.addEventListener('pointermove', resize)
   window.addEventListener('pointerup', stopResize)
-  window.addEventListener('keydown', onKeydown)
 })
 onBeforeUnmount(() => {
   window.removeEventListener('pointermove', resize)
   window.removeEventListener('pointerup', stopResize)
-  window.removeEventListener('keydown', onKeydown)
 })
 </script>
 
 <template>
   <ProjectBrowser v-if="homeOpen" />
   <div v-else class="app-shell" :style="layoutStyle">
-    <TopBar />
+    <TopBar @open-command-palette="commandPaletteOpen = true" />
+    <CommandPalette v-model:open="commandPaletteOpen" @toggle-panel="togglePanel" />
 
     <main v-if="workspace !== 'Export'" class="workspace-shell">
       <div class="upper-workspace" :class="{ 'no-right-pane': !inspectorVisible }">
