@@ -3,11 +3,19 @@ import { HybridWebGLRenderBackend, type HybridRendererStats } from '@/engine/ren
 import type {
   RenderBackend, RenderFrameRequest, RendererInitializationOptions, RenderSurface,
 } from '@/engine/rendering/contracts'
+import { auroraFrameCache, frameCacheAddress, type FrameCacheAddress, type FrameCacheStore } from '@/engine/rendering/frameCache'
+
+export interface AuroraFrameCacheEvent extends FrameCacheAddress {
+  hit: boolean
+}
 
 export interface AuroraFrameEngineOptions {
   targetFrameMs?: number
   adaptiveQuality?: boolean
   backendFactory?: (canvas: HTMLCanvasElement, sourceUrl: string) => RenderBackend
+  /** False disables persistent frame caching; a custom store keeps tests and embedded renderers isolated. */
+  frameCache?: FrameCacheStore | false
+  onFrameCached?: (event: AuroraFrameCacheEvent) => void
 }
 
 export interface AuroraEngineStats extends HybridRendererStats {
@@ -18,6 +26,7 @@ export interface AuroraEngineStats extends HybridRendererStats {
   graphPasses: number
   uniqueSources: number
   effectiveQuality: RenderFrameRequest['quality']
+  frameCacheHit: boolean
 }
 
 interface PendingFrame {
@@ -42,6 +51,8 @@ export class AuroraFrameEngine {
   private readonly backend: RenderBackend
   private readonly targetFrameMs: number
   private readonly adaptiveQuality: boolean
+  private readonly frameCache: FrameCacheStore | null
+  private readonly onFrameCached?: (event: AuroraFrameCacheEvent) => void
   private pending: PendingFrame | null = null
   private running = false
   private draining: Promise<void> | null = null
@@ -58,10 +69,15 @@ export class AuroraFrameEngine {
     this.targetFrameMs = options.targetFrameMs ?? 16.7
     this.adaptiveQuality = options.adaptiveQuality ?? true
     this.backend = options.backendFactory?.(canvas, sourceUrl) ?? new HybridWebGLRenderBackend(canvas, sourceUrl)
+    this.frameCache = options.frameCache === false
+      ? null
+      : options.frameCache ?? (typeof indexedDB === 'undefined' ? null : auroraFrameCache)
+    this.onFrameCached = options.onFrameCached
     this.stats = {
       ...emptyBackendStats(canvas.width, canvas.height), cpuFrameMs: 0, averageFrameMs: 0,
       droppedRequests: 0, graphCacheHit: false, graphPasses: 0, uniqueSources: 0,
       effectiveQuality: 'preview',
+      frameCacheHit: false,
     }
   }
 
@@ -113,7 +129,32 @@ export class AuroraFrameEngine {
       ? 'draft'
       : request.quality
     const started = performance.now()
-    const surface = await this.backend.renderFrame({ ...request, quality: effectiveQuality, compiledPlan: graph.renderPlan })
+    const address = frameCacheAddress(request, effectiveQuality)
+    let frameCacheHit = false
+    let surface: RenderSurface | null = null
+    if (this.frameCache && this.backend.presentPixels) {
+      try {
+        const cached = await this.frameCache.get(address)
+        if (cached) {
+          surface = await this.backend.presentPixels(cached)
+          frameCacheHit = true
+        }
+      } catch {
+        // Cache corruption or storage denial must never blank the renderer.
+      }
+    }
+    if (!surface) {
+      surface = await this.backend.renderFrame({ ...request, quality: effectiveQuality, compiledPlan: graph.renderPlan })
+      const pixels = this.frameCache && request.cacheWrite ? this.backend.readPixels?.() : null
+      if (this.frameCache && pixels) {
+        try {
+          await this.frameCache.put({ ...address, ...pixels })
+        } catch {
+          // Quota pressure degrades to uncached rendering.
+        }
+      }
+    }
+    if (frameCacheHit || request.cacheWrite) this.onFrameCached?.({ ...address, hit: frameCacheHit })
     const elapsed = performance.now() - started
     this.averageFrameMs = this.averageFrameMs ? this.averageFrameMs * .88 + elapsed * .12 : elapsed
     if (interactive && this.adaptiveQuality && request.quality === 'preview') this.updateAdaptiveQuality()
@@ -130,6 +171,7 @@ export class AuroraFrameEngine {
       graphPasses: graph.logicalPasses,
       uniqueSources: graph.uniqueSources,
       effectiveQuality,
+      frameCacheHit,
     }
     return surface
   }

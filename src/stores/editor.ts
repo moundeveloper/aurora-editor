@@ -170,7 +170,71 @@ export const useEditorStore = defineStore('editor', () => {
   let saveTimer: number | null = null
   let changeRevision = 0
   const renderRevision = ref(0)
+  const frameCacheStatus = ref<'idle' | 'caching' | 'ready' | 'cancelled' | 'error'>('idle')
+  const frameCacheFrames = ref<number[]>([])
+  const frameCacheProjectId = ref('')
+  const frameCacheRevision = ref(-1)
+  const frameCacheScope = ref('project')
+  const frameCacheProgress = ref({ completed: 0, total: 0 })
+  const frameCacheRange = ref({ start: 0, end: 0 })
+  const frameCacheRequestId = ref(0)
+  const frameCacheCancelId = ref(0)
+  const frameCacheClearId = ref(0)
   let saveQueue: Promise<void> = Promise.resolve()
+
+  function resetFrameCacheDisplay() {
+    frameCacheStatus.value = 'idle'
+    frameCacheFrames.value = []
+    frameCacheProjectId.value = ''
+    frameCacheRevision.value = -1
+    frameCacheScope.value = 'project'
+    frameCacheProgress.value = { completed: 0, total: 0 }
+  }
+
+  function requestFrameCacheRange(start: number, end: number) {
+    frameCacheRange.value = { start: Math.max(0, start), end: Math.max(start, end) }
+    frameCacheRequestId.value += 1
+  }
+
+  function cancelFrameCache() {
+    frameCacheCancelId.value += 1
+    if (frameCacheStatus.value === 'caching') frameCacheStatus.value = 'cancelled'
+  }
+
+  function requestFrameCacheClear() {
+    frameCacheClearId.value += 1
+  }
+
+  function beginFrameCache(projectId: string, revision: number, scope: string, total: number) {
+    frameCacheStatus.value = 'caching'
+    frameCacheProgress.value = { completed: 0, total }
+    if (frameCacheProjectId.value !== projectId || frameCacheRevision.value !== revision || frameCacheScope.value !== scope) {
+      frameCacheFrames.value = []
+      frameCacheProjectId.value = projectId
+      frameCacheRevision.value = revision
+      frameCacheScope.value = scope
+    }
+  }
+
+  function recordFrameCached(event: { projectId: string; revision: number; scope: string; frame: number }) {
+    if (frameCacheProjectId.value !== event.projectId || frameCacheRevision.value !== event.revision || frameCacheScope.value !== event.scope) {
+      frameCacheFrames.value = []
+      frameCacheProjectId.value = event.projectId
+      frameCacheRevision.value = event.revision
+      frameCacheScope.value = event.scope
+    }
+    if (!frameCacheFrames.value.includes(event.frame)) {
+      frameCacheFrames.value = [...frameCacheFrames.value, event.frame].sort((left, right) => left - right)
+    }
+  }
+
+  function updateFrameCacheProgress(completed: number, total: number) {
+    frameCacheProgress.value = { completed, total }
+  }
+
+  function finishFrameCache(status: 'ready' | 'cancelled' | 'error' = 'ready') {
+    frameCacheStatus.value = status
+  }
 
   function applyLoadedState(state: SerializedEditorState) {
     const addedStarterTracks = state.layers.length === 0
@@ -209,6 +273,7 @@ export const useEditorStore = defineStore('editor', () => {
     activeClusterId.value = null
     resetEditorHistory()
     renderRevision.value += 1
+    resetFrameCacheDisplay()
     return addedStarterTracks
   }
 
@@ -2827,6 +2892,8 @@ export const useEditorStore = defineStore('editor', () => {
 
   return {
     project, availableProjects, projectBrowserBusy, projectBrowserError, renderRevision,
+    frameCacheStatus, frameCacheFrames, frameCacheProjectId, frameCacheRevision, frameCacheScope,
+    frameCacheProgress, frameCacheRange, frameCacheRequestId, frameCacheCancelId, frameCacheClearId,
     workspace, currentTime, playing, loop, autoKey, snap, ripple, selectedLayerId, selectedKeyframeId,
     canUndo, canRedo, undo, redo, beginInteractiveEdit, endInteractiveEdit,
     selectedNodeId, selectedSceneId, selectedSceneEntityId, zoom, saveStatus, exportProgress, exportStatus, exportMessage, assets, layers, scenes3D,
@@ -2847,6 +2914,8 @@ export const useEditorStore = defineStore('editor', () => {
     openClusterTabs, activeClusterId, activeCluster, timelineLayers, clusterTabs,
     enterCluster, activateTimelineTab, closeClusterTab, fitClusterToChildren, publishClusterAsset, ensureClusterAssets, dedupeCompositionAssets,
     splitLayerAt, splitSelectedLayer, markChanged, saveProjectNow, flushProjectSave, initializePersistence,
+    requestFrameCacheRange, cancelFrameCache, requestFrameCacheClear, beginFrameCache,
+    recordFrameCached, updateFrameCacheProgress, finishFrameCache, resetFrameCacheDisplay,
     refreshProjects, openProject, createEmptyProject, setProjectFormat, setWorkspace, create3DSceneFromWorkspace, exportVideo, exportGif, cancelExport,
     publish3DSceneAsset, ensure3DSceneAssets,
     selectSceneEntity, select3DLayer, markSceneChanged, add3DPrimitive, add3DGroup, ungroup3DObject, add3DImagePlane, add3DModel, add3DLight, add3DCamera, set3DEntityTransform,

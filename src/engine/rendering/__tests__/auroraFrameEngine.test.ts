@@ -5,6 +5,7 @@ import { AuroraResourcePool } from '@/engine/rendering/AuroraResourcePool'
 import { createDemoNodeGraph } from '@/engine/nodes/nodeGraph'
 import type { EditorLayer, EditorProject } from '@/models/editor'
 import type { RenderBackend, RenderFrameRequest, RendererInitializationOptions, RenderSurface } from '@/engine/rendering/contracts'
+import type { FrameCacheAddress, FrameCacheEntry, FrameCacheStore } from '@/engine/rendering/frameCache'
 
 const project: EditorProject = {
   id: 'engine-test', name: 'Engine Test', width: 1920, height: 1080, frameRate: 60,
@@ -71,6 +72,7 @@ describe('Aurora frame scheduling', () => {
     const backend = new DeferredBackend()
     const engine = new AuroraFrameEngine({ width: 1280, height: 720 } as HTMLCanvasElement, '', {
       adaptiveQuality: false,
+      frameCache: false,
       backendFactory: () => backend,
     })
 
@@ -83,6 +85,54 @@ describe('Aurora frame scheduling', () => {
 
     expect(backend.renderedTimes).toEqual([0, 2])
     expect(engine.getStats().droppedRequests).toBe(1)
+    await engine.dispose()
+  })
+})
+
+class MemoryFrameCache implements FrameCacheStore {
+  frames = new Map<string, FrameCacheEntry>()
+  async get(address: FrameCacheAddress) { return this.frames.get(address.key) ?? null }
+  async put(entry: FrameCacheEntry) { this.frames.set(entry.key, entry) }
+  async clearProject(projectId: string) {
+    this.frames.forEach((entry, key) => { if (entry.projectId === projectId) this.frames.delete(key) })
+  }
+}
+
+class CacheBackend implements RenderBackend {
+  renders = 0
+  presentations = 0
+  initialize() { return Promise.resolve() }
+  resize() {}
+  async renderFrame(frame: RenderFrameRequest): Promise<RenderSurface> {
+    this.renders += 1
+    return { width: frame.width, height: frame.height, backend: 'pixi-webgl', texture: null, premultipliedAlpha: true, colorSpace: 'srgb' }
+  }
+  readPixels() { return { width: 1280, height: 720, data: new Uint8ClampedArray(1280 * 720 * 4) } }
+  presentPixels(frame: { width: number; height: number }) {
+    this.presentations += 1
+    return { ...frame, backend: 'pixi-webgl' as const, texture: null, premultipliedAlpha: true, colorSpace: 'srgb' as const }
+  }
+  dispose() { return Promise.resolve() }
+}
+
+describe('Aurora persistent frame caching', () => {
+  it('renders once and presents the cached pixels for the same frame key', async () => {
+    const backend = new CacheBackend()
+    const cache = new MemoryFrameCache()
+    const events: boolean[] = []
+    const engine = new AuroraFrameEngine({ width: 1280, height: 720 } as HTMLCanvasElement, '', {
+      adaptiveQuality: false,
+      frameCache: cache,
+      onFrameCached: (event) => events.push(event.hit),
+      backendFactory: () => backend,
+    })
+    await engine.renderImmediate({ ...request(2), cacheWrite: true })
+    await engine.renderImmediate(request(2))
+
+    expect(backend.renders).toBe(1)
+    expect(backend.presentations).toBe(1)
+    expect(events).toEqual([false, true])
+    expect(engine.getStats().frameCacheHit).toBe(true)
     await engine.dispose()
   })
 })

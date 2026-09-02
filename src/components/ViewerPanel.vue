@@ -16,7 +16,12 @@ import { poseOffsetTowards, poseRotationTowards, restAimTowards } from '@/engine
 import IconButton from './common/IconButton.vue'
 
 const store = useEditorStore()
-const { project, currentTime, playing, loop, snap, zoom, activeClusterId, timelineLayers, assets, scenes3D, nodes, nodeConnections, renderRootNodeId, renderRevision, rigs, selectedRigBoneId, selectedLayer, selectedLayerId, selectedKeyframeId } = storeToRefs(store)
+const {
+  project, currentTime, playing, loop, snap, zoom, activeClusterId, timelineLayers, assets, scenes3D,
+  nodes, nodeConnections, renderRootNodeId, renderRevision, rigs, selectedRigBoneId, selectedLayer,
+  selectedLayerId, selectedKeyframeId, frameCacheRequestId, frameCacheCancelId, frameCacheClearId,
+  frameCacheRange,
+} = storeToRefs(store)
 const canvas = ref<HTMLCanvasElement>()
 const canvasWrap = ref<HTMLElement>()
 const transformBox = ref<HTMLElement>()
@@ -30,6 +35,9 @@ const viewportSize = ref({ width: 0, height: 0 })
 const viewportPan = ref({ x: 0, y: 0 })
 const isViewportPanning = ref(false)
 let renderer: AuroraFrameEngine | null = null
+let cacheRenderer: AuroraFrameEngine | null = null
+let cacheAbort: AbortController | null = null
+let cacheRun: Promise<void> | null = null
 let resizeObserver: ResizeObserver | null = null
 
 interface ShapeDrawState {
@@ -348,33 +356,111 @@ function endRigDrag() {
   store.endInteractiveEdit()
 }
 
-async function drawNow() {
-  if (!renderer) return
+function currentCacheScope() {
+  return activeClusterId.value ? `cluster:${activeClusterId.value}` : 'project'
+}
+
+function renderRequest(time: number, playback: boolean) {
   // A cluster tab is an isolated composition context. Its children are authored in project time,
   // so they keep the same playhead value, but the root node graph must not pull sibling layers
   // back into the frame while the user is editing inside the cluster.
   const editingCluster = Boolean(activeClusterId.value)
+  return {
+    project: project.value,
+    layers: timelineLayers.value,
+    scenes3D: scenes3D.value,
+    assets: assets.value,
+    nodes: editingCluster ? [] : nodes.value,
+    nodeConnections: editingCluster ? [] : nodeConnections.value,
+    renderRootNodeId: editingCluster ? null : renderRootNodeId.value,
+    revision: renderRevision.value,
+    cacheScope: currentCacheScope(),
+    cacheVersion: store.saveStatus === 'Saved' ? 'saved' : `edit:${renderRevision.value}`,
+    rigs: rigs.value,
+    time,
+    playback,
+    width: previewRenderSize.value.width,
+    height: previewRenderSize.value.height,
+    quality: 'preview' as const,
+  }
+}
+
+async function drawNow() {
+  if (!renderer) return
   try {
-    await renderer.requestFrame({
-      project: project.value,
-      layers: timelineLayers.value,
-      scenes3D: scenes3D.value,
-      assets: assets.value,
-      nodes: editingCluster ? [] : nodes.value,
-      nodeConnections: editingCluster ? [] : nodeConnections.value,
-      renderRootNodeId: editingCluster ? null : renderRootNodeId.value,
-      revision: renderRevision.value,
-      rigs: rigs.value,
-      time: currentTime.value,
-      playback: playing.value,
-      width: previewRenderSize.value.width,
-      height: previewRenderSize.value.height,
-      quality: 'preview',
-    })
+    await renderer.requestFrame(renderRequest(currentTime.value, playing.value))
   } catch {
     // A dropped preview frame must never break viewport interaction.
   }
 }
+
+async function buildFrameCacheRange() {
+  const previousRun = cacheRun
+  cacheAbort?.abort()
+  await previousRun?.catch(() => undefined)
+  await store.flushProjectSave()
+
+  const controller = new AbortController()
+  cacheAbort = controller
+  const revision = renderRevision.value
+  const scope = currentCacheScope()
+  const frameRate = Math.max(1, project.value.frameRate)
+  const startFrame = Math.max(0, Math.ceil(frameCacheRange.value.start * frameRate))
+  const finalProjectFrame = Math.max(0, Math.ceil(project.value.duration * frameRate) - 1)
+  const endFrame = Math.min(finalProjectFrame, Math.floor(frameCacheRange.value.end * frameRate))
+  const total = Math.max(0, endFrame - startFrame + 1)
+  if (!total) return
+
+  const snapshot = JSON.parse(JSON.stringify(renderRequest(0, false))) as ReturnType<typeof renderRequest>
+  const detachedCanvas = document.createElement('canvas')
+  detachedCanvas.width = snapshot.width
+  detachedCanvas.height = snapshot.height
+  const { AuroraFrameEngine } = await import('@/engine/rendering/AuroraFrameEngine')
+  const backgroundRenderer = new AuroraFrameEngine(detachedCanvas, '/demo/aurora-ridge.png', {
+    adaptiveQuality: false,
+    onFrameCached: store.recordFrameCached,
+  })
+  cacheRenderer = backgroundRenderer
+  store.beginFrameCache(snapshot.project.id, revision, scope, total)
+
+  try {
+    await backgroundRenderer.initialize({ width: snapshot.width, height: snapshot.height, pixelRatio: 1 })
+    for (let frame = startFrame; frame <= endFrame; frame += 1) {
+      if (controller.signal.aborted || revision !== renderRevision.value || scope !== currentCacheScope()) {
+        store.finishFrameCache('cancelled')
+        return
+      }
+      await backgroundRenderer.renderImmediate({ ...snapshot, time: frame / frameRate, cacheWrite: true })
+      store.updateFrameCacheProgress(frame - startFrame + 1, total)
+      await new Promise((resolve) => { setTimeout(resolve, 0) })
+    }
+    store.finishFrameCache('ready')
+  } catch {
+    store.finishFrameCache(controller.signal.aborted ? 'cancelled' : 'error')
+  } finally {
+    await backgroundRenderer.dispose()
+    detachedCanvas.width = 0
+    detachedCanvas.height = 0
+    if (cacheRenderer === backgroundRenderer) cacheRenderer = null
+    if (cacheAbort === controller) cacheAbort = null
+  }
+}
+
+watch(frameCacheRequestId, () => {
+  const run = buildFrameCacheRange()
+  cacheRun = run
+  void run.finally(() => { if (cacheRun === run) cacheRun = null }).catch(() => undefined)
+})
+
+watch(frameCacheCancelId, () => { cacheAbort?.abort() })
+
+watch(frameCacheClearId, async () => {
+  cacheAbort?.abort()
+  await cacheRun?.catch(() => undefined)
+  const { auroraFrameCache } = await import('@/engine/rendering/frameCache')
+  await auroraFrameCache.clearProject(project.value.id)
+  store.resetFrameCacheDisplay()
+})
 
 /** Brush strokes and drags can outpace rendering; the engine keeps only the newest queued frame. */
 function draw() {
@@ -719,7 +805,7 @@ onMounted(async () => {
   await nextTick()
   if (!canvas.value) return
   const { AuroraFrameEngine } = await import('@/engine/rendering/AuroraFrameEngine')
-  renderer = new AuroraFrameEngine(canvas.value, '/demo/aurora-ridge.png')
+  renderer = new AuroraFrameEngine(canvas.value, '/demo/aurora-ridge.png', { onFrameCached: store.recordFrameCached })
   await renderer.initialize({ ...previewRenderSize.value, pixelRatio: 1 })
   if (canvasWrap.value) {
     resizeObserver = new ResizeObserver(([entry]) => {
@@ -742,6 +828,7 @@ onBeforeUnmount(() => {
   window.removeEventListener('pointercancel', endViewportTransform)
   window.removeEventListener('keydown', onViewerKeydown)
   void renderer?.dispose()
+  cacheAbort?.abort()
   renderer = null
 })
 

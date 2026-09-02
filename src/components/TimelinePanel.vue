@@ -19,6 +19,8 @@ const store = useEditorStore()
 const {
   project, currentTime, layers, timelineLayers, clusterTabs, activeClusterId,
   selectedLayer, selectedLayerId, selectedKeyframeId, autoKey, snap, ripple, workspace, draggingAssetId,
+  renderRevision, frameCacheStatus, frameCacheFrames, frameCacheProjectId, frameCacheRevision,
+  frameCacheScope, frameCacheProgress,
 } = storeToRefs(store)
 const activeBottomTab = ref('Timeline')
 const timelineZoom = ref(100)
@@ -48,6 +50,46 @@ const trackDialog = ref<{ mode: 'rename' | 'delete'; scope: 'track' | 'clips'; l
 const trackRenameValue = ref('')
 const clusterDialog = ref<{ mode: 'create' | 'edit'; assetId?: string; name: string; width: number; height: number } | null>(null)
 const tabs = ['Timeline', 'Graph Editor', 'Audio Mixer', 'Scopes']
+
+const activeCacheScope = computed(() => activeClusterId.value ? `cluster:${activeClusterId.value}` : 'project')
+const visibleCachedFrames = computed(() => (
+  frameCacheProjectId.value === project.value.id
+  && frameCacheRevision.value === renderRevision.value
+  && frameCacheScope.value === activeCacheScope.value
+    ? frameCacheFrames.value
+    : []
+))
+const cacheSegments = computed(() => {
+  const frames = visibleCachedFrames.value
+  if (!frames.length) return []
+  const totalFrames = Math.max(1, Math.ceil(viewDuration.value * project.value.frameRate))
+  const segments: Array<{ start: number; end: number }> = []
+  frames.filter((frame) => frame < totalFrames).forEach((frame) => {
+    const previous = segments.at(-1)
+    if (previous && frame <= previous.end + 1) previous.end = frame
+    else segments.push({ start: frame, end: frame })
+  })
+  return segments.map((segment) => ({
+    left: `${(segment.start / totalFrames) * 100}%`,
+    width: `${((segment.end - segment.start + 1) / totalFrames) * 100}%`,
+  }))
+})
+const frameCacheLabel = computed(() => frameCacheStatus.value === 'caching'
+  ? `Cache ${frameCacheProgress.value.completed}/${frameCacheProgress.value.total}`
+  : visibleCachedFrames.value.length ? `Cached ${visibleCachedFrames.value.length}` : 'Cache 1s')
+
+function toggleFrameCache() {
+  if (frameCacheStatus.value === 'caching') {
+    store.cancelFrameCache()
+    return
+  }
+  const halfRange = .5
+  const centre = Math.max(0, Math.min(viewDuration.value, currentTime.value))
+  store.requestFrameCacheRange(
+    Math.max(0, centre - halfRange),
+    Math.min(viewDuration.value, centre + halfRange),
+  )
+}
 
 const layerPresets = [
   { kind: 'adjustment', label: 'Adjustment Layer', detail: 'Empty effects layer', icon: SlidersHorizontal, group: 'Effects' },
@@ -1190,6 +1232,8 @@ onBeforeUnmount(() => {
         <button class="toggle-control" type="button" :class="{ active: autoKey }" title="Automatically create or update a keyframe when an animatable value changes" @click="autoKey = !autoKey"><CircleDot :size="12" /> Auto Key</button>
         <button class="toggle-control" type="button" :class="{ active: snap }" title="Align timeline edits to frames and nearby edit points" @click="snap = !snap"><Magnet :size="12" /> Snap</button>
         <button class="toggle-control" type="button" :class="{ active: ripple }" title="Shift later clips when trimming a clip end or deleting clips" @click="ripple = !ripple"><Link2 :size="12" /> Ripple</button>
+        <button class="toggle-control cache-control" type="button" :class="{ active: frameCacheStatus === 'caching' || visibleCachedFrames.length }" :title="frameCacheStatus === 'caching' ? 'Cancel background frame caching' : 'Cache one second around the playhead in the background'" @click="toggleFrameCache"><Gauge :size="12" /> {{ frameCacheStatus === 'caching' ? 'Cancel' : frameCacheLabel }}</button>
+        <IconButton :icon="Trash2" label="Clear this project's persistent frame cache" @click="store.requestFrameCacheClear()" />
         <span class="divider" />
         <button class="timecode-button" type="button">00:00:{{ String(Math.floor(currentTime)).padStart(2, '0') }}:{{ String(Math.floor(currentTime % 1 * project.frameRate)).padStart(2, '0') }}</button>
         <label class="duration-control" title="Composition duration in seconds"><span>Duration</span><NumberField :model-value="project.duration" :min="1 / project.frameRate" :max="86400" :step=".5" label="Composition duration" @update:model-value="onDurationChange" /><small>s</small></label>
@@ -1221,6 +1265,7 @@ onBeforeUnmount(() => {
           <div class="time-ruler" @pointerdown="beginSeek">
             <span v-for="tick in ticks" :key="tick.time" :style="{ left: `${tick.fraction * 100}%` }"><i />{{ tick.label }}</span>
             <div class="work-area"><i /><i /></div>
+            <div class="frame-cache-bar" aria-label="Cached timeline frames"><i v-for="(segment, index) in cacheSegments" :key="index" :style="segment" /></div>
           </div>
         </div>
 
@@ -1371,7 +1416,9 @@ onBeforeUnmount(() => {
 .add-layer-control { position: relative; height: 25px; }.add-layer-trigger { color: #b8c1ee; background: rgb(140 155 255 / .06); border-color: rgb(140 155 255 / .2); }.add-layer-trigger:hover, .add-layer-trigger.active { color: #eef0ff; background: rgb(140 155 255 / .16); border-color: #6370ad; }.add-layer-menu { position: fixed; z-index: 400; width: 224px; overflow-y: auto; overscroll-behavior: contain; padding: 5px; background: #171920; border: 1px solid #3b3f4b; border-radius: 5px; box-shadow: 0 10px 26px rgb(0 0 0 / .48); }.add-layer-group { padding: 6px 7px 3px; color: #686f7e; font-size: 7px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }.add-layer-menu > button { display: grid; width: 100%; min-height: 34px; grid-template-columns: 22px 1fr; align-items: center; padding: 3px 6px; color: #9da5b7; background: transparent; border: 0; border-radius: 3px; font: inherit; text-align: left; cursor: pointer; }.add-layer-menu > button:hover, .add-layer-menu > button:focus-visible { color: #e8ebf6; background: var(--bg-hover); outline: 0; }.add-layer-menu > button svg { color: #8f9ee8; }.add-layer-menu > button span { display: flex; min-width: 0; flex-direction: column; gap: 1px; }.add-layer-menu > button strong { color: inherit; font-size: 9px; font-weight: 560; }.add-layer-menu > button small { color: #6f7685; font-size: 7.5px; }.selection-count { padding: 2px 5px; color: #cbd2ff; background: rgb(140 155 255 / .1); border: 1px solid rgb(165 180 252 / .25); border-radius: 3px; font-size: 7.5px; white-space: nowrap; }
 .duration-control { display: flex; height: 24px; align-items: center; gap: 4px; padding: 0 5px; color: var(--text-muted); background: #12141a; border: 1px solid var(--border-strong); border-radius: 3px; font-size: 8px; white-space: nowrap; }.duration-control :deep(.number-field) { width: 48px; flex: 0 0 auto; }.duration-control :deep(input) { padding: 0; color: #dce1ec; background: transparent; border: 0; outline: 0; font: inherit; font-size: 8.5px; font-variant-numeric: tabular-nums; text-align: right; }.duration-control small { color: #6f7580; font-size: 7.5px; }
 .timeline-toolbar .razor-tool.active { color: #ff8796; background: rgb(255 117 135 / .1); border-color: rgb(255 135 150 / .5); }
+.cache-control.active { color: #b9f3d7; background: rgb(81 180 132 / .1); border-color: rgb(109 211 162 / .42); }
 .timeline-main { --track-header: 220px; position: relative; min-height: 0; flex: 1; overflow: auto; background: #101217; overscroll-behavior: contain; scrollbar-gutter: stable; }.timeline-main.panning { cursor: grabbing; user-select: none; }.timeline-main.scrubbing { cursor: col-resize; user-select: none; }.timeline-content { position: relative; min-height: 100%; background-image: linear-gradient(90deg, transparent calc(var(--track-header) - 1px), var(--border-strong) var(--track-header), transparent calc(var(--track-header) + 1px)); }.ruler-row { position: sticky; z-index: 12; top: 0; display: grid; width: 100%; height: 25px; grid-template-columns: var(--track-header) 1fr; border-bottom: 1px solid var(--border-subtle); }.track-column-heading { position: sticky; z-index: 14; left: 0; display: flex; align-items: center; gap: 6px; padding: 0 8px; color: var(--text-secondary); background: #15171d; border-right: 1px solid var(--border-strong); box-shadow: 2px 0 4px rgb(0 0 0 / .18); font-size: 9px; font-weight: 600; text-transform: uppercase; }.track-column-heading small { color: var(--text-muted); font-weight: 400; }.header-icons { display: flex; margin-left: auto; gap: 11px; color: var(--text-muted); }.time-ruler { position: relative; cursor: col-resize; background: #111319; }.time-ruler > span { position: absolute; bottom: 4px; color: #777c87; font-size: 7.5px; font-variant-numeric: tabular-nums; transform: translateX(-1px); }.time-ruler > span i { position: absolute; bottom: -4px; left: 0; width: 1px; height: 4px; background: #4b4f58; }.work-area { position: absolute; top: 1px; right: 1%; left: 1%; height: 3px; background: #676f9f; }.work-area i { position: absolute; top: -1px; width: 3px; height: 5px; background: #b1b8e4; }.work-area i:last-child { right: 0; }
+.frame-cache-bar { position: absolute; right: 0; bottom: 0; left: 0; height: 2px; overflow: hidden; pointer-events: none; }.frame-cache-bar i { position: absolute; top: 0; height: 2px; background: #69d49e; box-shadow: 0 0 4px rgb(105 212 158 / .45); }
 .timeline-main.razor-mode, .timeline-main.razor-mode * { cursor: none !important; }.timeline-main.razor-mode .timeline-clip > * { pointer-events: none; }.razor-ghost { --razor-color: #8993a5; position: absolute; z-index: 30; width: 1px; color: var(--razor-color); pointer-events: none; filter: drop-shadow(0 1px 2px #050609); }.razor-ghost.valid { --razor-color: #ff8796; }.razor-cursor-head { position: absolute; z-index: 2; top: 0; left: -7px; display: grid; width: 14px; height: 12px; place-items: center; color: #15171d; background: var(--razor-color); clip-path: polygon(0 0, 100% 0, 100% 62%, 50% 100%, 0 62%); }.razor-cursor-head svg { margin-top: -2px; }.razor-ghost small { position: absolute; z-index: 2; top: calc(var(--level-y) + 7px); left: 8px; padding: 2px 4px; color: #cbd0dc; background: rgb(12 14 19 / .92); border: 1px solid #353a45; border-radius: 3px; font-size: 7.5px; font-variant-numeric: tabular-nums; white-space: nowrap; }.razor-guide { position: absolute; inset: 0; width: 1px; background: var(--razor-color); box-shadow: 0 0 4px var(--razor-color); opacity: .45; }.razor-horizontal { position: absolute; top: var(--level-y); left: -200vw; width: 400vw; height: 1px; background: var(--razor-color); box-shadow: 0 0 3px var(--razor-color); opacity: .28; }.razor-crosshair { position: absolute; top: calc(var(--level-y) - 4px); left: -4px; width: 9px; height: 9px; background: #11141a; border: 1px solid var(--razor-color); box-shadow: 0 0 0 2px rgb(10 12 16 / .65); transform: rotate(45deg); }.razor-ghost.over-track .razor-horizontal { opacity: .72; }.razor-ghost.valid .razor-guide, .razor-ghost.valid .razor-horizontal { opacity: 1; }
 .tracks-scroll { min-height: calc(100% - 25px); overflow: visible; }.track-row, .property-track { display: grid; width: 100%; grid-template-columns: var(--track-header) 1fr; }.track-row { height: 31px; border-bottom: 1px solid #20232a; }.track-row.selected { background: rgb(52 60 91 / .22); }.track-header { position: sticky; z-index: 7; left: 0; display: flex; min-width: 0; align-items: center; gap: 5px; padding: 0 4px; background: #14161b; border-right: 1px solid var(--border-strong); box-shadow: 2px 0 4px rgb(0 0 0 / .14); }.track-row.selected .track-header { background: var(--bg-selected); box-shadow: inset 2px 0 var(--accent), 2px 0 4px rgb(0 0 0 / .14); }.track-header button { display: grid; width: 17px; height: 20px; flex: 0 0 auto; place-items: center; padding: 0; color: var(--text-muted); background: transparent; border: 0; border-radius: 2px; cursor: pointer; }.track-header button:hover { color: var(--text-primary); background: var(--bg-hover); }.track-header button.active { color: var(--keyframe); }.track-header button.off { opacity: .3; }.track-header .expand { width: 13px; }.track-index { width: 18px; color: #626773; font-size: 7.5px; }.track-header strong { min-width: 0; flex: 1; overflow: hidden; color: var(--text-secondary); font-size: 9px; font-weight: 520; text-overflow: ellipsis; white-space: nowrap; }.track-lane { position: relative; overflow: hidden; background-image: linear-gradient(90deg, rgb(255 255 255 / .022) 1px, transparent 1px); background-size: 10% 100%; cursor: default; }
 .timeline-clip { position: absolute; top: 3px; height: 25px; min-width: 10px; overflow: hidden; color: #f1f3fa; text-align: left; border: 1px solid rgb(221 226 245 / .16); border-radius: 3px; box-shadow: inset 0 0 0 1px rgb(0 0 0 / .12); cursor: grab; }.timeline-clip:hover { border-color: rgb(226 230 255 / .5); }.track-row.selected .timeline-clip { outline: 1px solid #a5b4fc; outline-offset: 0; }.clip-grip { position: absolute; z-index: 5; top: 0; bottom: 0; width: 4px; background: rgb(245 247 255 / .18); opacity: 0; cursor: ew-resize; }.timeline-clip:hover .clip-grip { opacity: 1; }.clip-grip.left { left: 0; }.clip-grip.right { right: 0; }.clip-label { position: relative; z-index: 2; display: flex; height: 100%; align-items: center; gap: 4px; padding: 0 6px 6px; overflow: hidden; font-size: 8.5px; font-weight: 560; text-shadow: 0 1px 2px rgb(0 0 0 / .6); text-overflow: ellipsis; white-space: nowrap; }.filmstrip { position: absolute; inset: 0; display: flex; opacity: .32; }.filmstrip i { width: 44px; flex: 0 0 44px; background-position: center; background-size: cover; border-right: 1px solid rgb(0 0 0 / .4); }.waveform { position: absolute; inset: 0 4px; display: flex; align-items: center; gap: 1px; opacity: .48; }.waveform i { width: 2px; flex: 0 0 2px; background: #c2e9dc; }.fx-badge { position: absolute; z-index: 4; right: 4px; top: 3px; color: #f0e2c9; font-size: 7px; font-style: italic; }.clip-keyframes { position: absolute; z-index: 6; right: 5px; bottom: 2px; left: 5px; height: 7px; pointer-events: none; }.clip-keyframes i { position: absolute; bottom: 0; width: 7px; height: 7px; background: var(--keyframe); border: 1px solid rgb(46 36 24 / .75); box-shadow: 0 0 0 1px rgb(255 220 159 / .2); transform: translateX(-50%) rotate(45deg); pointer-events: auto; cursor: ew-resize; }.clip-keyframes i:hover { background: #ffd18b; box-shadow: 0 0 0 2px rgb(255 209 139 / .3); }.clip-keyframes i.selected { background: #fff0cf; border-color: #fff; box-shadow: 0 0 0 2px rgb(255 209 139 / .48); }.clip-keyframes i.stacked { width: 8px; height: 8px; background: #f0bd70; box-shadow: 0 0 0 1px #624c2d, 2px -2px 0 rgb(240 189 112 / .55); }.timeline-clip.text { background-image: linear-gradient(90deg, rgb(255 255 255 / .05) 50%, transparent 50%); background-size: 8px 8px; }

@@ -44,6 +44,12 @@ export interface RenderFrameRequest {
   renderRootNodeId?: string | null
   /** Structural editor revision; time changes do not invalidate the compiled graph. */
   revision?: number
+  /** Distinguishes the main composition from isolated cluster timelines in the persistent cache. */
+  cacheScope?: string
+  /** Stable after a save, but unique while edits are pending, so persisted frames survive reloads. */
+  cacheVersion?: string | number
+  /** Explicit background renders opt into the GPU readback and persistent write cost. */
+  cacheWrite?: boolean
   time: number
   /** Sequential playback uses the media decoder clock; scrubbing and export request exact seeks. */
   playback?: boolean
@@ -64,7 +70,17 @@ export interface RenderBackend {
   initialize(options: RendererInitializationOptions): Promise<void>
   resize(width: number, height: number, pixelRatio: number): void
   renderFrame(request: RenderFrameRequest): Promise<RenderSurface>
+  /** Optional top-down RGBA readback used by the persistent frame cache. */
+  readPixels?(): CachedFramePixels | null
+  /** Optional fast path that presents a cached top-down RGBA frame without evaluating the scene. */
+  presentPixels?(frame: CachedFramePixels): Promise<RenderSurface> | RenderSurface
   dispose(): Promise<void>
+}
+
+export interface CachedFramePixels {
+  width: number
+  height: number
+  data: Uint8ClampedArray
 }
 
 export const HYBRID_ALPHA_CONTRACT = Object.freeze({

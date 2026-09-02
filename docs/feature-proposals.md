@@ -23,6 +23,7 @@ seams in Aurora rather than generic wish-list entries.
 | P15 | Partial | Spot lights and soft shadow controls exist; area lights and light linking remain. |
 | P16 | Implemented | Keyframeable camera focus distance and f-stop drive the bokeh render pass. |
 | P18 | Partial | Solid and Rendered viewport modes exist; wireframe, matcap, X-ray, and overlays remain. |
+| P27 | Implemented | Revision-safe persistent RGBA frames, background range caching, replay, cancellation, and a timeline cache bar. |
 
 All proposals not listed here remain unimplemented.
 

@@ -154,6 +154,10 @@ export class HybridWebGLRenderBackend implements RenderBackend {
   private readonly maskCompositeCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1)
   private readonly maskCompositeMaterial = new THREE.MeshBasicMaterial({ transparent: true, depthTest: false, depthWrite: false, toneMapped: false })
   private readonly maskCompositeQuad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), this.maskCompositeMaterial)
+  private readonly cachePresentScene = new THREE.Scene()
+  private readonly cachePresentCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1)
+  private readonly cachePresentMaterial = new THREE.MeshBasicMaterial({ depthTest: false, depthWrite: false, toneMapped: false })
+  private readonly cachePresentQuad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), this.cachePresentMaterial)
   private readonly maskRasterCache = new Map<string, MaskRasterCacheEntry>()
   private readonly maskGeometryCache = new Map<string, MaskGeometryCacheEntry>()
   private sourceImage: HTMLImageElement | null = null
@@ -176,6 +180,7 @@ export class HybridWebGLRenderBackend implements RenderBackend {
 
   constructor(private readonly canvas: HTMLCanvasElement, private readonly sourceUrl: string) {
     this.maskCompositeScene.add(this.maskCompositeQuad)
+    this.cachePresentScene.add(this.cachePresentQuad)
   }
 
   /**
@@ -356,6 +361,31 @@ export class HybridWebGLRenderBackend implements RenderBackend {
       data.set(raw.subarray((height - row - 1) * stride, (height - row) * stride), row * stride)
     }
     return { width, height, data }
+  }
+
+  /** Uploads a cached top-down RGBA frame and presents it through the same sRGB output contract. */
+  async presentPixels(frame: { width: number; height: number; data: Uint8ClampedArray }): Promise<RenderSurface> {
+    if (!this.initialized) await this.initialize({ width: frame.width, height: frame.height, pixelRatio: 1 })
+    if (!this.threeRenderer || !this.pixiRenderer || this.contextLost) return this.surface(frame.width, frame.height)
+    if (this.lastStats.width !== frame.width || this.lastStats.height !== frame.height) this.resize(frame.width, frame.height, 1)
+
+    const texture = new THREE.DataTexture(frame.data, frame.width, frame.height, THREE.RGBAFormat, THREE.UnsignedByteType)
+    texture.colorSpace = THREE.SRGBColorSpace
+    texture.flipY = true
+    texture.needsUpdate = true
+    this.cachePresentMaterial.map = texture
+    this.cachePresentMaterial.needsUpdate = true
+    this.threeRenderer.resetState()
+    this.threeRenderer.setRenderTarget(null)
+    this.threeRenderer.setScissorTest(false)
+    this.threeRenderer.setClearColor(0x000000, 1)
+    this.threeRenderer.clear(true, true, true)
+    this.threeRenderer.render(this.cachePresentScene, this.cachePresentCamera)
+    this.pixiRenderer.resetState()
+    this.cachePresentMaterial.map = null
+    texture.dispose()
+    this.lastStats = { ...this.lastStats, pixiPasses: 0, pixiBatches: 0, threePasses: 0, width: frame.width, height: frame.height }
+    return this.surface(frame.width, frame.height)
   }
 
   /**
@@ -776,6 +806,8 @@ export class HybridWebGLRenderBackend implements RenderBackend {
     this.threeLayerTarget = null
     this.maskCompositeQuad.geometry.dispose()
     this.maskCompositeMaterial.dispose()
+    this.cachePresentQuad.geometry.dispose()
+    this.cachePresentMaterial.dispose()
     this.maskRasterCache.forEach((entry) => {
       entry.pixiTexture?.destroy(true)
       entry.threeTexture?.dispose()
