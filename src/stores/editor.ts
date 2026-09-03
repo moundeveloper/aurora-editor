@@ -13,7 +13,7 @@ import { CURRENT_PROJECT_VERSION, deserializeEditorState, serializeEditorState }
 import { auroraProjectLibrary } from '@/services/projectLibrary'
 import { importAsset, mediaUrl } from '@/services/mediaLibrary'
 import { kindForFile } from '../../shared/contracts.ts'
-import { aimRotationDegrees, create3DPath, createCameraObjectConstraint, createCameraPathConstraint, createDemo3DScene, createEmpty3DScene, createGroupObject, createPrimitiveObject, makeTransform3D, numericProperty } from '@/engine/scene3d/sceneFactory'
+import { aimRotationDegrees, create3DPath, createCameraObjectConstraint, createCameraPathConstraint, createDemo3DScene, createGroupObject, createPrimitiveObject, createStarter3DScene, makeTransform3D, numericProperty } from '@/engine/scene3d/sceneFactory'
 import { createRig, createRigBone, type RigBoneChannelKey } from '@/engine/rig/rigFactory'
 import { MAX_RIG_CELLS, MIN_RIG_CELLS } from '@/engine/rig/rigMesh'
 import {
@@ -1060,8 +1060,28 @@ export const useEditorStore = defineStore('editor', () => {
       return layer
     }
     const type = asset.kind === 'composition' ? 'image' : asset.kind === 'scene3d' ? '3d-scene' : asset.kind
+
+    /*
+     * A 3D layer without a scene of its own is unrenderable: the frame graph keys its three-webgl
+     * pass on `sceneId`, and a pass whose scene cannot be resolved is dropped, so the layer would
+     * sit on the timeline and never appear in the Motion viewport. Library scenes that reach this
+     * path carry no reusable layer template but still carry the scene, so instantiate from that —
+     * and refuse the drop outright when there is no scene to instantiate.
+     */
+    const droppedScene = asset.kind === 'scene3d' && asset.sceneTemplate ? raw3DScene(asset.sceneTemplate) : null
+    if (asset.kind === 'scene3d' && !droppedScene) return
+    if (droppedScene) {
+      droppedScene.id = crypto.randomUUID()
+      droppedScene.name = asset.name
+      droppedScene.revision += 1
+      scenes3D.value.push(droppedScene)
+      selectedSceneId.value = droppedScene.id
+      selectedSceneEntityId.value = droppedScene.objects[0]?.id ?? droppedScene.cameras[0]?.id ?? droppedScene.lights[0]?.id ?? ''
+    }
+
     const layer: EditorLayer = {
       id: crypto.randomUUID(), name: asset.name.replace(/\.[^.]+$/, ''), type,
+      ...(droppedScene ? { sceneId: droppedScene.id } : {}),
       // The link back to the library entry, and through it to the media the vault serves.
       assetId: asset.id,
       start: dropTime, duration: Math.min(asset.duration ?? 6, Math.max(1 / project.value.frameRate, project.value.duration - dropTime)),
@@ -1261,7 +1281,7 @@ export const useEditorStore = defineStore('editor', () => {
 
     if (preset === '3d-scene') {
       const sceneNumber = scenes3D.value.length + 1
-      const scene = createEmpty3DScene(`3D Scene ${sceneNumber}`)
+      const scene = createStarter3DScene(`3D Scene ${sceneNumber}`)
       scenes3D.value.push(scene)
       layer.name = scene.name
       layer.sceneId = scene.id

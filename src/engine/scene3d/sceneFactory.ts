@@ -200,6 +200,50 @@ export function createEmpty3DScene(name = '3D Scene'): Aurora3DScene {
   }
 }
 
+/**
+ * A 3D Scene layer has to show something the moment it lands on the timeline. The Motion viewport
+ * composites scene geometry only — no grid, no gizmos — so a camera-and-fill scene renders an empty
+ * frame and reads as a broken layer. Starter geometry plus a key light make the layer visible on
+ * creation; the 3D workspace still authors from there.
+ */
+export function createStarter3DScene(name = '3D Scene'): Aurora3DScene {
+  const scene = createEmpty3DScene(name)
+
+  const cube = createPrimitiveObject('box', 1)
+  cube.transform.position.y.value = .35
+  cube.transform.rotation.x.value = 18
+
+  const ground = createPrimitiveObject('plane', 1)
+  ground.name = 'Ground'
+  ground.transform.position.y.value = -1.2
+  ground.transform.rotation.x.value = -90
+  ground.transform.scale.x.value = 8
+  ground.transform.scale.y.value = 8
+  ground.material.baseColor = '#151a2a'
+  ground.material.metalness.value = .05
+  ground.material.roughness.value = .72
+
+  const keyId = crypto.randomUUID()
+  const keyPosition: [number, number, number] = [4, 7, 5]
+  const [keyPitch, keyYaw] = aimRotationDegrees(keyPosition)
+  const key: AuroraLight = {
+    id: keyId,
+    name: 'Key Light',
+    visible: true,
+    type: 'directional',
+    color: '#fff0d2',
+    intensity: numericProperty(`${keyId}-intensity`, 3.2),
+    transform: makeTransform3D(keyId, keyPosition),
+    castShadow: true,
+  }
+  key.transform.rotation.x.value = keyPitch
+  key.transform.rotation.y.value = keyYaw
+
+  scene.objects = [cube, ground]
+  scene.lights = [...scene.lights, key]
+  return scene
+}
+
 export function create3DPath(index: number): Aurora3DPath {
   const id = crypto.randomUUID()
   return {
