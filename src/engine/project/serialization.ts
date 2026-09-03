@@ -60,7 +60,7 @@ function migrateLegacyLayerEffectValues(layers: EditorLayer[], nodes: unknown, v
       if (!node) return
       const values = Object.fromEntries(layerEffectParameters(effect.kind).map((parameter, parameterIndex) => [
         parameter.key,
-        node.inputs[parameterIndex + 1]?.value ?? effect.values[parameter.key],
+        node.inputs[parameterIndex + 1]?.value ?? effect.values[parameter.key] ?? parameter.value ?? 0,
       ]))
       const migrated = createLayerEffect(effect.kind, effect.id, values)
       migrated.enabled = effect.enabled && !node.muted
