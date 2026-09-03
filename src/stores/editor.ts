@@ -1010,6 +1010,7 @@ export const useEditorStore = defineStore('editor', () => {
       project.value.duration = Math.max(project.value.duration, layer.start + layer.duration)
       selectedLayerId.value = layer.id
       selectedKeyframeId.value = null
+      attachLayerToCompositeGraph(layer)
       markChanged()
       return layer
     }
@@ -1042,6 +1043,7 @@ export const useEditorStore = defineStore('editor', () => {
       list.splice(type === 'audio' ? list.length : 0, 0, layer)
     }
     selectedLayerId.value = layer.id
+    attachLayerToCompositeGraph(layer)
     markChanged()
     return layer
   }
@@ -1224,6 +1226,7 @@ export const useEditorStore = defineStore('editor', () => {
     layerList().splice(isAudio ? layerList().length : 0, 0, layer)
     selectedLayerId.value = layer.id
     selectedKeyframeId.value = null
+    attachLayerToCompositeGraph(layer)
     markChanged()
     return layer
   }

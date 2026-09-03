@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
+import { contributingNodeIds } from '@/engine/nodes/evaluateGraph'
 import { useEditorStore } from '../editor'
 
 describe('editor history and Library management', () => {
@@ -106,5 +107,19 @@ describe('editor history and Library management', () => {
     expect(store.timelineMarkers).toHaveLength(1)
     expect(store.undo()).toBe(true)
     expect(store.timelineMarkers.map((marker) => marker.id)).toContain(first.id)
+  })
+
+  it('connects newly created and reused 3D scenes to the Motion render graph', () => {
+    const store = useEditorStore()
+    const sceneLayer = store.addTimelineLayer('3d-scene')
+    const source = store.nodes.find((node) => node.sourceId === sceneLayer.id)
+
+    expect(source?.kind).toBe('scene3d')
+    expect(contributingNodeIds(store.nodes, store.nodeConnections, store.renderRootNodeId)).toContain(source!.id)
+
+    const copy = store.addAssetToTimeline(sceneLayer.assetId!, 1)!
+    const copySource = store.nodes.find((node) => node.sourceId === copy.id)
+    expect(copySource?.kind).toBe('scene3d')
+    expect(contributingNodeIds(store.nodes, store.nodeConnections, store.renderRootNodeId)).toContain(copySource!.id)
   })
 })
