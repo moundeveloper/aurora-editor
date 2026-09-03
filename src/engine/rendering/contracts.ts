@@ -1,5 +1,6 @@
 import type { Aurora3DScene, AuroraRig, EditorLayer, EditorNode, EditorNodeConnection, EditorProject, MediaAsset } from '@/models/editor'
 import { evaluateNodeGraph, NEUTRAL_EFFECTS, type GraphEffects, type NodeBlendMode } from '@/engine/nodes/evaluateGraph'
+import { evaluateLayerEffectStack } from '@/engine/nodes/layerEffects'
 
 export type RenderBackendId = 'pixi-webgl' | 'three-webgl' | 'canvas2d'
 export type RenderQuality = 'draft' | 'preview' | 'full'
@@ -129,26 +130,28 @@ export function createRenderPlan(request: RenderFrameRequest): RenderPlan {
     ? graphPasses.flatMap((pass) => {
       const layer = layerMap.get(pass.layerId)
       if (!layer || !isLayerLive(layer, request.time)) return []
-      const mask = pass.effects.mask
-      if (!mask) return [makePass(`pass-${pass.nodeId}`, layer, pass.effects, pass.blendMode)]
-      /*
-       * A mask shape is a clip on the timeline, so it only exists inside its own range. Outside it
-       * there is no shape to keep anything, and a mask that keeps nothing shows nothing — the layer
-       * drops out rather than appearing unmasked before its shape arrives. Inverted is the mirror of
-       * that: with nothing to cut away, the whole layer comes through.
-       */
-      const maskLayer = layerMap.get(mask.layerId)
-      if (maskLayer && isLayerLive(maskLayer, request.time)) {
-        return [makePass(`pass-${pass.nodeId}`, layer, pass.effects, pass.blendMode)]
-      }
-      return mask.inverted
-        ? [makePass(`pass-${pass.nodeId}`, layer, { ...pass.effects, mask: null }, pass.blendMode)]
-        : []
+      return evaluateLayerEffectStack(layer, pass.effects, pass.blendMode).flatMap((effectPass) => {
+        const id = `pass-${pass.nodeId}-${effectPass.nodeId}`
+        const mask = effectPass.effects.mask
+        if (!mask) return [makePass(id, layer, effectPass.effects, effectPass.blendMode)]
+        /*
+         * A mask shape is a clip on the timeline, so it only exists inside its own range. Outside it
+         * there is no shape to keep anything, and a mask that keeps nothing shows nothing — the layer
+         * drops out rather than appearing unmasked before its shape arrives. Inverted is the mirror of
+         * that: with nothing to cut away, the whole layer comes through.
+         */
+        const maskLayer = layerMap.get(mask.layerId)
+        if (maskLayer && isLayerLive(maskLayer, request.time)) return [makePass(id, layer, effectPass.effects, effectPass.blendMode)]
+        return mask.inverted
+          ? [makePass(id, layer, { ...effectPass.effects, mask: null }, effectPass.blendMode)]
+          : []
+      })
     })
     : request.layers
       .filter((layer) => isLayerLive(layer, request.time))
       .reverse()
-      .map((layer) => makePass(`pass-${layer.id}`, layer, NEUTRAL_EFFECTS))
+      .flatMap((layer) => evaluateLayerEffectStack(layer).map((pass) =>
+        makePass(`pass-${pass.nodeId}`, layer, pass.effects, pass.blendMode)))
 
   return {
     width: request.width,

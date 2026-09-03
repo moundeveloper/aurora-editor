@@ -3,6 +3,7 @@ import { AuroraFrameEngine } from '@/engine/rendering/AuroraFrameEngine'
 import { AuroraFrameGraphCompiler } from '@/engine/rendering/AuroraFrameGraph'
 import { AuroraResourcePool } from '@/engine/rendering/AuroraResourcePool'
 import { createDemoNodeGraph } from '@/engine/nodes/nodeGraph'
+import { createLayerEffect } from '@/engine/nodes/layerEffects'
 import type { EditorLayer, EditorProject } from '@/models/editor'
 import type { RenderBackend, RenderFrameRequest, RendererInitializationOptions, RenderSurface } from '@/engine/rendering/contracts'
 import type { FrameCacheAddress, FrameCacheEntry, FrameCacheStore } from '@/engine/rendering/frameCache'
@@ -16,7 +17,7 @@ const property = (id: string, value: number) => ({ id, value, animated: false, k
 const layer: EditorLayer = {
   id: 'hero', name: 'Hero', type: 'shape', start: 0, duration: 10, shapeKind: 'ellipse',
   shapeWidth: 300, shapeHeight: 300, color: '#fff', visible: true, locked: false, muted: false,
-  expanded: false, effects: ['Glow'],
+  expanded: false, effects: [createLayerEffect('glow', 'hero-glow')],
   transform: {
     x: property('x', 960), y: property('y', 540), scaleX: property('sx', 100),
     scaleY: property('sy', 100), rotation: property('r', 0), opacity: property('o', 100),

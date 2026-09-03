@@ -18,6 +18,7 @@ seams in Aurora rather than generic wish-list entries.
 | P2 | Partial | The persistent node-audio mixer UI exists; Web Audio playback, render mixing, and amplitude drivers remain. |
 | P3 | Implemented | glTF/GLB assets load as hierarchy-preserving, skeleton-safe model objects. |
 | P4 | Implemented | HDR/EXR radiance maps drive scene lighting and optional environment backgrounds. |
+| P5 | Implemented | Typed, ordered layer effects share the node evaluator and have live inspector controls plus legacy migration. |
 | P7 | Implemented | 3D scenes use shutter-based subframe accumulation, scene and layer toggles, and quality-aware sample counts. |
 | P11 | Implemented | Named, coloured project markers persist, render on the ruler, snap timeline edits, and support previous/next navigation. |
 | P12 | Implemented | Modal G/R/S gestures support axes, typed values, snapping, framing, and local/global orientation. |
@@ -87,11 +88,11 @@ renders that stop looking like a tech demo.
 
 ### P5 · Per-layer effect stack
 
-`EditorLayer.effects` is a `string[]` that only ever gets counted — `InspectorPanel`
-prints its length and `TimelinePanel` shows an `fx` badge. Real effects live exclusively
-in the node graph, which means the fast After Effects move ("drop a blur on this layer")
-has no home. Reuse the graph's existing operators as an ordered per-layer chain so both
-paths share one implementation.
+`EditorLayer.effects` is now a typed, ordered stack of node operators. The inspector can
+add, configure, reorder, bypass, and remove instances, while the frame planner runs the
+stack through the same evaluator used by the node graph. Version-14 migration converts
+known string entries, retains their edited parameters and bypass state, and removes only
+the verified generated graph nodes older projects used.
 *Touches* `models/editor.ts`, `engine/nodes/evaluateGraph.ts`, `InspectorPanel.vue`.
 
 ---

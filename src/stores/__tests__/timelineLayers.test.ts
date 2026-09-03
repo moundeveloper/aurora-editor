@@ -17,7 +17,7 @@ describe('timeline layer creation', () => {
       type: 'adjustment',
       start: 0,
       duration: store.project.duration,
-      effects: ['Color Matrix', 'Vignette'],
+      effects: [{ kind: 'colorMatrix' }, { kind: 'vignette' }],
     })
     expect(store.layers[0]?.id).toBe(layer.id)
     expect(store.selectedLayerId).toBe(layer.id)
@@ -99,8 +99,27 @@ describe('timeline layer creation', () => {
     const audio = store.addTimelineLayer('audio')
 
     expect(shape).toMatchObject({ type: 'shape', shapeKind: 'ellipse', start: 5 })
-    expect(audio).toMatchObject({ type: 'audio', start: 5, effects: ['Gain'] })
+    expect(audio).toMatchObject({ type: 'audio', start: 5, effects: [] })
     expect(store.layers.at(-1)?.id).toBe(audio.id)
+  })
+
+  it('adds, configures, toggles, reorders, and removes layer effects', () => {
+    const store = useEditorStore()
+    const shape = store.addTimelineLayer('rectangle')
+
+    store.addLayerEffect('blur')
+    store.addLayerEffect('vignette')
+    const blur = shape.effects[0]!
+    const vignette = shape.effects[1]!
+    store.setLayerEffectValue(blur.id, 'radius', 410)
+    store.toggleLayerEffect(vignette.id)
+    store.moveLayerEffect(vignette.id, -1)
+
+    expect(shape.effects.map((effect) => effect.kind)).toEqual(['vignette', 'blur'])
+    expect(shape.effects[0]?.enabled).toBe(false)
+    expect(shape.effects[1]?.values.radius).toBe(200)
+    store.removeLayerEffect(vignette.id)
+    expect(shape.effects.map((effect) => effect.kind)).toEqual(['blur'])
   })
 
   it('uses the configured resolution and frame rate for new content', () => {

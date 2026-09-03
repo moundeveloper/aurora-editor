@@ -1,4 +1,5 @@
 import { evaluateNodeGraph, NEUTRAL_EFFECTS, type GraphEffects, type GraphPass } from '@/engine/nodes/evaluateGraph'
+import { evaluateLayerEffectStack } from '@/engine/nodes/layerEffects'
 import type { EditorLayer } from '@/models/editor'
 import type { RenderFrameRequest, RenderPass, RenderPlan } from '@/engine/rendering/contracts'
 
@@ -69,18 +70,22 @@ export class AuroraFrameGraphCompiler {
       ? this.graphPasses.flatMap((pass) => {
         const layer = layerMap.get(pass.layerId)
         if (!layer || !isLayerLive(layer, request.time)) return []
-        const mask = pass.effects.mask
-        if (!mask) return [makePass(pass.nodeId, layer, pass.effects, pass.blendMode)]
-        const maskLayer = layerMap.get(mask.layerId)
-        if (maskLayer && isLayerLive(maskLayer, request.time)) return [makePass(pass.nodeId, layer, pass.effects, pass.blendMode)]
-        return mask.inverted
-          ? [makePass(pass.nodeId, layer, { ...pass.effects, mask: null }, pass.blendMode)]
-          : []
+        return evaluateLayerEffectStack(layer, pass.effects, pass.blendMode).flatMap((effectPass) => {
+          const nodeId = `${pass.nodeId}-${effectPass.nodeId}`
+          const mask = effectPass.effects.mask
+          if (!mask) return [makePass(nodeId, layer, effectPass.effects, effectPass.blendMode)]
+          const maskLayer = layerMap.get(mask.layerId)
+          if (maskLayer && isLayerLive(maskLayer, request.time)) return [makePass(nodeId, layer, effectPass.effects, effectPass.blendMode)]
+          return mask.inverted
+            ? [makePass(nodeId, layer, { ...effectPass.effects, mask: null }, effectPass.blendMode)]
+            : []
+        })
       })
       : request.layers
         .filter((layer) => isLayerLive(layer, request.time))
         .reverse()
-        .map((layer) => makePass(layer.id, layer, NEUTRAL_EFFECTS, 'normal'))
+        .flatMap((layer) => evaluateLayerEffectStack(layer, NEUTRAL_EFFECTS, 'normal').map((pass) =>
+          makePass(pass.nodeId, layer, pass.effects, pass.blendMode)))
 
     const graphPasses: AuroraFrameGraphPass[] = []
     const sources = new Set<string>()

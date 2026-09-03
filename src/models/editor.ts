@@ -255,6 +255,23 @@ export interface ShapePath {
   points: ShapePathPoint[]
 }
 
+/** Single-input node operators that can also be applied directly to a timeline layer. */
+export type LayerEffectKind =
+  | 'translate' | 'rotate' | 'scale'
+  | 'blur' | 'glow' | 'vignette'
+  | 'invert' | 'brightnessContrast' | 'colorMatrix' | 'hueSaturation' | 'rgbToBw'
+
+/**
+ * An ordered, independently switchable instance of a node-graph operator.
+ * Parameter keys are the matching node input keys (`radius`, `temperature`, and so on).
+ */
+export interface LayerEffect {
+  id: string
+  kind: LayerEffectKind
+  enabled: boolean
+  values: Record<string, number>
+}
+
 export interface EditorLayer {
   id: string
   trackId?: string
@@ -288,7 +305,7 @@ export interface EditorLayer {
   muted: boolean
   expanded: boolean
   transform: LayerTransform
-  effects: string[]
+  effects: LayerEffect[]
 }
 
 export interface MediaAsset {

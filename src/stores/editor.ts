@@ -5,7 +5,7 @@ import type {
   AnimatableProperty, Aurora3DObject, Aurora3DScene, AuroraCamera, AuroraInfluenceType, AuroraLight, AuroraRig, AuroraRigBone,
   AuroraObjectFollowOrientation, AuroraPathOrientation, AuroraPathPointMode,
   AuroraCameraCut, EditorLayer, EditorNode, EditorNodeConnection, EditorNodeKind, EditorProject,
-  MediaAsset, SerializedEditorState, ShapePathPoint, TimelineMarker, WorkspaceId,
+  LayerEffectKind, MediaAsset, SerializedEditorState, ShapePathPoint, TimelineMarker, WorkspaceId,
 } from '@/models/editor'
 import { evaluateNumericProperty } from '@/engine/animation/evaluateProperty'
 import { ensureNumericKeyframe, setNumericPropertyAtTime, toggleNumericKeyframe } from '@/engine/animation/editNumericProperty'
@@ -26,6 +26,7 @@ import {
   canConnect, createDemoNodeGraph, createNode, NODE_DEFINITIONS, syncDynamicInputs, type ConnectionRequest,
 } from '@/engine/nodes/nodeGraph'
 import { adjacentTimelineMarker, DEFAULT_TIMELINE_MARKER_COLOR, normalizeTimelineMarkers } from '@/engine/animation/timelineMarkers'
+import { createLayerEffect, layerEffectParameters } from '@/engine/nodes/layerEffects'
 
 const property = (id: string, value: number): AnimatableProperty<number> => ({
   id,
@@ -133,12 +134,12 @@ export const useEditorStore = defineStore('editor', () => {
   ])
 
   const layers = ref<EditorLayer[]>([
-    { id: 'layer-adjust', name: 'Cinematic Grade', type: 'adjustment', start: 0, duration: 18, color: '#9b8fe8', visible: true, locked: false, muted: false, expanded: false, transform: makeTransform('grade'), effects: ['Color Matrix', 'Vignette'] },
-    { id: 'layer-title', name: 'BEYOND THE HORIZON', type: 'text', start: 2.2, duration: 8.6, color: '#d49b65', visible: true, locked: false, muted: false, expanded: true, transform: makeTransform('title'), effects: ['Glow'] },
+    { id: 'layer-adjust', name: 'Cinematic Grade', type: 'adjustment', start: 0, duration: 18, color: '#9b8fe8', visible: true, locked: false, muted: false, expanded: false, transform: makeTransform('grade'), effects: [createLayerEffect('colorMatrix', 'demo-color-matrix', { temperature: -8, contrast: 1.12 }), createLayerEffect('vignette', 'demo-vignette', { amount: 34, softness: 72 })] },
+    { id: 'layer-title', name: 'BEYOND THE HORIZON', type: 'text', start: 2.2, duration: 8.6, color: '#d49b65', visible: true, locked: false, muted: false, expanded: true, transform: makeTransform('title'), effects: [createLayerEffect('glow', 'demo-glow', { threshold: 62, radius: 28, intensity: 1.45 })] },
     { id: 'layer-3d-scene', name: 'Aurora 3D Study', type: '3d-scene', sceneId: 'scene-aurora-3d', start: 0, duration: 18, color: '#7888db', visible: true, locked: false, muted: false, expanded: false, transform: makeTransform('scene-3d'), effects: [] },
     { id: 'layer-logo', name: 'Aurora Mark', type: 'image', start: 1, duration: 14, color: '#6b99d5', visible: true, locked: false, muted: false, expanded: false, transform: makeTransform('logo'), effects: [] },
-    { id: 'layer-video', name: 'Ridge Expedition', type: 'video', start: 0, duration: 18, color: '#5477a8', visible: true, locked: false, muted: false, expanded: false, transform: makeTransform('video'), effects: ['Brightness / Contrast'] },
-    { id: 'layer-audio', name: 'Deep Signal', type: 'audio', start: 0, duration: 18, color: '#5c9b82', visible: true, locked: false, muted: false, expanded: false, transform: makeTransform('audio'), effects: ['Gain'] },
+    { id: 'layer-video', name: 'Ridge Expedition', type: 'video', start: 0, duration: 18, color: '#5477a8', visible: true, locked: false, muted: false, expanded: false, transform: makeTransform('video'), effects: [createLayerEffect('brightnessContrast', 'demo-brightness-contrast', { brightness: 4, contrast: 12 })] },
+    { id: 'layer-audio', name: 'Deep Signal', type: 'audio', start: 0, duration: 18, color: '#5c9b82', visible: true, locked: false, muted: false, expanded: false, transform: makeTransform('audio'), effects: [] },
   ])
   const scenes3D = ref<Aurora3DScene[]>([createDemo3DScene()])
   const demoGraph = createDemoNodeGraph(layers.value)
@@ -881,6 +882,50 @@ export const useEditorStore = defineStore('editor', () => {
     markChanged()
   }
 
+  function addLayerEffect(kind: LayerEffectKind) {
+    const layer = selectedLayer.value
+    if (!layer || layer.type === 'audio') return
+    layer.effects.push(createLayerEffect(kind))
+    markChanged()
+  }
+
+  function removeLayerEffect(effectId: string) {
+    const layer = selectedLayer.value
+    if (!layer) return
+    const next = layer.effects.filter((effect) => effect.id !== effectId)
+    if (next.length === layer.effects.length) return
+    layer.effects = next
+    markChanged()
+  }
+
+  function toggleLayerEffect(effectId: string) {
+    const effect = selectedLayer.value?.effects.find((item) => item.id === effectId)
+    if (!effect) return
+    effect.enabled = !effect.enabled
+    markChanged()
+  }
+
+  function moveLayerEffect(effectId: string, direction: -1 | 1) {
+    const effects = selectedLayer.value?.effects
+    if (!effects) return
+    const index = effects.findIndex((effect) => effect.id === effectId)
+    const destination = index + direction
+    if (index < 0 || destination < 0 || destination >= effects.length) return
+    const [effect] = effects.splice(index, 1)
+    effects.splice(destination, 0, effect!)
+    markChanged()
+  }
+
+  function setLayerEffectValue(effectId: string, key: string, value: number) {
+    const effect = selectedLayer.value?.effects.find((item) => item.id === effectId)
+    const parameter = effect && layerEffectParameters(effect.kind).find((item) => item.key === key)
+    if (!effect || !parameter || !Number.isFinite(value)) return
+    const next = Math.min(parameter.max ?? Number.POSITIVE_INFINITY, Math.max(parameter.min ?? Number.NEGATIVE_INFINITY, value))
+    if (effect.values[key] === next) return
+    effect.values[key] = next
+    markChanged()
+  }
+
   /**
    * Imports files into the media vault and adds them to the library.
    *
@@ -1209,7 +1254,9 @@ export const useEditorStore = defineStore('editor', () => {
       muted: false,
       expanded: false,
       transform: makeProjectTransform(id),
-      effects: preset === 'cinematic-grade' ? ['Color Matrix', 'Vignette'] : isAudio ? ['Gain'] : [],
+      effects: preset === 'cinematic-grade'
+        ? [createLayerEffect('colorMatrix', crypto.randomUUID(), { temperature: -8, contrast: 1.12 }), createLayerEffect('vignette')]
+        : [],
     }
 
     if (preset === '3d-scene') {
@@ -3018,7 +3065,8 @@ export const useEditorStore = defineStore('editor', () => {
     setNodeSource, setNodeSocketValue, setNodeProperty, toggleNodeMuted, setRenderRootNode,
     ensureMaskSegments, setMaskSegmentFeather, setMaskSegmentFeatherAll, selectedMaskSegment,
     selectedLayer, selectedScene, selectedSceneEntity,
-    togglePlayback, setTime, stepFrame, setProjectDuration, addTimelineMarker, updateTimelineMarker, deleteTimelineMarker, jumpToAdjacentTimelineMarker, addKeyframe, setLayerValue, addFiles,
+    togglePlayback, setTime, stepFrame, setProjectDuration, addTimelineMarker, updateTimelineMarker, deleteTimelineMarker, jumpToAdjacentTimelineMarker, addKeyframe, setLayerValue,
+    addLayerEffect, removeLayerEffect, toggleLayerEffect, moveLayerEffect, setLayerEffectValue, addFiles,
     deleteMediaAsset, mediaAssetReferenceCount,
     importFailures, draggingAssetId, addAssetToTimeline, addGeneratedLayer, addPathLayer, addTimelineLayer, reorderTrack, moveSegmentToTrack, moveSegmentToNewTrack, addEmptyTrack, rippleTrackSegments,
     renameTimelineLayers, setTimelineLayersVisible, deleteTimelineLayers,

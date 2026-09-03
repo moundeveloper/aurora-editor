@@ -120,6 +120,8 @@ export function evaluateNodeGraph(
   nodes: EditorNode[],
   connections: EditorNodeConnection[],
   rootNodeId?: string | null,
+  initialEffects: GraphEffects = NEUTRAL_EFFECTS,
+  initialBlendMode: NodeBlendMode = 'normal',
 ): GraphPass[] | null {
   const context: EvaluationContext = { byId: new Map(nodes.map((node) => [node.id, node])), connections }
   const root = (rootNodeId ? context.byId.get(rootNodeId) : undefined)
@@ -189,7 +191,7 @@ export function evaluateNodeGraph(
     return imageInputs.flatMap((socket) => follow(socket.id, next, blendMode))
   }
 
-  return collect(root.id, NEUTRAL_EFFECTS, 'normal', new Set())
+  return collect(root.id, initialEffects, initialBlendMode, new Set())
 }
 
 /** Node ids that reach the render root, so the workspace can mark the ones that render nothing. */

@@ -7,6 +7,7 @@ import { createDemoNodeGraph, NODE_DEFINITIONS } from '@/engine/nodes/nodeGraph'
 import { normalizeCameraCuts } from '@/engine/scene3d/cameraCuts'
 import { MAX_RIG_CELLS, MIN_RIG_CELLS } from '@/engine/rig/rigMesh'
 import { normalizeTimelineMarkers } from '@/engine/animation/timelineMarkers'
+import { createLayerEffect, layerEffectParameters, normalizeLayerEffectStacks } from '@/engine/nodes/layerEffects'
 
 export const CURRENT_PROJECT_VERSION = 14
 
@@ -20,6 +21,54 @@ export interface EditorStateFallback {
   rigs?: AuroraRig[]
 }
 
+/** Kinds that v8-v13's demo graph copied out of the old string-only layer badges. */
+const LEGACY_GENERATED_EFFECT_KINDS = new Set<EditorNode['kind']>([
+  'blur', 'glow', 'vignette', 'brightnessContrast', 'colorMatrix', 'hueSaturation',
+])
+
+function walkLayers(layers: EditorLayer[], visit: (layer: EditorLayer) => void) {
+  layers.forEach((layer) => {
+    visit(layer)
+    if (layer.children) walkLayers(layer.children, visit)
+  })
+}
+
+function legacyGeneratedEffectNodes(nodes: EditorNode[], layers: EditorLayer[]) {
+  const byId = new Map(nodes.map((node) => [node.id, node]))
+  const generated = new Map<string, EditorNode>()
+  walkLayers(layers, (layer) => {
+    layer.effects
+      .filter((effect) => LEGACY_GENERATED_EFFECT_KINDS.has(effect.kind))
+      .forEach((effect, index) => {
+        const id = `node-effect-${layer.id}-${index}`
+        const node = byId.get(id)
+        if (node?.kind === effect.kind) generated.set(id, node)
+      })
+  })
+  return generated
+}
+
+/** Preserve edits made to v8-v13's generated graph nodes when promoting badges to real stacks. */
+function migrateLegacyLayerEffectValues(layers: EditorLayer[], nodes: unknown, version: number) {
+  normalizeLayerEffectStacks(layers)
+  if (version >= 14 || !Array.isArray(nodes)) return
+  const generated = legacyGeneratedEffectNodes(nodes as EditorNode[], layers)
+  walkLayers(layers, (layer) => {
+    const generatedEffects = layer.effects.filter((effect) => LEGACY_GENERATED_EFFECT_KINDS.has(effect.kind))
+    generatedEffects.forEach((effect, index) => {
+      const node = generated.get(`node-effect-${layer.id}-${index}`)
+      if (!node) return
+      const values = Object.fromEntries(layerEffectParameters(effect.kind).map((parameter, parameterIndex) => [
+        parameter.key,
+        node.inputs[parameterIndex + 1]?.value ?? effect.values[parameter.key],
+      ]))
+      const migrated = createLayerEffect(effect.kind, effect.id, values)
+      migrated.enabled = effect.enabled && !node.muted
+      layer.effects[layer.effects.indexOf(effect)] = migrated
+    })
+  })
+}
+
 /**
  * Projects saved before the node graph drove rendering get a fresh graph mirroring their layer
  * stack. Anything referencing a node or port that no longer exists is dropped rather than left
@@ -27,9 +76,42 @@ export interface EditorStateFallback {
  */
 function normalizeNodeGraph(nodes: unknown, connections: unknown, layers: EditorLayer[], version = CURRENT_PROJECT_VERSION) {
   const demo = createDemoNodeGraph(layers)
-  const candidates = Array.isArray(nodes) ? nodes as EditorNode[] : []
+  let candidates = Array.isArray(nodes) ? nodes as EditorNode[] : []
+  let candidateConnections = Array.isArray(connections) ? connections as EditorNodeConnection[] : []
   // Graphs from before the effect chains existed described a composite the project no longer means.
   if (version < 8) return demo
+  if (version < 14) {
+    // v8-v13 demo graphs copied string badges into generated nodes. Layer stacks now run at every
+    // source, so bypass only those generated nodes while preserving all user-authored wiring.
+    const generatedNodes = legacyGeneratedEffectNodes(candidates, layers)
+    const generated = new Set(generatedNodes.keys())
+    const replacements: EditorNodeConnection[] = []
+    candidateConnections.forEach((connection) => {
+      if (!generated.has(connection.fromNodeId) || generated.has(connection.toNodeId)) return
+      let generatedNode = generatedNodes.get(connection.fromNodeId)
+      let upstream = candidateConnections.find((item) => item.toNodeId === generatedNode?.id
+        && generatedNode?.inputs.find((socket) => socket.id === item.toPortId)?.type === 'image')
+      const visited = new Set<string>()
+      while (upstream && generated.has(upstream.fromNodeId) && !visited.has(upstream.fromNodeId)) {
+        visited.add(upstream.fromNodeId)
+        generatedNode = generatedNodes.get(upstream.fromNodeId)
+        upstream = candidateConnections.find((item) => item.toNodeId === generatedNode?.id
+          && generatedNode?.inputs.find((socket) => socket.id === item.toPortId)?.type === 'image')
+      }
+      if (!upstream) return
+      replacements.push({
+        ...connection,
+        id: `migrated-${upstream.fromNodeId}-${connection.toNodeId}-${connection.toPortId}`,
+        fromNodeId: upstream.fromNodeId,
+        fromPortId: upstream.fromPortId,
+      })
+    })
+    candidates = candidates.filter((node) => !generated.has(node.id))
+    candidateConnections = [
+      ...candidateConnections.filter((connection) => !generated.has(connection.fromNodeId) && !generated.has(connection.toNodeId)),
+      ...replacements,
+    ]
+  }
   // Anything from before typed sockets cannot be repaired field by field, so rebuild it instead.
   const usable = candidates.length > 0
     && candidates.every((node) => node?.id && NODE_DEFINITIONS[node.kind] && Array.isArray(node.inputs) && Array.isArray(node.outputs))
@@ -58,7 +140,7 @@ function normalizeNodeGraph(nodes: unknown, connections: unknown, layers: Editor
     ]))
   })
   const byId = new Map(restored.map((node) => [node.id, node]))
-  const links = (Array.isArray(connections) ? connections as EditorNodeConnection[] : []).filter((connection) => {
+  const links = candidateConnections.filter((connection) => {
     const from = byId.get(connection?.fromNodeId)
     const to = byId.get(connection?.toNodeId)
     return Boolean(from?.outputs.some((port) => port.id === connection.fromPortId)
@@ -69,6 +151,13 @@ function normalizeNodeGraph(nodes: unknown, connections: unknown, layers: Editor
 
 function clone<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T
+}
+
+function normalizeAssetEffectStacks(assets: MediaAsset[]) {
+  assets.forEach((asset) => {
+    if (asset.layerTemplate) normalizeLayerEffectStacks([asset.layerTemplate])
+    if (asset.sceneLayerTemplate) normalizeLayerEffectStacks([asset.sceneLayerTemplate])
+  })
 }
 
 /** Projects saved before 3D paths existed have no `paths` array and no camera constraints to repair. */
@@ -230,6 +319,8 @@ function pruneRigReferences(layers: EditorLayer[], scenes: Aurora3DScene[], rigs
 function cloneFallback(fallback: EditorStateFallback): SerializedEditorState {
   const state = clone(fallback)
   state.project.markers = normalizeTimelineMarkers(state.project.markers, state.project.duration)
+  normalizeLayerEffectStacks(state.layers)
+  normalizeAssetEffectStacks(state.assets)
   const graph = normalizeNodeGraph(state.nodes, state.nodeConnections, state.layers)
   const scenes3D = state.scenes3D.map(normalizeScene)
   const rigs = normalizeRigs(state.rigs)
@@ -303,9 +394,12 @@ export function deserializeEditorState(raw: string | null, fallback: EditorState
       const demoLayer = fallback.layers.find((layer) => layer.type === '3d-scene')
       if (demoLayer) layers.splice(Math.min(2, layers.length), 0, clone(demoLayer))
     }
+    migrateLegacyLayerEffectValues(layers, parsed.nodes, parsed.project.version ?? 1)
     const normalizedScenes = clone(scenes3D).map(normalizeScene)
     const rigs = normalizeRigs(clone(parsed.rigs ?? []))
     pruneRigReferences(layers, normalizedScenes, rigs)
+    const assets = Array.isArray(parsed.assets) ? clone(parsed.assets) : clone(fallback.assets)
+    normalizeAssetEffectStacks(assets)
     return {
       project: {
         ...clone(parsed.project),
@@ -318,7 +412,7 @@ export function deserializeEditorState(raw: string | null, fallback: EditorState
       })(),
       layers,
       scenes3D: normalizedScenes,
-      assets: Array.isArray(parsed.assets) ? clone(parsed.assets) : clone(fallback.assets),
+      assets,
       rigs,
     }
   } catch {

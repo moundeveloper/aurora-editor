@@ -286,14 +286,20 @@ export function createNeonSingularityProject(name = 'Neon Singularity', projectI
   const title = layer('layer-hero-title', 'NEON SINGULARITY', 'text', transform2D('title', 960, 790, {
     y: [[0, 860], [1.2, 790], [9.8, 790], [12, 700]], scale: [[0, 72], [1.3, 115], [2, 100], [10.2, 100], [12, 125]],
     opacity: [[0, 0], [.7, 0], [1.4, 100], [10.5, 100], [12, 0]],
-  }), { start: .4, duration: 11.6, textContent: 'NEON SINGULARITY', effects: ['Glow'] })
+  }), { start: .4, duration: 11.6, textContent: 'NEON SINGULARITY', effects: [{
+    id: 'effect-title-glow', kind: 'glow', enabled: true,
+    values: { threshold: 62, radius: 28, intensity: 1.45 },
+  }] })
   const subtitle = layer('layer-subtitle', 'AURORA // MACHINE DREAM 01', 'text', transform2D('subtitle', 960, 865, {
     x: [[0, 720], [2.2, 960], [9.8, 960], [12, 1200]], opacity: [[0, 0], [1.8, 0], [2.6, 82], [9.8, 82], [11.2, 0]],
   }), { start: 1.2, duration: 10, textContent: 'AURORA // MACHINE DREAM 01' })
   const flare = layer('layer-core-flare', 'Core Energy Flare', 'shape', transform2D('flare', 960, 540, {
     scale: [[0, 20], [1.5, 135], [3, 55], [4.5, 155], [6, 65], [7.5, 145], [9, 50], [10.5, 125], [12, 20]],
     rotation: [[0, 0], [12, 540]], opacity: [[0, 0], [.8, 38], [11.2, 38], [12, 0]],
-  }), { shapeKind: 'ellipse', shapeWidth: 280, shapeHeight: 280, color: '#4326b8', effects: ['Glow'] })
+  }), { shapeKind: 'ellipse', shapeWidth: 280, shapeHeight: 280, color: '#4326b8', effects: [{
+    id: 'effect-orb-glow', kind: 'glow', enabled: true,
+    values: { threshold: 62, radius: 28, intensity: 1.45 },
+  }] })
   const layers = [title, subtitle, flare, hud, sceneLayer, backdrop]
   const graph = createGraph(layers)
   return {

@@ -78,6 +78,76 @@ describe('hybrid project architecture', () => {
     expect(restored.layers.some((layer) => layer.type === '3d-scene')).toBe(true)
   })
 
+  it('migrates legacy effect names and bypasses their generated graph nodes', () => {
+    const legacyLayer = { ...layers[0]!, effects: ['Blur', 'Unknown effect', 'Gain'] }
+    const source = {
+      id: 'node-source-title', kind: 'text', title: 'Title', x: 0, y: 0, muted: false, sourceId: 'title', properties: {},
+      inputs: [], outputs: [{ id: 'source-out', label: 'Image', type: 'image' }],
+    }
+    const generated = {
+      id: 'node-effect-title-0', kind: 'blur', title: 'Blur', x: 100, y: 0, muted: true, properties: {},
+      inputs: [{ id: 'blur-in', label: 'Image', type: 'image' }, { id: 'blur-radius', label: 'Radius', type: 'value', value: 47 }],
+      outputs: [{ id: 'blur-out', label: 'Image', type: 'image' }],
+    }
+    const prefixedButAuthored = {
+      id: 'node-effect-user-authored', kind: 'brightnessContrast', title: 'Authored grade', x: 50, y: 0, muted: false, properties: {},
+      inputs: [
+        { id: 'authored-in', label: 'Image', type: 'image' },
+        { id: 'authored-brightness', label: 'Bright', type: 'value', value: 3 },
+        { id: 'authored-contrast', label: 'Contrast', type: 'value', value: 5 },
+      ],
+      outputs: [{ id: 'authored-out', label: 'Image', type: 'image' }],
+    }
+    const output = {
+      id: 'node-output', kind: 'output', title: 'Composite', x: 200, y: 0, muted: false, properties: {},
+      inputs: [{ id: 'output-in', label: 'Image', type: 'image' }], outputs: [],
+    }
+    const legacy = JSON.stringify({
+      project: { ...project, version: 13 }, layers: [legacyLayer], scenes3D: [], assets: [],
+      nodes: [source, prefixedButAuthored, generated, output],
+      nodeConnections: [
+        { id: 'source-authored', fromNodeId: source.id, fromPortId: 'source-out', toNodeId: prefixedButAuthored.id, toPortId: 'authored-in' },
+        { id: 'authored-generated', fromNodeId: prefixedButAuthored.id, fromPortId: 'authored-out', toNodeId: generated.id, toPortId: 'blur-in' },
+        { id: 'generated-output', fromNodeId: generated.id, fromPortId: 'blur-out', toNodeId: output.id, toPortId: 'output-in' },
+      ],
+    })
+
+    const restored = deserializeEditorState(legacy, { project, layers, scenes3D: [], assets: [] })
+
+    expect(restored.layers[0]?.effects).toEqual([{
+      id: 'title-effect-0', kind: 'blur', enabled: false, values: { radius: 47 },
+    }])
+    expect(restored.nodes.map((node) => node.id)).toEqual(['node-source-title', 'node-effect-user-authored', 'node-output'])
+    expect(restored.nodeConnections).toHaveLength(2)
+    expect(restored.nodeConnections).toEqual(expect.arrayContaining([expect.objectContaining({
+      fromNodeId: 'node-effect-user-authored', fromPortId: 'authored-out', toNodeId: 'node-output', toPortId: 'output-in',
+    })]))
+  })
+
+  it('normalizes layer-effect parameters and unique ids in layers and asset templates', () => {
+    const malformed = {
+      ...layers[0]!,
+      effects: [
+        { id: 'duplicate', kind: 'blur', enabled: true, values: { radius: 999 } },
+        { id: 'duplicate', kind: 'vignette', enabled: true, values: { amount: -20 } },
+      ],
+    }
+    const asset = {
+      id: 'asset-template', name: 'Template', kind: 'image', duration: 1, layerTemplate: {
+        ...layers[0]!, id: 'template-layer', effects: ['Glow'],
+      },
+    }
+    const state = { project, layers: [malformed], scenes3D: [], assets: [asset], ...createDemoNodeGraph2() }
+
+    const restored = deserializeEditorState(JSON.stringify(state), { project, layers, scenes3D: [], assets: [] })
+
+    expect(restored.layers[0]?.effects).toEqual([
+      expect.objectContaining({ id: 'duplicate', values: { radius: 200 } }),
+      expect.objectContaining({ id: 'title-effect-1', values: { amount: 0, softness: 72 } }),
+    ])
+    expect(restored.assets[0]?.layerTemplate?.effects[0]).toMatchObject({ kind: 'glow', enabled: true })
+  })
+
   it('centers the untouched legacy demo camera without overwriting a customized camera', () => {
     const fallback: SerializedEditorState = { project, layers, scenes3D: [createDemo3DScene()], assets: [], ...createDemoNodeGraph2() }
     const legacyScene = createDemo3DScene()
