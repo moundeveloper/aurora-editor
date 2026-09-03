@@ -272,7 +272,7 @@ export class HybridWebGLRenderBackend implements RenderBackend {
     this.threeRenderer.resetState()
     this.threeRenderer.setRenderTarget(null)
     this.threeRenderer.setScissorTest(false)
-    this.threeRenderer.setClearColor(request.project.backgroundColor, HYBRID_ALPHA_CONTRACT.clearAlpha)
+    this.threeRenderer.setClearColor(request.project.backgroundColor, request.transparentBackground ? 0 : HYBRID_ALPHA_CONTRACT.clearAlpha)
     this.threeRenderer.clear(true, true, true)
 
     let pixiPasses = 0
@@ -310,7 +310,7 @@ export class HybridWebGLRenderBackend implements RenderBackend {
         this.renderThreeLayer(
           layer, scene, request.time, size.width, size.height, request.project.width, request.project.height,
           request.project.frameRate, request.project.duration, request.quality, pass.effects, layerMap,
-          request.assets ?? [], request.rigs ?? [],
+          request.assets ?? [], request.rigs ?? [], request.transparentBackground === true,
         )
         threePasses += 1
       } else {
@@ -666,6 +666,7 @@ export class HybridWebGLRenderBackend implements RenderBackend {
     layerMap: Map<string, EditorLayer>,
     assets: MediaAsset[],
     rigs: AuroraRig[],
+    transparentBackground: boolean,
   ) {
     if (!this.threeRenderer) return
     const runtime = this.runtimeRegistry.get(sceneDefinition, width, height, time, assets, rigs)
@@ -698,6 +699,7 @@ export class HybridWebGLRenderBackend implements RenderBackend {
         try {
           sceneTexture = this.scenePipeline.renderMotionBlur(sampleTimes, (sampleTime) => {
             const sampleRuntime = this.runtimeRegistry.get(sceneDefinition, width, height, sampleTime, assets, rigs)
+            if (transparentBackground) sampleRuntime.scene.background = null
             const sampleCameraId = cameraIdAtTime(sceneDefinition, sampleTime)
             const sampleCamera = sampleCameraId ? sampleRuntime.cameras.get(sampleCameraId) : undefined
             const sampleCameraDefinition = sceneDefinition.cameras.find((item) => item.id === sampleCameraId)
@@ -714,7 +716,13 @@ export class HybridWebGLRenderBackend implements RenderBackend {
           this.runtimeRegistry.get(sceneDefinition, width, height, time, assets, rigs)
         }
       } else if ((ambientOcclusion || lens) && this.scenePipeline) {
-        sceneTexture = this.scenePipeline.render(runtime.scene, camera, renderSettings, width, height, 'texture', lens)
+        const background = runtime.scene.background
+        if (transparentBackground) runtime.scene.background = null
+        try {
+          sceneTexture = this.scenePipeline.render(runtime.scene, camera, renderSettings, width, height, 'texture', lens)
+        } finally {
+          runtime.scene.background = background
+        }
       } else {
         this.threeLayerTarget ??= new THREE.WebGLRenderTarget(width, height, { depthBuffer: true, stencilBuffer: false })
         if (this.threeLayerTarget.width !== width || this.threeLayerTarget.height !== height) this.threeLayerTarget.setSize(width, height)
@@ -722,7 +730,13 @@ export class HybridWebGLRenderBackend implements RenderBackend {
         this.threeRenderer.setRenderTarget(this.threeLayerTarget)
         this.threeRenderer.setClearColor(0x000000, 0)
         this.threeRenderer.clear(true, true, true)
-        this.threeRenderer.render(runtime.scene, camera)
+        const background = runtime.scene.background
+        if (transparentBackground) runtime.scene.background = null
+        try {
+          this.threeRenderer.render(runtime.scene, camera)
+        } finally {
+          runtime.scene.background = background
+        }
         sceneTexture = this.threeLayerTarget.texture
       }
       if (!sceneTexture) return
@@ -762,7 +776,13 @@ export class HybridWebGLRenderBackend implements RenderBackend {
       this.threeRenderer.setRenderTarget(null)
       this.threeRenderer.autoClear = false
       this.threeRenderer.clearDepth()
-      this.threeRenderer.render(runtime.scene, camera)
+      const background = runtime.scene.background
+      if (transparentBackground) runtime.scene.background = null
+      try {
+        this.threeRenderer.render(runtime.scene, camera)
+      } finally {
+        runtime.scene.background = background
+      }
       opacityRestore.forEach(({ material, opacity }) => { material.opacity = opacity })
       this.pixiRenderer?.resetState()
     }

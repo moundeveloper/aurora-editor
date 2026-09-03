@@ -20,6 +20,7 @@ seams in Aurora rather than generic wish-list entries.
 | P4 | Implemented | HDR/EXR radiance maps drive scene lighting and optional environment backgrounds. |
 | P5 | Implemented | Typed, ordered layer effects share the node evaluator and have live inspector controls plus legacy migration. |
 | P7 | Implemented | 3D scenes use shutter-based subframe accumulation, scene and layer toggles, and quality-aware sample counts. |
+| P10 | Implemented | Session-level onion controls ghost bounded previous/next frame samples in Motion and 3D without moving the playhead or writing frame-cache entries. |
 | P11 | Implemented | Named, coloured project markers persist, render on the ruler, snap timeline edits, and support previous/next navigation. |
 | P12 | Implemented | Modal G/R/S gestures support axes, typed values, snapping, framing, and local/global orientation. |
 | P15 | Partial | Spot lights and soft shadow controls exist; area lights and light linking remain. |

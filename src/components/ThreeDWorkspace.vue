@@ -14,14 +14,17 @@ import { pathTransformComponents, sampleLocalPath } from '@/engine/scene3d/pathE
 import { movePathHandle, movePathPoint, type PathHandleKey, type PathVector } from '@/engine/scene3d/pathEditing'
 import { AuroraSceneRenderPipeline } from '@/engine/rendering/AuroraSceneRenderPipeline'
 import { AuroraSolidViewport } from '@/engine/rendering/AuroraSolidViewport'
+import { onionSkinSamples, type OnionSkinDirection } from '@/engine/rendering/onionSkin'
+import { useOnionSkinSettings } from '@/composables/useOnionSkinSettings'
 import {
   applyGestureKey, beginGesture, gestureDelta, gestureLabel, type GestureBasis, type GestureMode, type GestureState,
 } from '@/engine/scene3d/transformGesture'
 import type { Aurora3DObject, Aurora3DPath, Aurora3DPathPoint, Aurora3DScene, AuroraRig } from '@/models/editor'
 import IconButton from './common/IconButton.vue'
+import OnionSkinControls from './common/OnionSkinControls.vue'
 
 const store = useEditorStore()
-const { selectedLayer, selectedScene, selectedSceneEntity, selectedSceneEntityId, currentTime, playing, assets, rigs } = storeToRefs(store)
+const { project, selectedLayer, selectedScene, selectedSceneEntity, selectedSceneEntityId, currentTime, playing, assets, rigs } = storeToRefs(store)
 const viewport = ref<HTMLElement>()
 const canvas = ref<HTMLCanvasElement>()
 const transformMode = ref<TransformControlsMode>('translate')
@@ -29,6 +32,7 @@ type EditorCameraView = 'Perspective' | 'Front' | 'Right' | 'Top' | 'User'
 const cameraView = ref<EditorCameraView>('Perspective')
 const viewportShading = ref<'rendered' | 'solid'>('rendered')
 const stats = ref({ calls: 0, triangles: 0 })
+const onionSkin = useOnionSkinSettings()
 interface PathPointSelection { pathId: string; pointId: string; target: PathHandleKey }
 /** Point-level selection lives beside the entity selection; it only applies while its path stays selected. */
 const pathSelection = ref<PathPointSelection | null>(null)
@@ -45,6 +49,15 @@ const runtimeRegistry = new ThreeSceneRuntimeRegistry(() => renderViewport())
 let renderer: THREE.WebGLRenderer | null = null
 let scenePipeline: AuroraSceneRenderPipeline | null = null
 const solidViewport = new AuroraSolidViewport()
+const onionMaterial = new THREE.MeshBasicMaterial({
+  color: '#8c9bff',
+  transparent: true,
+  opacity: .24,
+  depthTest: false,
+  depthWrite: false,
+  side: THREE.DoubleSide,
+  toneMapped: false,
+})
 let perspectiveCamera: THREE.PerspectiveCamera | null = null
 let orthographicCamera: THREE.OrthographicCamera | null = null
 let editorCamera: THREE.Camera | null = null
@@ -579,6 +592,57 @@ function attachSelection() {
 
 let viewportFrame = 0
 
+const onionColor = (direction: OnionSkinDirection) => direction === 'previous' ? '#d98b7f' : '#8c9bff'
+
+/**
+ * Draws cheap unlit silhouettes over the beauty pass. Runtime evaluation is transient and is put
+ * back at the playhead in `finally`, so picking, gizmos, history, and project persistence never see
+ * a sampled pose.
+ */
+function renderOnionSkin3D(sceneDefinition: Aurora3DScene, host: HTMLElement) {
+  if (!renderer || !editorCamera || playing.value || transform?.dragging || gesture.value || pathDrag || gizmoDrag) return
+  const samples = onionSkinSamples(currentTime.value, project.value.frameRate, project.value.duration, onionSkin)
+  if (!samples.length) return
+  const width = host.clientWidth
+  const height = host.clientHeight
+  const previousAutoClear = renderer.autoClear
+  const helperVisibility: Array<{ object: THREE.Object3D; visible: boolean }> = []
+
+  try {
+    renderer.resetState()
+    renderer.setRenderTarget(null)
+    renderer.autoClear = false
+    renderer.clearDepth()
+    samples.forEach((sample) => {
+      const sampled = runtimeRegistry.get(sceneDefinition, width, height, sample.time, assets.value, rigs.value)
+      sampled.root.visible = selectedLayer.value?.visible !== false
+      if (!helperVisibility.length) {
+        sampled.scene.traverse((object) => {
+          if (!object.userData.editorOnly) return
+          helperVisibility.push({ object, visible: object.visible })
+          object.visible = false
+        })
+      }
+      const background = sampled.scene.background
+      const override = sampled.scene.overrideMaterial
+      sampled.scene.background = null
+      sampled.scene.overrideMaterial = onionMaterial
+      onionMaterial.color.set(onionColor(sample.direction))
+      onionMaterial.opacity = sample.opacity
+      try {
+        renderer!.render(sampled.scene, editorCamera!)
+      } finally {
+        sampled.scene.overrideMaterial = override
+        sampled.scene.background = background
+      }
+    })
+  } finally {
+    helperVisibility.forEach(({ object, visible }) => { object.visible = visible })
+    renderer.autoClear = previousAutoClear
+    runtime = runtimeRegistry.get(sceneDefinition, width, height, currentTime.value, assets.value, rigs.value)
+  }
+}
+
 function renderViewportNow() {
   const sceneDefinition = selectedScene.value
   const host = viewport.value
@@ -616,6 +680,7 @@ function renderViewportNow() {
   } finally {
     restoreMaterials?.()
   }
+  renderOnionSkin3D(sceneDefinition, host)
   stats.value = { calls: renderer.info.render.calls, triangles: renderer.info.render.triangles }
 }
 
@@ -1295,6 +1360,7 @@ onBeforeUnmount(() => {
   scenePipeline?.dispose()
   scenePipeline = null
   solidViewport.dispose()
+  onionMaterial.dispose()
   renderer?.dispose()
   renderer = null
   editorCamera = null
@@ -1303,6 +1369,7 @@ onBeforeUnmount(() => {
 })
 
 watch([selectedLayer, selectedScene, currentTime, selectedSceneEntityId, assets, rigs], renderViewport, { deep: true })
+watch(() => [onionSkin.enabled, onionSkin.previousFrames, onionSkin.nextFrames, onionSkin.opacity], renderViewport)
 </script>
 
 <template>
@@ -1321,6 +1388,17 @@ watch([selectedLayer, selectedScene, currentTime, selectedSceneEntityId, assets,
       <span class="toolbar-divider" />
       <button type="button" class="view-button" :class="{ active: viewportShading === 'solid' }" title="Solid shading (Z): camera-relative studio lights, material color, and cavity definition" :aria-pressed="viewportShading === 'solid'" @click="viewportShading = 'solid'; renderViewport()">Solid</button>
       <button type="button" class="view-button" :class="{ active: viewportShading === 'rendered' }" title="Use authored materials, lights, shadows, and ambient occlusion" :aria-pressed="viewportShading === 'rendered'" @click="viewportShading = 'rendered'; renderViewport()">Rendered</button>
+      <span class="toolbar-divider" />
+      <OnionSkinControls
+        :enabled="onionSkin.enabled"
+        :previous-frames="onionSkin.previousFrames"
+        :next-frames="onionSkin.nextFrames"
+        :opacity="onionSkin.opacity"
+        @update:enabled="onionSkin.enabled = $event"
+        @update:previous-frames="onionSkin.previousFrames = $event"
+        @update:next-frames="onionSkin.nextFrames = $event"
+        @update:opacity="onionSkin.opacity = $event"
+      />
       <template v-if="selectedPath">
         <span class="toolbar-divider" />
         <span class="path-label"><Spline :size="11" :style="{ color: selectedPath.color }" /> {{ selectedPath.name }}</span>

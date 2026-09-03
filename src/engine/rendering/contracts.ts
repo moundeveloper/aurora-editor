@@ -51,6 +51,8 @@ export interface RenderFrameRequest {
   cacheVersion?: string | number
   /** Explicit background renders opt into the GPU readback and persistent write cost. */
   cacheWrite?: boolean
+  /** Viewport-only auxiliary passes can omit the project and 3D world backgrounds for compositing. */
+  transparentBackground?: boolean
   time: number
   /** Sequential playback uses the media decoder clock; scrubbing and export request exact seeks. */
   playback?: boolean
