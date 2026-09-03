@@ -27,12 +27,18 @@ export function makeTransform3D(prefix: string, position: [number, number, numbe
   }
 }
 
+/**
+ * Defaults follow Blender's Principled BSDF — dielectric, half rough — so a new object reads the
+ * way an author coming from Blender expects. A metallic default is the harsher choice: metals have
+ * no diffuse term, so they show only what the environment gives them and go dark wherever the
+ * highlight is not.
+ */
 export function makePBRMaterial(prefix: string, baseColor = '#8c9bff'): AuroraPBRMaterial {
   return {
     baseColor,
     opacity: numericProperty(`${prefix}-opacity`, 1),
-    metalness: numericProperty(`${prefix}-metalness`, .35),
-    roughness: numericProperty(`${prefix}-roughness`, .28),
+    metalness: numericProperty(`${prefix}-metalness`, 0),
+    roughness: numericProperty(`${prefix}-roughness`, .5),
     emissive: '#111529',
     emissiveIntensity: numericProperty(`${prefix}-emissive-intensity`, .18),
   }

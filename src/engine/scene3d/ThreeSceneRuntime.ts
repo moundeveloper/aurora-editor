@@ -7,6 +7,13 @@ import { bonePoseMatrices, rigIsActive, rigPoseSignature, rigRestSignature } fro
 import { mediaUrl } from '@/services/mediaLibrary'
 import type { Aurora3DObject, Aurora3DScene, AuroraCamera, AuroraLight, AuroraRig, MediaAsset, Transform3D } from '@/models/editor'
 
+/**
+ * Blender's default world grey, in linear radiance. A scene with no radiance map still lights from
+ * a uniform world there, which is what stops a surface going black once the camera leaves the
+ * specular highlight.
+ */
+export const NEUTRAL_WORLD_RADIANCE = .05
+
 export interface Scene3DRuntime {
   sceneId: string
   revision: number
@@ -406,6 +413,7 @@ export class ThreeSceneRuntimeRegistry {
   private textures = new Map<string, THREE.Texture>()
   private environmentPromises = new Map<string, Promise<THREE.Texture | null>>()
   private environments = new Map<string, THREE.Texture>()
+  private neutralWorld: THREE.DataTexture | null = null
   private modelPromises = new Map<string, Promise<THREE.Object3D | null>>()
   private models = new Map<string, THREE.Object3D>()
   private disposed = false
@@ -484,6 +492,41 @@ export class ThreeSceneRuntimeRegistry {
   }
 
   /**
+   * The stand-in for a scene that lights from no radiance map.
+   *
+   * An AmbientLight cannot fill this role: Three feeds it into indirect diffuse only, so it adds
+   * nothing to the specular term and every glossy surface still falls to black as soon as the
+   * camera leaves the highlight. A probe is what carries ambient specular, so the fallback has to
+   * be one — a uniform equirectangular map, which the renderer filters into a probe exactly as it
+   * does an authored HDR.
+   *
+   * The size is not free to shrink to the one texel a constant would need: Three derives the
+   * filtered probe's mip chain from the source dimensions, and anything under roughly 64x32
+   * degenerates into a probe that lights nothing at all.
+   */
+  private neutralWorldProbe() {
+    if (this.neutralWorld) return this.neutralWorld
+    const width = 64
+    const height = 32
+    const data = new Float32Array(width * height * 4)
+    for (let texel = 0; texel < width * height; texel += 1) {
+      data[texel * 4] = NEUTRAL_WORLD_RADIANCE
+      data[texel * 4 + 1] = NEUTRAL_WORLD_RADIANCE
+      data[texel * 4 + 2] = NEUTRAL_WORLD_RADIANCE
+      data[texel * 4 + 3] = 1
+    }
+    const texture = new THREE.DataTexture(data, width, height, THREE.RGBAFormat, THREE.FloatType)
+    texture.mapping = THREE.EquirectangularReflectionMapping
+    // The texels are radiance already, so they must not be decoded on the way in.
+    texture.colorSpace = THREE.NoColorSpace
+    texture.minFilter = THREE.LinearFilter
+    texture.magFilter = THREE.LinearFilter
+    texture.needsUpdate = true
+    this.neutralWorld = texture
+    return texture
+  }
+
+  /**
    * Loads a glTF once per URL and hands out clones. Geometry and materials stay shared between
    * instances, so twenty copies of a prop cost one parse; SkeletonUtils does the cloning because a
    * plain Object3D.clone detaches a skinned mesh from its skeleton.
@@ -539,7 +582,7 @@ export class ThreeSceneRuntimeRegistry {
     })
   }
 
-  /** Applies the authored environment map, falling back to the flat background colour without one. */
+  /** Applies the authored environment map, falling back to a neutral world probe without one. */
   private syncEnvironment(runtime: Scene3DRuntime, definition: Aurora3DScene, assets: Map<string, MediaAsset>) {
     const scene = runtime.scene
     const color = definition.settings.backgroundColor ? new THREE.Color(definition.settings.backgroundColor) : null
@@ -549,7 +592,9 @@ export class ThreeSceneRuntimeRegistry {
     scene.environmentIntensity = definition.environmentIntensity
     scene.backgroundIntensity = definition.environmentIntensity
     if (!url || !decoder) {
-      scene.environment = null
+      // A background colour is a backdrop, not a light, so it cannot be the fallback. Zero
+      // intensity is the one case that means no environment light at all.
+      scene.environment = definition.environmentIntensity > 0 ? this.neutralWorldProbe() : null
       scene.background = color
       delete scene.userData.auroraEnvironmentUrl
       return
@@ -740,6 +785,8 @@ export class ThreeSceneRuntimeRegistry {
     this.environments.forEach((texture) => texture.dispose())
     this.environments.clear()
     this.environmentPromises.clear()
+    this.neutralWorld?.dispose()
+    this.neutralWorld = null
     this.models.forEach((model) => model.traverse((node) => {
       if (!(node instanceof THREE.Mesh)) return
       node.geometry.dispose()

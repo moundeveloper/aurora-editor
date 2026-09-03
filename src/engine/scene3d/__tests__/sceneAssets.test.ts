@@ -49,7 +49,9 @@ describe('environment maps', () => {
 
     const runtime = registry.get(scene, 640, 360, 0)
 
-    expect(runtime.scene.environment).toBeNull()
+    // A background colour is a backdrop, not a light, so a scene with no radiance map still lights
+    // from the neutral world probe rather than from nothing at all.
+    expect(runtime.scene.environment).not.toBeNull()
     expect(runtime.scene.environmentIntensity).toBeCloseTo(.6)
     expect((runtime.scene.background as THREE.Color).getHexString()).toBe('101820')
     registry.dispose()
