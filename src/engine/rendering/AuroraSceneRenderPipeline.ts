@@ -52,7 +52,8 @@ export class AuroraSceneRenderPipeline {
       uniform sampler2D sampleTexture;
       uniform float sampleWeight;
       varying vec2 vUv;
-      #include <colorspace_pars_fragment>
+      // Three prepends <colorspace_pars_fragment> to every material, so including it here again
+      // redefines sRGBTransferEOTF and the shader fails to compile.
       void main() {
         gl_FragColor = sRGBTransferEOTF(texture2D(sampleTexture, vUv)) * sampleWeight;
       }
