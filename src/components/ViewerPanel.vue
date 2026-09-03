@@ -928,7 +928,37 @@ onBeforeUnmount(() => {
   onionScratchCanvas = null
 })
 
-watch([currentTime, project, activeClusterId, timelineLayers, scenes3D, nodes, nodeConnections, renderRootNodeId, renderRevision, rigs], draw, { deep: true })
+/*
+ * A deep watch over the whole project is what keeps the viewport honest while the user edits: it
+ * catches a keyframe value or a material channel written straight onto the reactive tree. The cost
+ * is that every trigger re-traverses every layer, scene object, node and rig to recollect
+ * dependencies — and the playhead is a trigger, so playback paid that whole-project walk once per
+ * frame on top of the render.
+ *
+ * Nothing in those structures can change while the transport runs, so the deep watch is suspended
+ * for the duration and the playhead alone drives redraws.
+ */
+const structureSources = [project, activeClusterId, timelineLayers, scenes3D, nodes, nodeConnections, renderRootNodeId, renderRevision, rigs]
+let stopStructureWatch: (() => void) | null = null
+
+function watchStructures() {
+  stopStructureWatch ??= watch(structureSources, draw, { deep: true })
+}
+
+function unwatchStructures() {
+  stopStructureWatch?.()
+  stopStructureWatch = null
+}
+
+watch(currentTime, draw)
+watch(playing, (isPlaying) => {
+  if (isPlaying) return unwatchStructures()
+  watchStructures()
+  // An edit landing during playback was never observed, so the frame on pause has to be rebuilt.
+  draw()
+}, { immediate: true })
+
+onBeforeUnmount(unwatchStructures)
 watch(() => [onionSkin.enabled, onionSkin.previousFrames, onionSkin.nextFrames, onionSkin.opacity], queueOnionDraw)
 </script>
 

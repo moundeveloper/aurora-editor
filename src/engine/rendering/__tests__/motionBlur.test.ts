@@ -32,4 +32,12 @@ describe('motion blur sampling', () => {
     expect(effectiveMotionBlurSamples(settings, 'full')).toBe(16)
     expect(effectiveMotionBlurSamples(settings, 'draft')).toBe(1)
   })
+
+  it('collapses sampling to one render while the transport runs', () => {
+    // Sampling multiplies the whole scene render, which playback cannot pay once per frame.
+    expect(effectiveMotionBlurSamples(settings, 'preview', true)).toBe(1)
+    expect(effectiveMotionBlurSamples(settings, 'full', true)).toBe(1)
+    // Export never plays back, so it keeps every authored sample.
+    expect(effectiveMotionBlurSamples(settings, 'full', false)).toBe(16)
+  })
 })

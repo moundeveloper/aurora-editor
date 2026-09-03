@@ -311,6 +311,7 @@ export class HybridWebGLRenderBackend implements RenderBackend {
           layer, scene, request.time, size.width, size.height, request.project.width, request.project.height,
           request.project.frameRate, request.project.duration, request.quality, pass.effects, layerMap,
           request.assets ?? [], request.rigs ?? [], request.transparentBackground === true,
+          request.playback === true,
         )
         threePasses += 1
       } else {
@@ -667,6 +668,7 @@ export class HybridWebGLRenderBackend implements RenderBackend {
     assets: MediaAsset[],
     rigs: AuroraRig[],
     transparentBackground: boolean,
+    playback: boolean,
   ) {
     if (!this.threeRenderer) return
     const runtime = this.runtimeRegistry.get(sceneDefinition, width, height, time, assets, rigs)
@@ -681,9 +683,16 @@ export class HybridWebGLRenderBackend implements RenderBackend {
       ? this.maskRasterFor(maskLayer, effects.mask, time, width, height, projectWidth, projectHeight)
       : null
     const renderSettings = { ...sceneDefinition.settings, quality }
-    const ambientOcclusion = renderSettings.ambientOcclusion && quality !== 'draft'
+    /*
+     * Running the transport buys preview fidelity, not final fidelity. Ambient occlusion is a
+     * second full-screen pass per 3D layer per frame, and shutter sampling multiplies the entire
+     * scene render by its sample count — eight scene renders for one displayed frame at the default
+     * shutter. Both are restored the moment playback stops, and neither is touched for export,
+     * which never sets the playback flag.
+     */
+    const ambientOcclusion = renderSettings.ambientOcclusion && quality !== 'draft' && !playback
     const cameraDefinition = sceneDefinition.cameras.find((item) => item.id === cameraId)
-    const motionBlurSamples = layer.motionBlur === false ? 1 : effectiveMotionBlurSamples(renderSettings, quality)
+    const motionBlurSamples = layer.motionBlur === false ? 1 : effectiveMotionBlurSamples(renderSettings, quality, playback)
     const sampleTimes = motionBlurSampleTimes(
       time, frameRate, renderSettings.motionBlurShutter, motionBlurSamples,
       Math.max(0, layer.start), Math.min(projectDuration, layer.start + layer.duration),

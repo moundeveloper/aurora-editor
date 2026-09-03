@@ -38,8 +38,13 @@ export function motionBlurSampleTimes(
   ))
 }
 
-export function effectiveMotionBlurSamples(settings: Scene3DSettings, quality: RenderQuality) {
-  if (!settings.motionBlur || quality === 'draft' || settings.motionBlurShutter <= 0) return 1
+/**
+ * `playback` collapses sampling to a single render. Shutter sampling multiplies the whole scene
+ * render by its sample count, which the transport cannot afford once per displayed frame; the
+ * authored sample count returns as soon as playback stops, and export never sets the flag.
+ */
+export function effectiveMotionBlurSamples(settings: Scene3DSettings, quality: RenderQuality, playback = false) {
+  if (!settings.motionBlur || quality === 'draft' || playback || settings.motionBlurShutter <= 0) return 1
   const authored = Math.round(clamp(settings.motionBlurSamples, MIN_MOTION_BLUR_SAMPLES, MAX_MOTION_BLUR_SAMPLES))
   return quality === 'preview' ? Math.min(authored, PREVIEW_MOTION_BLUR_SAMPLE_CAP) : authored
 }

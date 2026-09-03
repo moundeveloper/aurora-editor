@@ -1,5 +1,5 @@
 import 'fake-indexeddb/auto'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { AuroraFrameCacheDatabase, frameCacheAddress } from '@/engine/rendering/frameCache'
 import type { RenderFrameRequest } from '@/engine/rendering/contracts'
 
@@ -25,6 +25,37 @@ describe('persistent frame cache', () => {
     expect(frameCacheAddress(request(), 'full').key).not.toBe(base.key)
     expect(frameCacheAddress(request({ revision: 99, cacheVersion: 'saved' }), 'preview').key)
       .toBe(frameCacheAddress(request({ revision: 1, cacheVersion: 'saved' }), 'preview').key)
+  })
+
+  it('does not queue an access-time write on every read', async () => {
+    const database = new AuroraFrameCacheDatabase(`frame-cache-${crypto.randomUUID()}`, 1024)
+    databases.push(database)
+    const address = frameCacheAddress(request(), 'preview')
+    await database.put({ ...address, width: 1, height: 1, data: new Uint8ClampedArray([1, 2, 3, 255]) })
+
+    await database.get({ ...address, width: 1, height: 1 })
+    await new Promise((resolve) => setTimeout(resolve))
+    const firstStamp = (await database.frames.get(address.key))!.accessedAt
+
+    // Playing a cached range reads the same frames repeatedly; recency only has to order eviction.
+    const stamps = new Set<number>()
+    for (let read = 0; read < 5; read += 1) {
+      await database.get({ ...address, width: 1, height: 1 })
+      await new Promise((resolve) => setTimeout(resolve))
+      stamps.add((await database.frames.get(address.key))!.accessedAt)
+    }
+    expect([...stamps]).toEqual([firstStamp])
+
+    // Once the stamp is stale enough, the next read refreshes it so eviction stays ordered.
+    const later = Date.now() + 60_000
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(later)
+    try {
+      await database.get({ ...address, width: 1, height: 1 })
+      await new Promise((resolve) => setTimeout(resolve))
+      expect((await database.frames.get(address.key))!.accessedAt).toBe(later)
+    } finally {
+      clock.mockRestore()
+    }
   })
 
   it('round-trips pixels without sharing mutable buffers', async () => {
