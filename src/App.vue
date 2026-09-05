@@ -137,7 +137,7 @@ onBeforeUnmount(() => {
         <button type="button" :class="{ active: leftOpen }" title="Toggle asset browser" @click="leftOpen = !leftOpen"><PanelLeftClose :size="12" /></button>
         <button type="button" :class="{ active: bottomOpen }" title="Toggle timeline" @click="bottomOpen = !bottomOpen"><PanelBottomClose :size="12" /></button>
         <button v-if="inspectorAvailable" type="button" :class="{ active: rightOpen }" title="Toggle inspector" @click="rightOpen = !rightOpen"><PanelRightClose :size="12" /></button>
-        <button type="button" :class="{ active: historyOpen }" title="Toggle history" @click="historyOpen = !historyOpen"><History :size="12" /></button>
+        <button type="button" :class="{ active: historyOpen }" title="Project history — step back through recent actions (Ctrl+Shift+H)" @click="historyOpen = !historyOpen"><History :size="12" /></button>
       </div>
       <span class="status-divider" />
       <span><ShieldCheck :size="11" /> Local-first</span>

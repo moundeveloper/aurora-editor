@@ -20,12 +20,12 @@ seams in Aurora rather than generic wish-list entries.
 | P4 | Implemented | HDR/EXR radiance maps drive scene lighting and optional environment backgrounds. |
 | P5 | Implemented | Typed, ordered layer effects share the node evaluator and have live inspector controls plus legacy migration. |
 | P7 | Implemented | 3D scenes use shutter-based subframe accumulation, scene and layer toggles, and quality-aware sample counts. |
-| P10 | Implemented | Session-level onion controls ghost bounded previous/next frame samples in Motion and 3D without moving the playhead or writing frame-cache entries. |
+| P10 | Removed | Onion skinning was implemented for Motion and 3D, then removed at the user's request: on photographic/rendered composites the ghosts read as a muddy wash rather than a legible pose, so it was not useful here. |
 | P11 | Implemented | Named, coloured project markers persist, render on the ruler, snap timeline edits, and support previous/next navigation. |
 | P12 | Implemented | Modal G/R/S gestures support axes, typed values, snapping, framing, and local/global orientation. |
-| P15 | Partial | Spot lights and soft shadow controls exist; area lights and light linking remain. |
-| P16 | Implemented | Keyframeable camera focus distance and f-stop drive the bokeh render pass. |
-| P18 | Partial | Solid and Rendered viewport modes exist; wireframe, matcap, X-ray, and overlays remain. |
+| P15 | Partial | Spot lights, soft shadows, and keyframeable rect **area lights** exist. Per-object light linking remains: Three 0.185 collects lights per scene (a light's layers are tested against the camera, not each object), so real include/exclude lists need a multi-pass or custom-shader path, not the M-effort the proposal assumed. |
+| P16 | Implemented | Keyframeable camera focus distance and f-stop drive the bokeh render pass, in the viewport playback path as well as when paused. |
+| P18 | Implemented | Solid, Rendered, Wireframe, Matcap, and X-ray shading modes, plus a wireframe overlay that rides on top of any mode. |
 | P27 | Implemented | Revision-safe persistent RGBA frames, background range caching, replay, cancellation, and a timeline cache bar. |
 | P28 | Implemented | Searchable commands, portable global shortcuts, and a persisted in-app shortcut recorder. |
 | P30 | Implemented | Named, workspace-aware undo states are visible in a compact panel and support non-destructive backward/forward jumps. |

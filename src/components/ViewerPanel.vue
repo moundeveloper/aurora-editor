@@ -13,10 +13,7 @@ import { setNumericPropertyAtTime } from '@/engine/animation/editNumericProperty
 import type { AuroraRig, EditorLayer, ShapePathPoint } from '@/models/editor'
 import { applyMatrix, boneTransforms, invert, multiply, rotation as rotationMatrix, scaling, translation, type Matrix2D, type RigPoint } from '@/engine/rig/skeleton'
 import { poseOffsetTowards, poseRotationTowards, restAimTowards } from '@/engine/rig/rigPosing'
-import { asOnionSkinRenderRequest, onionSkinSamples } from '@/engine/rendering/onionSkin'
-import { useOnionSkinSettings } from '@/composables/useOnionSkinSettings'
 import IconButton from './common/IconButton.vue'
-import OnionSkinControls from './common/OnionSkinControls.vue'
 
 const store = useEditorStore()
 const {
@@ -26,7 +23,6 @@ const {
   frameCacheRange,
 } = storeToRefs(store)
 const canvas = ref<HTMLCanvasElement>()
-const onionCanvas = ref<HTMLCanvasElement>()
 const canvasWrap = ref<HTMLElement>()
 const transformBox = ref<HTMLElement>()
 type MotionTool = 'Select' | 'Hand' | 'Zoom' | 'Text' | 'Rectangle' | 'Ellipse' | 'Pen' | 'Rig' | 'Transform'
@@ -38,15 +34,7 @@ const showGuides = ref(true)
 const viewportSize = ref({ width: 0, height: 0 })
 const viewportPan = ref({ x: 0, y: 0 })
 const isViewportPanning = ref(false)
-const onionSkin = useOnionSkinSettings()
 let renderer: AuroraFrameEngine | null = null
-let onionRenderer: AuroraFrameEngine | null = null
-let onionRenderCanvas: HTMLCanvasElement | null = null
-let onionScratchCanvas: HTMLCanvasElement | null = null
-let onionGeneration = 0
-let onionQueued = false
-let onionRunning = false
-let onionRun: Promise<void> | null = null
 let cacheRenderer: AuroraFrameEngine | null = null
 let cacheAbort: AbortController | null = null
 let cacheRun: Promise<void> | null = null
@@ -406,81 +394,6 @@ async function drawNow() {
   }
 }
 
-function clearOnionCanvas() {
-  const target = onionCanvas.value
-  target?.getContext('2d')?.clearRect(0, 0, target.width, target.height)
-}
-
-async function ensureOnionRenderer() {
-  if (onionRenderer) return onionRenderer
-  const { AuroraFrameEngine } = await import('@/engine/rendering/AuroraFrameEngine')
-  const renderCanvas = document.createElement('canvas')
-  const scratchCanvas = document.createElement('canvas')
-  const engine = new AuroraFrameEngine(renderCanvas, '/demo/aurora-ridge.png', {
-    adaptiveQuality: false,
-    frameCache: false,
-  })
-  const size = previewRenderSize.value
-  await engine.initialize({ ...size, pixelRatio: 1 })
-  onionRenderCanvas = renderCanvas
-  onionScratchCanvas = scratchCanvas
-  onionRenderer = engine
-  return engine
-}
-
-/** Paints coloured alpha silhouettes from a detached renderer, leaving the main canvas untouched. */
-async function drawOnionSnapshot(generation: number) {
-  const target = onionCanvas.value
-  const samples = onionSkinSamples(currentTime.value, project.value.frameRate, project.value.duration, onionSkin)
-  if (!target || playing.value || !samples.length) {
-    clearOnionCanvas()
-    return
-  }
-  const engine = await ensureOnionRenderer()
-  if (generation !== onionGeneration || !onionRenderCanvas || !onionScratchCanvas) return
-  const width = previewRenderSize.value.width
-  const height = previewRenderSize.value.height
-  if (target.width !== width) target.width = width
-  if (target.height !== height) target.height = height
-  if (onionScratchCanvas.width !== width) onionScratchCanvas.width = width
-  if (onionScratchCanvas.height !== height) onionScratchCanvas.height = height
-  const targetContext = target.getContext('2d')
-  const scratchContext = onionScratchCanvas.getContext('2d')
-  if (!targetContext || !scratchContext) return
-  targetContext.clearRect(0, 0, width, height)
-
-  for (const sample of samples) {
-    await engine.renderImmediate(asOnionSkinRenderRequest(renderRequest(sample.time, false)))
-    if (generation !== onionGeneration) return
-    scratchContext.clearRect(0, 0, width, height)
-    scratchContext.globalCompositeOperation = 'source-over'
-    scratchContext.globalAlpha = 1
-    scratchContext.drawImage(onionRenderCanvas, 0, 0, width, height)
-    scratchContext.globalCompositeOperation = 'source-in'
-    scratchContext.fillStyle = sample.direction === 'previous' ? '#d98b7f' : '#8c9bff'
-    scratchContext.fillRect(0, 0, width, height)
-    targetContext.globalAlpha = sample.opacity
-    targetContext.drawImage(onionScratchCanvas, 0, 0)
-  }
-  targetContext.globalAlpha = 1
-}
-
-function queueOnionDraw() {
-  onionGeneration += 1
-  onionQueued = true
-  if (!onionSkin.enabled || playing.value) clearOnionCanvas()
-  if (onionRunning) return
-  onionRunning = true
-  const run = (async () => {
-    while (onionQueued) {
-      onionQueued = false
-      await drawOnionSnapshot(onionGeneration).catch(() => clearOnionCanvas())
-    }
-    onionRunning = false
-  })()
-  onionRun = run
-  void run.finally(() => { if (onionRun === run) onionRun = null }).catch(() => undefined)
-}
 
 async function buildFrameCacheRange() {
   const previousRun = cacheRun
@@ -553,7 +466,6 @@ watch(frameCacheClearId, async () => {
 /** Brush strokes and drags can outpace rendering; the engine keeps only the newest queued frame. */
 function draw() {
   void drawNow()
-  queueOnionDraw()
 }
 
 function setTransformValue(key: 'x' | 'y' | 'scaleX' | 'scaleY' | 'rotation', value: number, targetLayer?: EditorLayer) {
@@ -917,15 +829,8 @@ onBeforeUnmount(() => {
   window.removeEventListener('pointercancel', endViewportTransform)
   window.removeEventListener('keydown', onViewerKeydown)
   void renderer?.dispose()
-  onionGeneration += 1
-  onionQueued = false
-  const transientRenderer = onionRenderer
-  void (onionRun ?? Promise.resolve()).finally(() => transientRenderer?.dispose())
   cacheAbort?.abort()
   renderer = null
-  onionRenderer = null
-  onionRenderCanvas = null
-  onionScratchCanvas = null
 })
 
 /*
@@ -959,7 +864,6 @@ watch(playing, (isPlaying) => {
 }, { immediate: true })
 
 onBeforeUnmount(unwatchStructures)
-watch(() => [onionSkin.enabled, onionSkin.previousFrames, onionSkin.nextFrames, onionSkin.opacity], queueOnionDraw)
 </script>
 
 <template>
@@ -972,17 +876,6 @@ watch(() => [onionSkin.enabled, onionSkin.previousFrames, onionSkin.nextFrames, 
       <IconButton :icon="BoxSelect" label="Safe guides" :active="showGuides" @click="showGuides = !showGuides" />
       <IconButton :icon="Grid3X3" label="Grid overlay" :active="showGrid" @click="showGrid = !showGrid" />
       <IconButton :icon="Crosshair" label="Snap" :active="snap" @click="snap = !snap" />
-      <span class="toolbar-divider" />
-      <OnionSkinControls
-        :enabled="onionSkin.enabled"
-        :previous-frames="onionSkin.previousFrames"
-        :next-frames="onionSkin.nextFrames"
-        :opacity="onionSkin.opacity"
-        @update:enabled="onionSkin.enabled = $event"
-        @update:previous-frames="onionSkin.previousFrames = $event"
-        @update:next-frames="onionSkin.nextFrames = $event"
-        @update:opacity="onionSkin.opacity = $event"
-      />
       <span class="toolbar-divider" />
       <IconButton :icon="ZoomOut" label="Zoom out viewport" @click="setViewportZoom(zoom - 10)" />
       <span class="viewport-zoom-label">{{ zoom }}%</span>
@@ -997,7 +890,6 @@ watch(() => [onionSkin.enabled, onionSkin.previousFrames, onionSkin.nextFrames, 
     <div ref="canvasWrap" class="canvas-viewport" :class="{ 'show-grid': showGrid, panning: isViewportPanning, 'hand-tool': activeTool === 'Hand', 'zoom-tool': activeTool === 'Zoom', 'drawing-tool': activeTool === 'Rectangle' || activeTool === 'Ellipse', 'pen-tool': activeTool === 'Pen', 'rig-tool': activeTool === 'Rig' }" @pointerdown="onViewportPointerDown" @dblclick.prevent="activeTool === 'Pen' && finishPenFromDoubleClick()" @wheel="onViewportWheel" @auxclick.prevent>
       <div class="canvas-stage" :style="stageStyle">
         <canvas ref="canvas" :width="previewRenderSize.width" :height="previewRenderSize.height" aria-label="Composition preview" />
-        <canvas ref="onionCanvas" class="onion-canvas" :width="previewRenderSize.width" :height="previewRenderSize.height" aria-hidden="true" />
         <div v-if="shapeDraw" class="shape-draw-preview" :style="shapePreviewStyle" />
         <svg v-if="penDraft" class="pen-draft-overlay" :viewBox="`0 0 ${project.width} ${project.height}`" preserveAspectRatio="none" aria-label="Path being drawn">
           <path :d="penDraftPath" />
@@ -1082,7 +974,6 @@ watch(() => [onionSkin.enabled, onionSkin.previousFrames, onionSkin.nextFrames, 
 .canvas-viewport.show-grid::after { position: absolute; inset: 0; background-image: linear-gradient(rgb(142 154 225 / .08) 1px, transparent 1px), linear-gradient(90deg, rgb(142 154 225 / .08) 1px, transparent 1px); background-size: 36px 36px; content: ''; pointer-events: none; }
 .canvas-viewport.hand-tool { cursor: grab; }.canvas-viewport.zoom-tool { cursor: zoom-in; }.canvas-viewport.panning { cursor: grabbing; user-select: none; }.canvas-stage { position: relative; flex: 0 0 auto; box-shadow: 0 15px 45px rgb(0 0 0 / .55), 0 0 0 1px #30333d; transform-origin: center; }
 .canvas-stage canvas { display: block; width: 100%; height: 100%; }
-.canvas-stage > .onion-canvas { position: absolute; z-index: 1; inset: 0; pointer-events: none; }
 .shape-draw-preview { position: absolute; z-index: 12; background: rgb(140 155 255 / .16); border: 1px solid #a5b4fc; box-shadow: 0 0 0 1px rgb(13 15 24 / .55); pointer-events: none; }
 .pen-draft-overlay { position: absolute; z-index: 12; inset: 0; width: 100%; height: 100%; overflow: visible; pointer-events: none; }.pen-draft-overlay path { fill: rgb(140 155 255 / .1); stroke: #a5b4fc; stroke-width: 3; vector-effect: non-scaling-stroke; }.pen-draft-overlay line { stroke: #717da9; stroke-width: 1; vector-effect: non-scaling-stroke; }.pen-draft-overlay circle.handle { fill: #151821; stroke: #8c9bff; stroke-width: 2; vector-effect: non-scaling-stroke; }.pen-draft-overlay circle.anchor { fill: #e0e7ff; stroke: #4f5d9d; stroke-width: 2; vector-effect: non-scaling-stroke; }
 .rig-overlay.passive { opacity: .38; }.rig-overlay { position: absolute; z-index: 13; inset: 0; width: 100%; height: 100%; overflow: visible; pointer-events: none; }.rig-overlay .rig-bounds { fill: rgb(199 154 224 / .05); stroke: rgb(199 154 224 / .45); stroke-dasharray: 6 4; stroke-width: 1; vector-effect: non-scaling-stroke; }.rig-bone line { stroke: #c79ae0; stroke-linecap: round; stroke-width: 3; vector-effect: non-scaling-stroke; }.rig-bone.selected line { stroke: #ffd9a0; stroke-width: 4; }.rig-head { fill: #1a1420; stroke: #c79ae0; stroke-width: 2; vector-effect: non-scaling-stroke; }.rig-tip { fill: #c79ae0; stroke: #1a1420; stroke-width: 1; vector-effect: non-scaling-stroke; }.rig-bone.selected .rig-head { stroke: #ffd9a0; }.rig-bone.selected .rig-tip { fill: #ffd9a0; }

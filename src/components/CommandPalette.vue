@@ -34,6 +34,7 @@ const defaults: CommandShortcutMap = {
   palette: 'Ctrl+K', undo: 'Ctrl+Z', redo: 'Ctrl+Shift+Z', play: 'Space',
   previousFrame: 'ArrowLeft', nextFrame: 'ArrowRight', split: 'Ctrl+B', save: 'Ctrl+S',
   motion: 'Ctrl+Shift+1', nodes: 'Ctrl+Shift+2', threeD: 'Ctrl+Shift+3', audio: 'Ctrl+Shift+4', export: 'Ctrl+Shift+5',
+  history: 'Ctrl+Shift+H',
 }
 
 function shortcut(id: string) {
@@ -57,7 +58,14 @@ const commands = computed<CommandItem[]>(() => {
     { id: 'addRectangle', label: 'Add rectangle layer', group: 'Layer', keywords: 'shape solid', run: () => store.addTimelineLayer('rectangle') },
     { id: 'addAdjustment', label: 'Add adjustment layer', group: 'Layer', keywords: 'effect grade', run: () => store.addTimelineLayer('adjustment') },
     ...workspaceCommands.map(([id, workspace]) => ({ id, label: `Switch to ${workspace}`, group: 'Workspace', shortcut: shortcut(id), run: () => store.setWorkspace(workspace) })),
-    ...(['left', 'right', 'bottom', 'history'] as const).map((panel) => ({ id: `panel-${panel}`, label: `Toggle ${panel === 'bottom' ? 'timeline' : panel} panel`, group: 'Window', run: () => emit('toggle-panel', panel) })),
+    ...(['left', 'right', 'bottom', 'history'] as const).map((panel) => ({
+      id: `panel-${panel}`,
+      label: panel === 'history' ? 'Show history panel' : `Toggle ${panel === 'bottom' ? 'timeline' : panel} panel`,
+      group: 'Window',
+      keywords: panel === 'history' ? 'undo redo states revert step back timeline' : undefined,
+      shortcut: panel === 'history' ? shortcut('history') : undefined,
+      run: () => emit('toggle-panel', panel),
+    })),
   ]
 })
 

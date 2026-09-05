@@ -247,10 +247,15 @@ function normalizeScene(scene: Aurora3DScene): Aurora3DScene {
   })
   scene.lights.forEach((light) => {
     light.visible = light.visible !== false
-    if (light.type !== 'spot') return
-    light.angle ??= numericProperty(`${light.id}-angle`, 32)
-    light.distance ??= numericProperty(`${light.id}-distance`, 0)
-    light.penumbra ??= numericProperty(`${light.id}-penumbra`, .25)
+    if (light.type === 'spot') {
+      light.angle ??= numericProperty(`${light.id}-angle`, 32)
+      light.distance ??= numericProperty(`${light.id}-distance`, 0)
+      light.penumbra ??= numericProperty(`${light.id}-penumbra`, .25)
+    }
+    if (light.type === 'area') {
+      light.width ??= numericProperty(`${light.id}-width`, 4)
+      light.height ??= numericProperty(`${light.id}-height`, 2)
+    }
   })
   return scene
 }

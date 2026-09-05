@@ -517,6 +517,18 @@ export class HybridWebGLRenderBackend implements RenderBackend {
     effects: GraphEffects,
     blendMode: NodeBlendMode,
   ) {
+    // An adjustment layer is a full-frame grade, not a positioned object: its rect is authored in
+    // frame space from (0,0). Applying the layer transform here would offset that full-frame rect by
+    // the layer's centre and leave only a quarter of it on screen, so adjustment stays at identity —
+    // only its opacity and blend mode carry through.
+    if (layer.type === 'adjustment') {
+      container.position.set(0, 0)
+      container.rotation = 0
+      container.scale.set(1, 1)
+      container.alpha = evaluateNumericProperty(layer.transform.opacity, time) / 100 * effects.opacity
+      container.blendMode = blendMode
+      return
+    }
     const scaleX = width / projectWidth
     const scaleY = height / projectHeight
     container.position.set(
@@ -699,8 +711,10 @@ export class HybridWebGLRenderBackend implements RenderBackend {
     )
     const motionBlur = sampleTimes.length > 1
     // Depth of field and motion blur are post passes, so either forces the composited route even with
-    // no mask or ambient occlusion: the direct render below has nowhere to apply them.
-    const lens = quality === 'draft' || !cameraDefinition ? null : cameraLensAtTime(cameraDefinition, time)
+    // no mask or ambient occlusion: the direct render below has nowhere to apply them. The bokeh pass
+    // is a single cheap post shader, so unlike AO it stays on in draft — otherwise focus would blink
+    // off the instant playback drops to draft quality and the lens would look like it was not retained.
+    const lens = cameraDefinition ? cameraLensAtTime(cameraDefinition, time) : null
     if (maskRaster || ambientOcclusion || lens || motionBlur) {
       let sceneTexture: THREE.Texture | null = null
       this.threeRenderer.resetState()
@@ -716,7 +730,7 @@ export class HybridWebGLRenderBackend implements RenderBackend {
             return {
               scene: sampleRuntime.scene,
               camera: sampleCamera,
-              lens: quality === 'draft' || !sampleCameraDefinition ? null : cameraLensAtTime(sampleCameraDefinition, sampleTime),
+              lens: sampleCameraDefinition ? cameraLensAtTime(sampleCameraDefinition, sampleTime) : null,
             }
           }, renderSettings, width, height)
         } finally {

@@ -14,14 +14,13 @@ import { pathTransformComponents, sampleLocalPath } from '@/engine/scene3d/pathE
 import { movePathHandle, movePathPoint, type PathHandleKey, type PathVector } from '@/engine/scene3d/pathEditing'
 import { AuroraSceneRenderPipeline } from '@/engine/rendering/AuroraSceneRenderPipeline'
 import { AuroraSolidViewport } from '@/engine/rendering/AuroraSolidViewport'
-import { onionSkinSamples, type OnionSkinDirection } from '@/engine/rendering/onionSkin'
-import { useOnionSkinSettings } from '@/composables/useOnionSkinSettings'
+import { AuroraViewportModes, beginViewportShadingPass, type ViewportShadingMode } from '@/engine/rendering/AuroraViewportModes'
+import { useViewportShading } from '@/composables/useViewportShading'
 import {
   applyGestureKey, beginGesture, gestureDelta, gestureLabel, type GestureBasis, type GestureMode, type GestureState,
 } from '@/engine/scene3d/transformGesture'
 import type { Aurora3DObject, Aurora3DPath, Aurora3DPathPoint, Aurora3DScene, AuroraRig } from '@/models/editor'
 import IconButton from './common/IconButton.vue'
-import OnionSkinControls from './common/OnionSkinControls.vue'
 
 const store = useEditorStore()
 const { project, selectedLayer, selectedScene, selectedSceneEntity, selectedSceneEntityId, currentTime, playing, assets, rigs } = storeToRefs(store)
@@ -30,9 +29,15 @@ const canvas = ref<HTMLCanvasElement>()
 const transformMode = ref<TransformControlsMode>('translate')
 type EditorCameraView = 'Perspective' | 'Front' | 'Right' | 'Top' | 'User'
 const cameraView = ref<EditorCameraView>('Perspective')
-const viewportShading = ref<'rendered' | 'solid'>('rendered')
+const shading = useViewportShading()
+const shadingModes: Array<{ id: ViewportShadingMode; label: string; title: string }> = [
+  { id: 'solid', label: 'Solid', title: 'Solid shading (Z): camera-relative studio lights, material color, and cavity definition' },
+  { id: 'rendered', label: 'Rendered', title: 'Use authored materials, lights, shadows, and ambient occlusion' },
+  { id: 'wireframe', label: 'Wire', title: 'Wireframe: unlit edges only' },
+  { id: 'matcap', label: 'Matcap', title: 'Matcap: a baked clay sphere, independent of scene lighting' },
+  { id: 'xray', label: 'X-ray', title: 'X-ray: additive translucency that reveals overlapping geometry' },
+]
 const stats = ref({ calls: 0, triangles: 0 })
-const onionSkin = useOnionSkinSettings()
 interface PathPointSelection { pathId: string; pointId: string; target: PathHandleKey }
 /** Point-level selection lives beside the entity selection; it only applies while its path stays selected. */
 const pathSelection = ref<PathPointSelection | null>(null)
@@ -49,15 +54,7 @@ const runtimeRegistry = new ThreeSceneRuntimeRegistry(() => renderViewport())
 let renderer: THREE.WebGLRenderer | null = null
 let scenePipeline: AuroraSceneRenderPipeline | null = null
 const solidViewport = new AuroraSolidViewport()
-const onionMaterial = new THREE.MeshBasicMaterial({
-  color: '#8c9bff',
-  transparent: true,
-  opacity: .24,
-  depthTest: false,
-  depthWrite: false,
-  side: THREE.DoubleSide,
-  toneMapped: false,
-})
+const viewportModes = new AuroraViewportModes()
 let perspectiveCamera: THREE.PerspectiveCamera | null = null
 let orthographicCamera: THREE.OrthographicCamera | null = null
 let editorCamera: THREE.Camera | null = null
@@ -69,7 +66,9 @@ let axisViewOrientation: THREE.Quaternion | null = null
 const gesture = ref<GestureState | null>(null)
 interface GestureAnchor {
   entityId: string
-  pointer: { x: number; y: number }
+  /** Where the pointer sat when travel started. Null until the first move, since a keyboard-started
+   * gesture has no pointer yet and must not treat the cursor's absolute position as travel. */
+  pointer: { x: number; y: number } | null
   position: [number, number, number]
   rotation: [number, number, number]
   scale: [number, number, number]
@@ -592,62 +591,13 @@ function attachSelection() {
 
 let viewportFrame = 0
 
-const onionColor = (direction: OnionSkinDirection) => direction === 'previous' ? '#d98b7f' : '#8c9bff'
-
-/**
- * Draws cheap unlit silhouettes over the beauty pass. Runtime evaluation is transient and is put
- * back at the playhead in `finally`, so picking, gizmos, history, and project persistence never see
- * a sampled pose.
- */
-function renderOnionSkin3D(sceneDefinition: Aurora3DScene, host: HTMLElement) {
-  if (!renderer || !editorCamera || playing.value || transform?.dragging || gesture.value || pathDrag || gizmoDrag) return
-  const samples = onionSkinSamples(currentTime.value, project.value.frameRate, project.value.duration, onionSkin)
-  if (!samples.length) return
-  const width = host.clientWidth
-  const height = host.clientHeight
-  const previousAutoClear = renderer.autoClear
-  const helperVisibility: Array<{ object: THREE.Object3D; visible: boolean }> = []
-
-  try {
-    renderer.resetState()
-    renderer.setRenderTarget(null)
-    renderer.autoClear = false
-    renderer.clearDepth()
-    samples.forEach((sample) => {
-      const sampled = runtimeRegistry.get(sceneDefinition, width, height, sample.time, assets.value, rigs.value)
-      sampled.root.visible = selectedLayer.value?.visible !== false
-      if (!helperVisibility.length) {
-        sampled.scene.traverse((object) => {
-          if (!object.userData.editorOnly) return
-          helperVisibility.push({ object, visible: object.visible })
-          object.visible = false
-        })
-      }
-      const background = sampled.scene.background
-      const override = sampled.scene.overrideMaterial
-      sampled.scene.background = null
-      sampled.scene.overrideMaterial = onionMaterial
-      onionMaterial.color.set(onionColor(sample.direction))
-      onionMaterial.opacity = sample.opacity
-      try {
-        renderer!.render(sampled.scene, editorCamera!)
-      } finally {
-        sampled.scene.overrideMaterial = override
-        sampled.scene.background = background
-      }
-    })
-  } finally {
-    helperVisibility.forEach(({ object, visible }) => { object.visible = visible })
-    renderer.autoClear = previousAutoClear
-    runtime = runtimeRegistry.get(sceneDefinition, width, height, currentTime.value, assets.value, rigs.value)
-  }
-}
-
 function renderViewportNow() {
   const sceneDefinition = selectedScene.value
   const host = viewport.value
   if (!renderer || !editorCamera || !host || !sceneDefinition) return
-  const syncScene = !transform?.dragging || !runtime || runtime.sceneId !== sceneDefinition.id
+  // A running modal gesture previews straight onto the Three object, like a gizmo drag, so the runtime
+  // must not be re-synced from the (still original) definition mid-gesture or the preview is clobbered.
+  const syncScene = (!transform?.dragging && !gesture.value) || !runtime || runtime.sceneId !== sceneDefinition.id
   if (syncScene) {
     if (runtime && runtime.sceneId !== sceneDefinition.id) disposeEditorHelpers(runtime)
     runtime = runtimeRegistry.get(sceneDefinition, host.clientWidth, host.clientHeight, currentTime.value, assets.value, rigs.value)
@@ -661,26 +611,24 @@ function renderViewportNow() {
   syncInfluenceHelpers(targetRuntime, sceneDefinition)
   if (syncScene) attachSelection()
   updateEditorHelpers(targetRuntime)
-  const solid = viewportShading.value === 'solid'
-  renderer.shadowMap.enabled = sceneDefinition.settings.shadows && !solid
+  const pass = beginViewportShadingPass({
+    mode: shading.mode,
+    wireOverlay: shading.wireOverlay,
+    scene: targetRuntime.scene,
+    root: targetRuntime.root,
+    camera: editorCamera,
+    baseSettings: sceneDefinition.settings,
+    solidViewport,
+    viewportModes,
+  })
+  renderer.shadowMap.enabled = pass.shadowsEnabled
   renderer.setScissorTest(false)
   renderer.setViewport(0, 0, host.clientWidth, host.clientHeight)
-  const restoreMaterials = solid ? solidViewport.apply(targetRuntime.scene, targetRuntime.root, editorCamera) : null
   try {
-    scenePipeline?.render(
-      targetRuntime.scene,
-      editorCamera,
-      solid
-        ? { ...sceneDefinition.settings, shadows: false, ambientOcclusion: true, ambientOcclusionIntensity: .8, ambientOcclusionRadius: .22, quality: 'preview' }
-        : sceneDefinition.settings,
-      host.clientWidth,
-      host.clientHeight,
-      'screen',
-    )
+    scenePipeline?.render(targetRuntime.scene, editorCamera, pass.settings, host.clientWidth, host.clientHeight, 'screen')
   } finally {
-    restoreMaterials?.()
+    pass.restore()
   }
-  renderOnionSkin3D(sceneDefinition, host)
   stats.value = { calls: renderer.info.render.calls, triangles: renderer.info.render.triangles }
 }
 
@@ -849,7 +797,8 @@ function startGesture(mode: GestureMode, event?: PointerEvent) {
     .map((axis) => evaluateNumericProperty(transformOf[section][axis], currentTime.value)) as [number, number, number]
   gestureAnchor = {
     entityId: entity.value.id,
-    pointer: { x: event?.clientX ?? 0, y: event?.clientY ?? 0 },
+    // A pointer-started gesture anchors here; a key-started one waits for the first move.
+    pointer: event ? { x: event.clientX, y: event.clientY } : null,
     position: read('position'),
     rotation: read('rotation'),
     scale: read('scale'),
@@ -861,25 +810,46 @@ function startGesture(mode: GestureMode, event?: PointerEvent) {
   return true
 }
 
-function applyGesture() {
-  const state = gesture.value
-  const anchor = gestureAnchor
-  if (!state || !anchor) return
+/** The transform the gesture currently describes, in the store's units. */
+function gestureTransformValues(state: GestureState, anchor: GestureAnchor) {
   const delta = gestureDelta(state, currentGestureBasis())
-  store.update3DEntityTransform(anchor.entityId, {
+  return {
     position: anchor.position.map((value, index) => value + delta.translate[index]!) as [number, number, number],
     rotation: anchor.rotation.map((value, index) => value + delta.rotate[index]!) as [number, number, number],
     scale: anchor.scale.map((value, index) => value * delta.scale[index]!) as [number, number, number],
-  })
+  }
+}
+
+/**
+ * Previews a gesture by writing straight onto the runtime's Three object, the way a gizmo drag does.
+ * The store write — which bumps the scene revision and republishes the scene asset — is deferred to
+ * confirmation, so dragging stays smooth instead of re-serialising the scene on every pointer move.
+ */
+function applyGesture() {
+  const state = gesture.value
+  const anchor = gestureAnchor
+  if (!state || !anchor || !runtime) return
+  const target = runtime.objects.get(anchor.entityId) ?? runtime.cameras.get(anchor.entityId) ?? runtime.lights.get(anchor.entityId)
+  if (!target) return
+  const values = gestureTransformValues(state, anchor)
+  target.position.set(values.position[0], values.position[1], values.position[2])
+  target.rotation.set(
+    THREE.MathUtils.degToRad(values.rotation[0]),
+    THREE.MathUtils.degToRad(values.rotation[1]),
+    THREE.MathUtils.degToRad(values.rotation[2]),
+  )
+  target.scale.set(values.scale[0], values.scale[1], values.scale[2])
+  target.updateMatrixWorld(true)
   renderViewport()
 }
 
 function endGesture(outcome: 'confirm' | 'cancel') {
+  const state = gesture.value
   const anchor = gestureAnchor
-  if (outcome === 'cancel' && anchor) {
-    store.update3DEntityTransform(anchor.entityId, {
-      position: anchor.position, rotation: anchor.rotation, scale: anchor.scale,
-    })
+  // Commit once on confirm. On cancel we wrote nothing to the store, so the next render re-syncs the
+  // object back to its original definition on its own.
+  if (outcome === 'confirm' && state && anchor) {
+    store.update3DEntityTransform(anchor.entityId, gestureTransformValues(state, anchor))
   }
   gesture.value = null
   gestureAnchor = null
@@ -892,6 +862,11 @@ function endGesture(outcome: 'confirm' | 'cancel') {
 function onGesturePointerMove(event: PointerEvent) {
   const state = gesture.value
   if (!state || !gestureAnchor) return
+  // A key-started gesture has no pointer origin yet: adopt this position as zero travel, don't jump.
+  if (!gestureAnchor.pointer) {
+    gestureAnchor.pointer = { x: event.clientX, y: event.clientY }
+    return
+  }
   gesture.value = {
     ...state,
     screen: { x: event.clientX - gestureAnchor.pointer.x, y: event.clientY - gestureAnchor.pointer.y },
@@ -1288,7 +1263,8 @@ function onKeydown(event: KeyboardEvent) {
     return
   }
   if (event.key.toLowerCase() === 'z') {
-    viewportShading.value = viewportShading.value === 'rendered' ? 'solid' : 'rendered'
+    // Z toggles Solid, the way Blender's Z-then-2 does; any other mode returns to Solid first.
+    shading.mode = shading.mode === 'solid' ? 'rendered' : 'solid'
     renderViewport()
   }
 }
@@ -1360,7 +1336,7 @@ onBeforeUnmount(() => {
   scenePipeline?.dispose()
   scenePipeline = null
   solidViewport.dispose()
-  onionMaterial.dispose()
+  viewportModes.dispose()
   renderer?.dispose()
   renderer = null
   editorCamera = null
@@ -1369,7 +1345,6 @@ onBeforeUnmount(() => {
 })
 
 watch([selectedLayer, selectedScene, currentTime, selectedSceneEntityId, assets, rigs], renderViewport, { deep: true })
-watch(() => [onionSkin.enabled, onionSkin.previousFrames, onionSkin.nextFrames, onionSkin.opacity], renderViewport)
 </script>
 
 <template>
@@ -1386,19 +1361,8 @@ watch(() => [onionSkin.enabled, onionSkin.previousFrames, onionSkin.nextFrames, 
       <span class="toolbar-divider" />
       <button v-for="view in (['Perspective', 'Front', 'Right', 'Top'] as const)" :key="view" type="button" class="view-button" :class="{ active: cameraView === view }" :aria-pressed="cameraView === view" :title="view === 'Perspective' ? 'Switch to perspective view' : `Snap to an exact ${view.toLowerCase()} orthographic view · orbiting from it leaves a free user view`" @click="setCameraView(view)">{{ view }}</button>
       <span class="toolbar-divider" />
-      <button type="button" class="view-button" :class="{ active: viewportShading === 'solid' }" title="Solid shading (Z): camera-relative studio lights, material color, and cavity definition" :aria-pressed="viewportShading === 'solid'" @click="viewportShading = 'solid'; renderViewport()">Solid</button>
-      <button type="button" class="view-button" :class="{ active: viewportShading === 'rendered' }" title="Use authored materials, lights, shadows, and ambient occlusion" :aria-pressed="viewportShading === 'rendered'" @click="viewportShading = 'rendered'; renderViewport()">Rendered</button>
-      <span class="toolbar-divider" />
-      <OnionSkinControls
-        :enabled="onionSkin.enabled"
-        :previous-frames="onionSkin.previousFrames"
-        :next-frames="onionSkin.nextFrames"
-        :opacity="onionSkin.opacity"
-        @update:enabled="onionSkin.enabled = $event"
-        @update:previous-frames="onionSkin.previousFrames = $event"
-        @update:next-frames="onionSkin.nextFrames = $event"
-        @update:opacity="onionSkin.opacity = $event"
-      />
+      <button v-for="shade in shadingModes" :key="shade.id" type="button" class="view-button" :class="{ active: shading.mode === shade.id }" :title="shade.title" :aria-pressed="shading.mode === shade.id" @click="shading.mode = shade.id; renderViewport()">{{ shade.label }}</button>
+      <button type="button" class="view-button" :class="{ active: shading.wireOverlay }" title="Wireframe overlay: draw mesh edges on top of any shading mode" :aria-pressed="shading.wireOverlay" @click="shading.wireOverlay = !shading.wireOverlay; renderViewport()"><Grid3X3 :size="10" /></button>
       <template v-if="selectedPath">
         <span class="toolbar-divider" />
         <span class="path-label"><Spline :size="11" :style="{ color: selectedPath.color }" /> {{ selectedPath.name }}</span>
@@ -1420,7 +1384,7 @@ watch(() => [onionSkin.enabled, onionSkin.previousFrames, onionSkin.nextFrames, 
         <small>Create a scene here. It will also be saved in the Library so it can be reused like a cluster.</small>
         <button type="button" @click="store.create3DSceneFromWorkspace()"><Plus :size="12" /> Create 3D scene</button>
       </div>
-      <div class="viewport-badge"><View :size="10" /> {{ cameraView }}{{ cameraView === 'Perspective' ? '' : ' · Orthographic' }} · {{ viewportShading === 'solid' ? 'Solid' : 'Rendered' }}</div>
+      <div class="viewport-badge"><View :size="10" /> {{ cameraView }}{{ cameraView === 'Perspective' ? '' : ' · Orthographic' }} · {{ shadingModes.find((shade) => shade.id === shading.mode)?.label ?? 'Rendered' }}{{ shading.wireOverlay ? ' + Wire' : '' }}</div>
       <div class="viewport-axis"><span class="x">X</span><span class="y">Y</span><span class="z">Z</span></div>
       <div v-if="gestureStatus" class="viewport-gesture">{{ gestureStatus }}<small>click or Enter to confirm · Esc to cancel · X/Y/Z axis · Shift+axis plane · Ctrl snap · type a number</small></div>
       <div class="viewport-help">{{ viewportHelp }}</div>

@@ -2025,16 +2025,21 @@ export const useEditorStore = defineStore('editor', () => {
       visible: true,
       type,
       color: type === 'ambient' ? '#c5ccff' : '#ffffff',
-      intensity: numericProperty(`${id}-intensity`, type === 'spot' ? 80 : type === 'point' ? 18 : 1.5),
+      intensity: numericProperty(`${id}-intensity`, type === 'spot' ? 80 : type === 'point' ? 18 : type === 'area' ? 12 : 1.5),
       transform: makeTransform3D(id, type === 'ambient' ? [0, 0, 0] : [4, 5, 3]),
-      castShadow: type !== 'ambient',
+      // RectAreaLight has no shadow support in Three, so an area light never claims to cast one.
+      castShadow: type !== 'ambient' && type !== 'area',
     }
     if (type === 'spot') {
       light.angle = numericProperty(`${id}-angle`, 32)
       light.distance = numericProperty(`${id}-distance`, 0)
       light.penumbra = numericProperty(`${id}-penumbra`, .25)
     }
-    if (type === 'directional' || type === 'spot') {
+    if (type === 'area') {
+      light.width = numericProperty(`${id}-width`, 4)
+      light.height = numericProperty(`${id}-height`, 2)
+    }
+    if (type === 'directional' || type === 'spot' || type === 'area') {
       const [rotationX, rotationY, rotationZ] = aimRotationDegrees([4, 5, 3], sceneAimTarget(scene))
       light.transform.rotation.x.value = rotationX
       light.transform.rotation.y.value = rotationY
@@ -2243,6 +2248,13 @@ export const useEditorStore = defineStore('editor', () => {
         ? Math.max(0, Math.min(1000, value))
         : Math.max(0, Math.min(1, value))
     if (apply3DPropertyValue(property, clamped)) markSceneChanged()
+  }
+
+  function set3DLightArea(key: 'width' | 'height', value: number) {
+    const entity = selectedSceneEntity.value
+    const property = entity?.kind === 'light' && entity.value.type === 'area' ? entity.value[key] : undefined
+    if (!property || !Number.isFinite(value)) return
+    if (apply3DPropertyValue(property, Math.max(.01, Math.min(200, value)))) markSceneChanged()
   }
 
   function add3DInfluence(type: AuroraInfluenceType) {
@@ -3100,7 +3112,7 @@ export const useEditorStore = defineStore('editor', () => {
     publish3DSceneAsset, ensure3DSceneAssets,
     selectSceneEntity, select3DLayer, markSceneChanged, add3DPrimitive, add3DGroup, ungroup3DObject, add3DImagePlane, add3DModel, add3DLight, add3DCamera, set3DEntityTransform,
     rename3DEntity, set3DEntityVisible, delete3DEntity,
-    update3DEntityTransform, set3DObjectMaterial, set3DObjectImage, set3DObjectModel, set3DLightIntensity, set3DLightCone, set3DEnvironmentMap, set3DEnvironmentBackground, set3DCameraFov, set3DCameraLens, set3DCameraDepthOfField,
+    update3DEntityTransform, set3DObjectMaterial, set3DObjectImage, set3DObjectModel, set3DLightIntensity, set3DLightCone, set3DLightArea, set3DEnvironmentMap, set3DEnvironmentBackground, set3DCameraFov, set3DCameraLens, set3DCameraDepthOfField,
     toggle3DKeyframe, keySelected3DTransform, move3DKeyframe, delete3DKeyframe, setActive3DCamera,
     add3DCameraCut, set3DCameraCutCamera, move3DCameraCut, delete3DCameraCut,
     add3DPath, delete3DPath, findScenePath, move3DPathPoint, set3DPathPointAxis, set3DPathPointMode,

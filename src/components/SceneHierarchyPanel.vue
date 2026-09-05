@@ -303,6 +303,7 @@ function confirmDialog() {
       <button type="button" @click="store.add3DLight('directional'); addMenu = null"><Sun :size="12" /> Directional light</button>
       <button type="button" @click="store.add3DLight('point'); addMenu = null"><Lightbulb :size="12" /> Point light</button>
       <button type="button" @click="store.add3DLight('spot'); addMenu = null"><Lightbulb :size="12" /> Spot light</button>
+      <button type="button" @click="store.add3DLight('area'); addMenu = null"><Square :size="12" /> Area light</button>
     </div>
     <footer v-if="selectedScene"><button class="add-menu-trigger" type="button" @click="toggleAddMenu('footer')"><Plus :size="11" /> Add entity</button></footer>
     <Teleport to="body">

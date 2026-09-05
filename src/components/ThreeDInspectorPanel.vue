@@ -300,6 +300,19 @@ function pointModeLabel(mode: AuroraPathPointMode) {
             </label>
             <p class="section-note">Range 0 lights to infinity. Any other value hard-stops the beam at that distance, however bright it is. Drag the cone rim in the viewport to widen the cone.</p>
           </template>
+          <template v-if="selectedSceneEntity.value.type === 'area' && selectedSceneEntity.value.width && selectedSceneEntity.value.height">
+            <label class="keyable">
+              <span>Width</span>
+              <NumberField :model-value="propertyValue(selectedSceneEntity.value.width)" :min=".01" :max="200" :step=".1" label="area light width" @update:model-value="store.set3DLightArea('width', $event)" />
+              <KeyframeControl :property="selectedSceneEntity.value.width" label="area light width" />
+            </label>
+            <label class="keyable">
+              <span>Height</span>
+              <NumberField :model-value="propertyValue(selectedSceneEntity.value.height)" :min=".01" :max="200" :step=".1" label="area light height" @update:model-value="store.set3DLightArea('height', $event)" />
+              <KeyframeControl :property="selectedSceneEntity.value.height" label="area light height" />
+            </label>
+            <p class="section-note">A rectangular emitter — soft, even light with realistic falloff. It emits from its front face, so rotate it to aim. Area lights cast no shadow in this renderer.</p>
+          </template>
           <label class="check-row"><span>Cast shadows</span><button type="button" :class="{ checked: selectedSceneEntity.value.castShadow }" @click="selectedSceneEntity.value.castShadow = !selectedSceneEntity.value.castShadow; store.markSceneChanged()"><CircleDot :size="10" /></button></label>
         </div>
       </section>

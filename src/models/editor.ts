@@ -197,7 +197,7 @@ export interface AuroraLight {
   id: string
   name: string
   visible: boolean
-  type: 'ambient' | 'directional' | 'point' | 'spot'
+  type: 'ambient' | 'directional' | 'point' | 'spot' | 'area'
   color: string
   intensity: AnimatableProperty<number>
   /** Spot cone half-angle in degrees. Optional so projects authored before spot lights remain valid. */
@@ -206,6 +206,10 @@ export interface AuroraLight {
   distance?: AnimatableProperty<number>
   /** Fraction of the cone edge blended from full intensity to darkness. */
   penumbra?: AnimatableProperty<number>
+  /** Rect area-light emitter width in scene units. Optional so pre-area-light projects stay valid. */
+  width?: AnimatableProperty<number>
+  /** Rect area-light emitter height in scene units. */
+  height?: AnimatableProperty<number>
   transform: Transform3D
   castShadow: boolean
 }

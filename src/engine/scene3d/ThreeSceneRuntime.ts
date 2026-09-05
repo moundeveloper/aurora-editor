@@ -1,5 +1,14 @@
 import * as THREE from 'three'
+import { RectAreaLightUniformsLib } from 'three/examples/jsm/lights/RectAreaLightUniformsLib.js'
 import { evaluateNumericProperty } from '@/engine/animation/evaluateProperty'
+
+// RectAreaLight needs its BRDF lookup tables uploaded once before any area light is shaded.
+let rectAreaLightUniformsReady = false
+function ensureRectAreaLightUniforms() {
+  if (rectAreaLightUniformsReady) return
+  RectAreaLightUniformsLib.init()
+  rectAreaLightUniformsReady = true
+}
 import { evaluate3DPath } from '@/engine/scene3d/pathEvaluation'
 import { applyInfluences, influenceSignature, linearArrayCopies } from '@/engine/scene3d/influences'
 import { deformRig } from '@/engine/rig/rigMesh'
@@ -152,6 +161,10 @@ function makeLight(definition: AuroraLight): THREE.Light {
     )
   }
   if (definition.type === 'point') return new THREE.PointLight(definition.color, definition.intensity.value, 0, 2)
+  if (definition.type === 'area') {
+    ensureRectAreaLightUniforms()
+    return new THREE.RectAreaLight(definition.color, definition.intensity.value, definition.width?.value ?? 4, definition.height?.value ?? 2)
+  }
   return new THREE.DirectionalLight(definition.color, definition.intensity.value)
 }
 
@@ -758,6 +771,10 @@ export class ThreeSceneRuntimeRegistry {
         light.angle = THREE.MathUtils.degToRad(item.angle ? evaluateNumericProperty(item.angle, time) : 32)
         light.distance = item.distance ? evaluateNumericProperty(item.distance, time) : 0
         light.penumbra = item.penumbra ? evaluateNumericProperty(item.penumbra, time) : .25
+      }
+      if (light instanceof THREE.RectAreaLight) {
+        light.width = Math.max(.01, item.width ? evaluateNumericProperty(item.width, time) : 4)
+        light.height = Math.max(.01, item.height ? evaluateNumericProperty(item.height, time) : 2)
       }
       if (item.castShadow) configureShadow(light, definition, sceneBounds)
       if (light instanceof THREE.DirectionalLight || light instanceof THREE.SpotLight) {

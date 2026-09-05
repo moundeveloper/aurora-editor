@@ -2,8 +2,8 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { storeToRefs } from 'pinia'
 import {
-  AudioLines, Box, ChevronDown, ChevronRight, Circle, CircleDot, Eye, EyeOff, Film, FolderPlus, Gauge, GripVertical, Image as ImageIcon, KeyRound,
-  BookmarkPlus, ChevronLeft, ChevronRight as MarkerNext, Link2, Lock, Magnet, Minus, MousePointer2, Plus, Scissors, Search,
+  AudioLines, Box, ChevronDown, ChevronRight, Circle, CircleDot, Diamond, Eye, EyeOff, Film, FolderPlus, Gauge, GripVertical, Image as ImageIcon, KeyRound,
+  BookmarkPlus, ChevronLeft, ChevronRight as MarkerNext, Link2, Lock, Magnet, Minus, MousePointer2, Move, Plus, Scissors, Search,
   Pencil, SlidersHorizontal, Sparkles, SquareStack, Trash2, Type as TypeIcon, Unlock, Video, Volume2, VolumeX, X,
 } from '@lucide/vue'
 import { useEditorStore, type TimelineLayerPreset } from '@/stores/editor'
@@ -81,19 +81,15 @@ const cacheSegments = computed(() => {
 })
 const frameCacheLabel = computed(() => frameCacheStatus.value === 'caching'
   ? `Cache ${frameCacheProgress.value.completed}/${frameCacheProgress.value.total}`
-  : visibleCachedFrames.value.length ? `Cached ${visibleCachedFrames.value.length}` : 'Cache 1s')
+  : visibleCachedFrames.value.length ? `Cached ${visibleCachedFrames.value.length}` : 'Cache all')
 
 function toggleFrameCache() {
   if (frameCacheStatus.value === 'caching') {
     store.cancelFrameCache()
     return
   }
-  const halfRange = .5
-  const centre = Math.max(0, Math.min(viewDuration.value, currentTime.value))
-  store.requestFrameCacheRange(
-    Math.max(0, centre - halfRange),
-    Math.min(viewDuration.value, centre + halfRange),
-  )
+  // Cache the whole composition and keep going until the user cancels, rather than a fixed 1s window.
+  store.requestFrameCacheRange(0, project.value.duration)
 }
 
 const layerPresets = [
@@ -1051,8 +1047,12 @@ function onKeyDown(event: KeyboardEvent) {
 }
 
 function onWindowPointerDown(event: PointerEvent) {
-  if (!(event.target as Element | null)?.closest('.add-layer-control')) addLayerMenuOpen.value = false
-  if (!(event.target as Element | null)?.closest('.timeline-context-menu')) trackContextMenu.value = null
+  // The menu is teleported to <body>, so it is not a DOM descendant of .add-layer-control. Without
+  // matching .add-layer-menu here, a pointerdown on a menu item counts as "outside" and closes the
+  // menu before the click lands — which reads as Add Layer doing nothing at all.
+  const target = event.target as Element | null
+  if (!target?.closest('.add-layer-control') && !target?.closest('.add-layer-menu')) addLayerMenuOpen.value = false
+  if (!target?.closest('.timeline-context-menu')) trackContextMenu.value = null
 }
 
 async function setZoom(nextZoom: number, anchorClientX?: number) {
@@ -1290,7 +1290,7 @@ onBeforeUnmount(() => {
         <IconButton :icon="ChevronLeft" label="Jump to previous timeline marker" :disabled="!timelineMarkers.length" @click="store.jumpToAdjacentTimelineMarker(-1)" />
         <IconButton :icon="BookmarkPlus" label="Add a named marker at the playhead" @click="openAddMarker" />
         <IconButton :icon="MarkerNext" label="Jump to next timeline marker" :disabled="!timelineMarkers.length" @click="store.jumpToAdjacentTimelineMarker(1)" />
-        <button class="toggle-control cache-control" type="button" :class="{ active: frameCacheStatus === 'caching' || visibleCachedFrames.length }" :title="frameCacheStatus === 'caching' ? 'Cancel background frame caching' : 'Cache one second around the playhead in the background'" @click="toggleFrameCache"><Gauge :size="12" /> {{ frameCacheStatus === 'caching' ? 'Cancel' : frameCacheLabel }}</button>
+        <button class="toggle-control cache-control" type="button" :class="{ active: frameCacheStatus === 'caching' || visibleCachedFrames.length }" :title="frameCacheStatus === 'caching' ? 'Cancel background frame caching' : 'Cache the whole composition in the background until you stop it'" @click="toggleFrameCache"><Gauge :size="12" /> {{ frameCacheStatus === 'caching' ? 'Cancel' : frameCacheLabel }}</button>
         <IconButton :icon="Trash2" label="Clear this project's persistent frame cache" @click="store.requestFrameCacheClear()" />
         <span class="divider" />
         <button class="timecode-button" type="button">00:00:{{ String(Math.floor(currentTime)).padStart(2, '0') }}:{{ String(Math.floor(currentTime % 1 * project.frameRate)).padStart(2, '0') }}</button>
