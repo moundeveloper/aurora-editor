@@ -1,5 +1,4 @@
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted } from 'vue'
 import { storeToRefs } from 'pinia'
 import { useRouter } from 'vue-router'
 import { Command, Download, House, Redo2, Save, Undo2 } from '@lucide/vue'
@@ -8,22 +7,11 @@ import type { WorkspaceId } from '@/models/editor'
 import IconButton from './common/IconButton.vue'
 
 const store = useEditorStore()
+const emit = defineEmits<{ 'open-command-palette': [] }>()
 const router = useRouter()
 const { project, workspace, canUndo, canRedo } = storeToRefs(store)
 const workspaces: WorkspaceId[] = ['Motion', 'Nodes', '3D', 'Audio', 'Export']
 const menus = ['File', 'Edit', 'Clip', 'Composition', 'Layer', 'Effect', 'Animation', 'View', 'Window', 'Help']
-
-function onHistoryKeyDown(event: KeyboardEvent) {
-  if (!(event.ctrlKey || event.metaKey) || !['z', 'y'].includes(event.key.toLowerCase())) return
-  if ((event.target as Element | null)?.closest('input, textarea, [contenteditable="true"]')) return
-  const redo = event.key.toLowerCase() === 'y' || event.shiftKey
-  event.preventDefault()
-  if (redo) store.redo()
-  else store.undo()
-}
-
-onMounted(() => window.addEventListener('keydown', onHistoryKeyDown))
-onBeforeUnmount(() => window.removeEventListener('keydown', onHistoryKeyDown))
 
 async function goHome() {
   await store.flushProjectSave()
@@ -64,7 +52,7 @@ async function goHome() {
     </div>
   </header>
   <div class="menu-strip">
-    <span class="command-hint"><Command :size="12" /> Ctrl K</span>
+    <button class="command-hint" type="button" title="Open command palette" @click="emit('open-command-palette')"><Command :size="12" /> Ctrl K</button>
     <span class="spacer" />
     <span class="status-dot" />
     <span>Local project</span>
@@ -91,7 +79,7 @@ async function goHome() {
 .top-action.primary:hover { background: var(--button-accent-hover); }
 .menu-strip { display: flex; height: 24px; align-items: center; gap: 7px; padding: 0 10px; color: var(--text-muted); background: #0d0f13; border-bottom: 1px solid var(--border-subtle); font-size: 10px; }
 .menu-strip strong { color: var(--text-secondary); font-weight: 500; }
-.command-hint { display: inline-flex; align-items: center; gap: 4px; margin-right: 7px; }
+.command-hint { display: inline-flex; align-items: center; gap: 4px; margin-right: 7px; padding: 0; color: inherit; background: transparent; border: 0; font: inherit; cursor: pointer; }.command-hint:hover { color: var(--text-primary); }
 .slash { color: #444853; }.spacer { flex: 1; }.status-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--success); box-shadow: 0 0 0 2px #1c2c27; }
 @media (max-width: 1280px) { .main-menu button:nth-child(n+7) { display: none; } .project-meta { display: none; } }
 </style>

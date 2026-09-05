@@ -13,7 +13,6 @@ export default defineConfig({
   resolve: {
     alias: {
       '@': fileURLToPath(new URL('./src', import.meta.url)),
-      '#shared': fileURLToPath(new URL('./shared', import.meta.url)),
     },
   },
   server: {
@@ -26,6 +25,6 @@ export default defineConfig({
   },
   test: {
     // Server tests are Node-side; the rest of the suite is environment-agnostic already.
-    include: ['src/**/__tests__/**/*.test.ts', 'server/**/__tests__/**/*.test.ts'],
+    include: ['src/**/__tests__/**/*.test.ts', 'server/**/__tests__/**/*.test.ts', 'mcp/**/__tests__/**/*.test.ts'],
   },
 })

@@ -3,22 +3,29 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { storeToRefs } from 'pinia'
 import {
   BoxSelect, ChevronDown, Circle, Crosshair, Grid3X3, Hand, Maximize2, MousePointer2,
-  Move, Pause, PenTool, Play, RotateCcw, SkipBack, SkipForward, Square,
+  Move, Pause, PenTool, Play, RotateCcw, SkipBack, SkipForward, Spline, Square,
   Type, Volume2, VolumeX, ZoomIn, ZoomOut,
 } from '@lucide/vue'
 import { useEditorStore } from '@/stores/editor'
-import type { HybridWebGLRenderBackend } from '@/engine/rendering/HybridWebGLRenderBackend'
+import type { AuroraFrameEngine } from '@/engine/rendering/AuroraFrameEngine'
 import { evaluateNumericProperty } from '@/engine/animation/evaluateProperty'
 import { setNumericPropertyAtTime } from '@/engine/animation/editNumericProperty'
-import type { EditorLayer, ShapePathPoint } from '@/models/editor'
+import type { AuroraRig, EditorLayer, ShapePathPoint } from '@/models/editor'
+import { applyMatrix, boneTransforms, invert, multiply, rotation as rotationMatrix, scaling, translation, type Matrix2D, type RigPoint } from '@/engine/rig/skeleton'
+import { poseOffsetTowards, poseRotationTowards, restAimTowards } from '@/engine/rig/rigPosing'
 import IconButton from './common/IconButton.vue'
 
 const store = useEditorStore()
-const { project, currentTime, playing, loop, snap, zoom, layers, timelineLayers, assets, scenes3D, nodes, nodeConnections, renderRootNodeId, selectedLayer, selectedLayerId, selectedKeyframeId } = storeToRefs(store)
+const {
+  project, currentTime, playing, loop, snap, zoom, activeClusterId, timelineLayers, assets, scenes3D,
+  nodes, nodeConnections, renderRootNodeId, renderRevision, rigs, selectedRigBoneId, selectedLayer,
+  selectedLayerId, selectedKeyframeId, frameCacheRequestId, frameCacheCancelId, frameCacheClearId,
+  frameCacheRange,
+} = storeToRefs(store)
 const canvas = ref<HTMLCanvasElement>()
 const canvasWrap = ref<HTMLElement>()
 const transformBox = ref<HTMLElement>()
-type MotionTool = 'Select' | 'Hand' | 'Zoom' | 'Text' | 'Rectangle' | 'Ellipse' | 'Pen' | 'Transform'
+type MotionTool = 'Select' | 'Hand' | 'Zoom' | 'Text' | 'Rectangle' | 'Ellipse' | 'Pen' | 'Rig' | 'Transform'
 const activeTool = ref<MotionTool>('Select')
 const activeTransformMode = ref<'move' | 'scale' | 'rotate' | null>(null)
 const audioEnabled = ref(true)
@@ -27,12 +34,11 @@ const showGuides = ref(true)
 const viewportSize = ref({ width: 0, height: 0 })
 const viewportPan = ref({ x: 0, y: 0 })
 const isViewportPanning = ref(false)
-let renderer: HybridWebGLRenderBackend | null = null
+let renderer: AuroraFrameEngine | null = null
+let cacheRenderer: AuroraFrameEngine | null = null
+let cacheAbort: AbortController | null = null
+let cacheRun: Promise<void> | null = null
 let resizeObserver: ResizeObserver | null = null
-let drawFrame = 0
-let rendering = false
-let redrawRequested = false
-let disposed = false
 
 interface ShapeDrawState {
   pointerId: number
@@ -50,6 +56,23 @@ interface PenDragState { pointerId: number; pointId: string }
 const shapeDraw = ref<ShapeDrawState | null>(null)
 const penDraft = ref<{ points: ShapePathPoint[] } | null>(null)
 let penDrag: PenDragState | null = null
+
+/** Half the on-screen size of an image layer's quad, in project pixels. Rig space spans -1 to 1 across it. */
+const RIG_HALF_SIZE = 130
+/** Pointer slack for grabbing a bone handle, in screen pixels. */
+const RIG_GRAB_RADIUS = 11
+
+type RigDragMode = 'create' | 'rotate' | 'offset' | 'rest-head' | 'rest-tip'
+
+interface RigDragState {
+  pointerId: number
+  mode: RigDragMode
+  boneId: string
+  origin: { x: number; y: number; angle: number; length: number }
+  moved: boolean
+}
+
+let rigDrag: RigDragState | null = null
 
 interface ViewportTransformState {
   layer: EditorLayer
@@ -78,7 +101,7 @@ let viewportPanState: ViewportPanState | null = null
 const tools: Array<{ name: MotionTool; icon: typeof MousePointer2 }> = [
   { name: 'Select', icon: MousePointer2 }, { name: 'Hand', icon: Hand }, { name: 'Zoom', icon: ZoomIn },
   { name: 'Text', icon: Type }, { name: 'Rectangle', icon: Square }, { name: 'Ellipse', icon: Circle },
-  { name: 'Pen', icon: PenTool }, { name: 'Transform', icon: Move },
+  { name: 'Pen', icon: PenTool }, { name: 'Rig', icon: Spline }, { name: 'Transform', icon: Move },
 ]
 
 const timecode = computed(() => {
@@ -91,7 +114,7 @@ const timecode = computed(() => {
   return [hours, minutes, seconds, frames].map((part) => String(part).padStart(2, '0')).join(':')
 })
 
-const interactiveLayers = computed(() => [...layers.value]
+const interactiveLayers = computed(() => [...timelineLayers.value]
   .filter((layer) => layer.visible && !layer.locked && ['text', 'shape', 'image', 'video', 'cluster'].includes(layer.type) && currentTime.value >= layer.start && currentTime.value < layer.start + layer.duration)
   .reverse())
 
@@ -155,44 +178,294 @@ const previewRenderSize = computed(() => {
   }
 })
 
+/**
+ * The layer the rig overlay can be drawn over.
+ *
+ * A rig bends a texture, so any textured layer can carry one — but only an image draws at a known
+ * fixed size in project space, which is what the overlay needs to place bones under the cursor. A
+ * video's quad depends on the decoded frame, so its rig is edited numerically in the inspector.
+ */
+const rigLayer = computed(() => (activeSelection.value?.type === 'image' ? activeSelection.value : null))
+const activeRig = computed<AuroraRig | null>(() => rigs.value.find((rig) => rig.id === rigLayer.value?.rigId) ?? null)
+
+/** Project space ← rig space, matching the SVG group transform exactly so hit-testing agrees with what is drawn. */
+const rigMatrix = computed<Matrix2D | null>(() => {
+  const layer = rigLayer.value
+  if (!layer) return null
+  const at = (key: keyof EditorLayer['transform']) => evaluateNumericProperty(layer.transform[key], currentTime.value)
+  return multiply(
+    translation(at('x'), at('y')),
+    multiply(
+      rotationMatrix(at('rotation')),
+      multiply(scaling(at('scaleX') / 100, at('scaleY') / 100), scaling(RIG_HALF_SIZE, -RIG_HALF_SIZE)),
+    ),
+  )
+})
+
+const rigGroupTransform = computed(() => {
+  const layer = rigLayer.value
+  if (!layer) return ''
+  const at = (key: keyof EditorLayer['transform']) => evaluateNumericProperty(layer.transform[key], currentTime.value)
+  return `translate(${at('x')} ${at('y')}) rotate(${at('rotation')}) scale(${at('scaleX') / 100} ${at('scaleY') / 100}) scale(${RIG_HALF_SIZE} ${-RIG_HALF_SIZE})`
+})
+
+/** Posed head and tip of every bone, in rig space, ready to draw inside the transformed group. */
+const rigBoneShapes = computed(() => {
+  const rig = activeRig.value
+  if (!rig) return []
+  const transforms = boneTransforms(rig, currentTime.value)
+  return rig.bones.map((bone) => {
+    const world = transforms.get(bone.id)?.world
+    return {
+      id: bone.id,
+      name: bone.name,
+      head: world ? applyMatrix(world, 0, 0) : { x: bone.x, y: bone.y },
+      tip: world ? applyMatrix(world, bone.length, 0) : { x: bone.x, y: bone.y },
+    }
+  })
+})
+
+/** Handles are authored in rig units, so they have to shrink as the layer's own scale grows. */
+const rigHandleRadius = computed(() => {
+  const layer = rigLayer.value
+  const scale = layer ? Math.abs(evaluateNumericProperty(layer.transform.scaleX, currentTime.value)) / 100 : 1
+  return .045 / Math.max(.05, scale)
+})
+
+/** Capture keeps a drag alive past the element's edge; a pointer that refuses it still drags inside. */
+function capturePointer(pointerId: number) {
+  try {
+    canvasWrap.value?.setPointerCapture(pointerId)
+  } catch {
+    // Nothing to hold on to — the pointer ended, or it never belonged to this element.
+  }
+}
+
+function rigPointAt(event: PointerEvent): RigPoint | null {
+  const matrix = rigMatrix.value
+  const bounds = canvas.value?.getBoundingClientRect()
+  // A collapsed or hidden viewport has no size to divide by, and would hand back a bone at NaN.
+  if (!matrix || !bounds?.width || !bounds.height) return null
+  const projectX = ((event.clientX - bounds.left) / bounds.width) * project.value.width
+  const projectY = ((event.clientY - bounds.top) / bounds.height) * project.value.height
+  const point = applyMatrix(invert(matrix), projectX, projectY)
+  return Number.isFinite(point.x) && Number.isFinite(point.y) ? point : null
+}
+
+/** Distance in screen pixels between a rig-space point and the pointer, for hit-testing handles. */
+function rigScreenDistance(point: RigPoint, event: PointerEvent) {
+  const matrix = rigMatrix.value
+  const bounds = canvas.value?.getBoundingClientRect()
+  if (!matrix || !bounds?.width || !bounds.height) return Number.POSITIVE_INFINITY
+  const projected = applyMatrix(matrix, point.x, point.y)
+  const clientX = bounds.left + (projected.x / project.value.width) * bounds.width
+  const clientY = bounds.top + (projected.y / project.value.height) * bounds.height
+  return Math.hypot(event.clientX - clientX, event.clientY - clientY)
+}
+
+function ensureLayerRig() {
+  const layer = rigLayer.value
+  if (!layer) return null
+  const existing = rigs.value.find((rig) => rig.id === layer.rigId)
+  if (existing) return existing
+  const rig = store.addRig(`${layer.name} Rig`)
+  store.attachRigToLayer(rig.id)
+  return rig
+}
+
+/**
+ * A pointer press with the Rig tool either grabs a handle or starts a new bone.
+ *
+ * Grab order runs tip, head, then the bone itself, because the tip is the handle people reach for
+ * most and it sits on top of the shaft. Shift edits the rest pose — where the skeleton *is* — while
+ * a plain drag poses it, which is the distinction the whole tool turns on.
+ */
+function beginRigInteraction(event: PointerEvent) {
+  const rig = activeRig.value
+  const point = rigPointAt(event)
+  if (!point) return
+  event.preventDefault()
+  capturePointer(event.pointerId)
+
+  if (rig) {
+    const shapes = rigBoneShapes.value
+    const nearest = (pick: 'head' | 'tip') => shapes
+      .map((shape) => ({ shape, distance: rigScreenDistance(shape[pick], event) }))
+      .sort((left, right) => left.distance - right.distance)[0]
+    const tip = nearest('tip')
+    const head = nearest('head')
+    const target = tip && tip.distance <= RIG_GRAB_RADIUS && tip.distance <= (head?.distance ?? Infinity)
+      ? { shape: tip.shape, mode: event.shiftKey ? 'rest-tip' as const : 'rotate' as const }
+      : head && head.distance <= RIG_GRAB_RADIUS
+        ? { shape: head.shape, mode: event.shiftKey ? 'rest-head' as const : 'offset' as const }
+        : null
+    if (target) {
+      const bone = rig.bones.find((item) => item.id === target.shape.id)!
+      selectedRigBoneId.value = bone.id
+      rigDrag = { pointerId: event.pointerId, mode: target.mode, boneId: bone.id, origin: { x: bone.x, y: bone.y, angle: bone.angle, length: bone.length }, moved: false }
+      store.beginInteractiveEdit()
+      return
+    }
+  }
+
+  // Nothing under the cursor: draw a new bone from here, chained to the selected one unless Alt is held.
+  const target = rig ?? ensureLayerRig()
+  if (!target) return
+  const parentId = event.altKey ? undefined : selectedRigBoneId.value ?? undefined
+  const bone = store.addRigBone(target.id, { x: point.x, y: point.y, angle: 90, length: .02, parentId })
+  if (!bone) return
+  rigDrag = { pointerId: event.pointerId, mode: 'create', boneId: bone.id, origin: { x: point.x, y: point.y, angle: 90, length: .02 }, moved: false }
+  store.beginInteractiveEdit()
+}
+
+function updateRigDrag(event: PointerEvent) {
+  const drag = rigDrag
+  const rig = activeRig.value
+  const point = rigPointAt(event)
+  if (!drag || !rig || !point || drag.pointerId !== event.pointerId) return
+  const bone = rig.bones.find((item) => item.id === drag.boneId)
+  if (!bone) return
+  drag.moved = true
+
+  if (drag.mode === 'create' || drag.mode === 'rest-tip') {
+    const { angle, length } = restAimTowards(drag.origin, point, drag.origin.angle)
+    store.setRigBoneRest(rig.id, bone.id, { angle, length, ...(drag.mode === 'create' ? { falloff: Math.max(.25, length * 1.6) } : {}) })
+    return
+  }
+  if (drag.mode === 'rest-head') {
+    store.setRigBoneRest(rig.id, bone.id, { x: point.x, y: point.y })
+    return
+  }
+  if (drag.mode === 'offset') {
+    const offset = poseOffsetTowards(rig, bone, currentTime.value, point)
+    store.setRigBonePose(rig.id, bone.id, 'offsetX', offset.x)
+    store.setRigBonePose(rig.id, bone.id, 'offsetY', offset.y)
+    return
+  }
+  store.setRigBonePose(rig.id, bone.id, 'rotation', poseRotationTowards(rig, bone, currentTime.value, point))
+}
+
+function endRigDrag() {
+  const drag = rigDrag
+  rigDrag = null
+  if (!drag) return
+  const rig = activeRig.value
+  const bone = rig?.bones.find((item) => item.id === drag.boneId)
+  // A click that never became a drag would leave a zero-length bone nobody asked for.
+  if (rig && bone && drag.mode === 'create' && bone.length < .04) store.deleteRigBone(rig.id, bone.id)
+  store.endInteractiveEdit()
+}
+
+function currentCacheScope() {
+  return activeClusterId.value ? `cluster:${activeClusterId.value}` : 'project'
+}
+
+function renderRequest(time: number, playback: boolean) {
+  // A cluster tab is an isolated composition context. Its children are authored in project time,
+  // so they keep the same playhead value, but the root node graph must not pull sibling layers
+  // back into the frame while the user is editing inside the cluster.
+  const editingCluster = Boolean(activeClusterId.value)
+  return {
+    project: project.value,
+    layers: timelineLayers.value,
+    scenes3D: scenes3D.value,
+    assets: assets.value,
+    nodes: editingCluster ? [] : nodes.value,
+    nodeConnections: editingCluster ? [] : nodeConnections.value,
+    renderRootNodeId: editingCluster ? null : renderRootNodeId.value,
+    revision: renderRevision.value,
+    cacheScope: currentCacheScope(),
+    cacheVersion: store.saveStatus === 'Saved' ? 'saved' : `edit:${renderRevision.value}`,
+    rigs: rigs.value,
+    time,
+    playback,
+    width: previewRenderSize.value.width,
+    height: previewRenderSize.value.height,
+    quality: 'preview' as const,
+  }
+}
+
 async function drawNow() {
   if (!renderer) return
   try {
-    await renderer.renderFrame({
-      project: project.value,
-      layers: layers.value,
-      scenes3D: scenes3D.value,
-      assets: assets.value,
-      nodes: nodes.value,
-      nodeConnections: nodeConnections.value,
-      renderRootNodeId: renderRootNodeId.value,
-      time: currentTime.value,
-      width: previewRenderSize.value.width,
-      height: previewRenderSize.value.height,
-      quality: 'preview',
-    })
+    await renderer.requestFrame(renderRequest(currentTime.value, playing.value))
   } catch {
     // A dropped preview frame must never break viewport interaction.
   }
 }
 
-/**
- * Brush strokes and drags mutate the graph many times per pointer event, and every mutation reaches
- * the deep watcher below. Coalesce to one full-size frame, and never start a second render while the
- * previous one is still resolving.
- */
-function draw() {
-  redrawRequested = true
-  if (drawFrame || rendering || disposed) return
-  drawFrame = requestAnimationFrame(async () => {
-    drawFrame = 0
-    if (!redrawRequested || disposed) return
-    redrawRequested = false
-    rendering = true
-    await drawNow()
-    rendering = false
-    if (redrawRequested) draw()
+
+async function buildFrameCacheRange() {
+  const previousRun = cacheRun
+  cacheAbort?.abort()
+  await previousRun?.catch(() => undefined)
+  await store.flushProjectSave()
+
+  const controller = new AbortController()
+  cacheAbort = controller
+  const revision = renderRevision.value
+  const scope = currentCacheScope()
+  const frameRate = Math.max(1, project.value.frameRate)
+  const startFrame = Math.max(0, Math.ceil(frameCacheRange.value.start * frameRate))
+  const finalProjectFrame = Math.max(0, Math.ceil(project.value.duration * frameRate) - 1)
+  const endFrame = Math.min(finalProjectFrame, Math.floor(frameCacheRange.value.end * frameRate))
+  const total = Math.max(0, endFrame - startFrame + 1)
+  if (!total) return
+
+  const snapshot = JSON.parse(JSON.stringify(renderRequest(0, false))) as ReturnType<typeof renderRequest>
+  const detachedCanvas = document.createElement('canvas')
+  detachedCanvas.width = snapshot.width
+  detachedCanvas.height = snapshot.height
+  const { AuroraFrameEngine } = await import('@/engine/rendering/AuroraFrameEngine')
+  const backgroundRenderer = new AuroraFrameEngine(detachedCanvas, '/demo/aurora-ridge.png', {
+    adaptiveQuality: false,
+    onFrameCached: store.recordFrameCached,
   })
+  cacheRenderer = backgroundRenderer
+  store.beginFrameCache(snapshot.project.id, revision, scope, total)
+
+  try {
+    await backgroundRenderer.initialize({ width: snapshot.width, height: snapshot.height, pixelRatio: 1 })
+    for (let frame = startFrame; frame <= endFrame; frame += 1) {
+      if (controller.signal.aborted || revision !== renderRevision.value || scope !== currentCacheScope()) {
+        store.finishFrameCache('cancelled')
+        return
+      }
+      await backgroundRenderer.renderImmediate({ ...snapshot, time: frame / frameRate, cacheWrite: true })
+      store.updateFrameCacheProgress(frame - startFrame + 1, total)
+      await new Promise((resolve) => { setTimeout(resolve, 0) })
+    }
+    store.finishFrameCache('ready')
+  } catch {
+    store.finishFrameCache(controller.signal.aborted ? 'cancelled' : 'error')
+  } finally {
+    await backgroundRenderer.dispose()
+    detachedCanvas.width = 0
+    detachedCanvas.height = 0
+    if (cacheRenderer === backgroundRenderer) cacheRenderer = null
+    if (cacheAbort === controller) cacheAbort = null
+  }
+}
+
+watch(frameCacheRequestId, () => {
+  const run = buildFrameCacheRange()
+  cacheRun = run
+  void run.finally(() => { if (cacheRun === run) cacheRun = null }).catch(() => undefined)
+})
+
+watch(frameCacheCancelId, () => { cacheAbort?.abort() })
+
+watch(frameCacheClearId, async () => {
+  cacheAbort?.abort()
+  await cacheRun?.catch(() => undefined)
+  const { auroraFrameCache } = await import('@/engine/rendering/frameCache')
+  await auroraFrameCache.clearProject(project.value.id)
+  store.resetFrameCacheDisplay()
+})
+
+/** Brush strokes and drags can outpace rendering; the engine keeps only the newest queued frame. */
+function draw() {
+  void drawNow()
 }
 
 function setTransformValue(key: 'x' | 'y' | 'scaleX' | 'scaleY' | 'rotation', value: number, targetLayer?: EditorLayer) {
@@ -364,6 +637,10 @@ function onViewportPointerDown(event: PointerEvent) {
    * the Select tool is a click on empty composition — which clears the selection, the same way
    * clicking away from a shape does in any editor. Clicks outside the stage entirely count too.
    */
+  if (activeTool.value === 'Rig') {
+    beginRigInteraction(event)
+    return
+  }
   if (activeTool.value === 'Select' || activeTool.value === 'Transform') {
     selectedLayerId.value = null
     selectedKeyframeId.value = null
@@ -415,6 +692,10 @@ function onViewportWheel(event: WheelEvent) {
 }
 
 function onViewportPointerMove(event: PointerEvent) {
+  if (rigDrag) {
+    updateRigDrag(event)
+    return
+  }
   if (viewportPanState) {
     viewportPan.value = {
       x: viewportPanState.originX + event.clientX - viewportPanState.startX,
@@ -478,6 +759,10 @@ function onViewportPointerMove(event: PointerEvent) {
 }
 
 function endViewportTransform(event?: PointerEvent) {
+  if (rigDrag && (!event || rigDrag.pointerId === event.pointerId)) {
+    if (canvasWrap.value?.hasPointerCapture?.(rigDrag.pointerId)) canvasWrap.value.releasePointerCapture(rigDrag.pointerId)
+    endRigDrag()
+  }
   if (shapeDraw.value && (!event || shapeDraw.value.pointerId === event.pointerId)) {
     const state = shapeDraw.value
     const bounds = shapeDrawBounds(state)
@@ -520,8 +805,8 @@ function onViewerKeydown(event: KeyboardEvent) {
 onMounted(async () => {
   await nextTick()
   if (!canvas.value) return
-  const { HybridWebGLRenderBackend } = await import('@/engine/rendering/HybridWebGLRenderBackend')
-  renderer = new HybridWebGLRenderBackend(canvas.value, '/demo/aurora-ridge.png')
+  const { AuroraFrameEngine } = await import('@/engine/rendering/AuroraFrameEngine')
+  renderer = new AuroraFrameEngine(canvas.value, '/demo/aurora-ridge.png', { onFrameCached: store.recordFrameCached })
   await renderer.initialize({ ...previewRenderSize.value, pixelRatio: 1 })
   if (canvasWrap.value) {
     resizeObserver = new ResizeObserver(([entry]) => {
@@ -538,18 +823,47 @@ onMounted(async () => {
 })
 
 onBeforeUnmount(() => {
-  disposed = true
-  if (drawFrame) cancelAnimationFrame(drawFrame)
   resizeObserver?.disconnect()
   window.removeEventListener('pointermove', onViewportPointerMove)
   window.removeEventListener('pointerup', endViewportTransform)
   window.removeEventListener('pointercancel', endViewportTransform)
   window.removeEventListener('keydown', onViewerKeydown)
   void renderer?.dispose()
+  cacheAbort?.abort()
   renderer = null
 })
 
-watch([currentTime, project, layers, scenes3D, nodes, nodeConnections, renderRootNodeId], draw, { deep: true })
+/*
+ * A deep watch over the whole project is what keeps the viewport honest while the user edits: it
+ * catches a keyframe value or a material channel written straight onto the reactive tree. The cost
+ * is that every trigger re-traverses every layer, scene object, node and rig to recollect
+ * dependencies — and the playhead is a trigger, so playback paid that whole-project walk once per
+ * frame on top of the render.
+ *
+ * Nothing in those structures can change while the transport runs, so the deep watch is suspended
+ * for the duration and the playhead alone drives redraws.
+ */
+const structureSources = [project, activeClusterId, timelineLayers, scenes3D, nodes, nodeConnections, renderRootNodeId, renderRevision, rigs]
+let stopStructureWatch: (() => void) | null = null
+
+function watchStructures() {
+  stopStructureWatch ??= watch(structureSources, draw, { deep: true })
+}
+
+function unwatchStructures() {
+  stopStructureWatch?.()
+  stopStructureWatch = null
+}
+
+watch(currentTime, draw)
+watch(playing, (isPlaying) => {
+  if (isPlaying) return unwatchStructures()
+  watchStructures()
+  // An edit landing during playback was never observed, so the frame on pause has to be rebuilt.
+  draw()
+}, { immediate: true })
+
+onBeforeUnmount(unwatchStructures)
 </script>
 
 <template>
@@ -573,7 +887,7 @@ watch([currentTime, project, layers, scenes3D, nodes, nodeConnections, renderRoo
       <IconButton :icon="Maximize2" label="Full screen viewer" />
     </div>
 
-    <div ref="canvasWrap" class="canvas-viewport" :class="{ 'show-grid': showGrid, panning: isViewportPanning, 'hand-tool': activeTool === 'Hand', 'zoom-tool': activeTool === 'Zoom', 'drawing-tool': activeTool === 'Rectangle' || activeTool === 'Ellipse', 'pen-tool': activeTool === 'Pen' }" @pointerdown="onViewportPointerDown" @dblclick.prevent="activeTool === 'Pen' && finishPenFromDoubleClick()" @wheel="onViewportWheel" @auxclick.prevent>
+    <div ref="canvasWrap" class="canvas-viewport" :class="{ 'show-grid': showGrid, panning: isViewportPanning, 'hand-tool': activeTool === 'Hand', 'zoom-tool': activeTool === 'Zoom', 'drawing-tool': activeTool === 'Rectangle' || activeTool === 'Ellipse', 'pen-tool': activeTool === 'Pen', 'rig-tool': activeTool === 'Rig' }" @pointerdown="onViewportPointerDown" @dblclick.prevent="activeTool === 'Pen' && finishPenFromDoubleClick()" @wheel="onViewportWheel" @auxclick.prevent>
       <div class="canvas-stage" :style="stageStyle">
         <canvas ref="canvas" :width="previewRenderSize.width" :height="previewRenderSize.height" aria-label="Composition preview" />
         <div v-if="shapeDraw" class="shape-draw-preview" :style="shapePreviewStyle" />
@@ -584,6 +898,16 @@ watch([currentTime, project, layers, scenes3D, nodes, nodeConnections, renderRoo
             <circle class="handle" :cx="point.handleIn[0]" :cy="point.handleIn[1]" r="5" />
             <circle class="handle" :cx="point.handleOut[0]" :cy="point.handleOut[1]" r="5" />
             <circle class="anchor" :cx="point.position[0]" :cy="point.position[1]" r="7" />
+          </g>
+        </svg>
+        <svg v-if="rigLayer && (activeTool === 'Rig' || rigBoneShapes.length)" class="rig-overlay" :class="{ passive: activeTool !== 'Rig' }" :viewBox="`0 0 ${project.width} ${project.height}`" preserveAspectRatio="none" aria-label="Rig skeleton">
+          <g :transform="rigGroupTransform">
+            <rect class="rig-bounds" x="-1" y="-1" width="2" height="2" />
+            <g v-for="shape in rigBoneShapes" :key="shape.id" class="rig-bone" :class="{ selected: shape.id === selectedRigBoneId }">
+              <line :x1="shape.head.x" :y1="shape.head.y" :x2="shape.tip.x" :y2="shape.tip.y" />
+              <circle class="rig-head" :cx="shape.head.x" :cy="shape.head.y" :r="rigHandleRadius" />
+              <circle class="rig-tip" :cx="shape.tip.x" :cy="shape.tip.y" :r="rigHandleRadius * .8" />
+            </g>
           </g>
         </svg>
         <div v-if="showGuides" class="safe-guides"><span /><span /></div>
@@ -618,7 +942,7 @@ watch([currentTime, project, layers, scenes3D, nodes, nodeConnections, renderRoo
         </div>
       </div>
       <div class="viewport-badge"><span class="live-dot" /> Active camera</div>
-      <div class="viewport-help">Middle-drag: pan · Wheel: zoom<span v-if="activeTool === 'Text'"> · Click composition to create text</span><span v-else-if="activeTool === 'Rectangle' || activeTool === 'Ellipse'"> · Drag to draw · Shift: equal sides · Alt: from centre</span><span v-else-if="activeTool === 'Pen'"> · Click: corner · Drag: Bézier handles · Click first point to close · Enter: finish</span></div>
+      <div class="viewport-help">Middle-drag: pan · Wheel: zoom<span v-if="activeTool === 'Text'"> · Click composition to create text</span><span v-else-if="activeTool === 'Rectangle' || activeTool === 'Ellipse'"> · Drag to draw · Shift: equal sides · Alt: from centre</span><span v-else-if="activeTool === 'Pen'"> · Click: corner · Drag: Bézier handles · Click first point to close · Enter: finish</span><span v-else-if="activeTool === 'Rig'"> · Drag empty space: new bone (chains to selection, Alt for a root) · Drag tip: rotate · Drag head: shift · Shift+drag: edit rest pose</span></div>
     </div>
 
     <div class="viewer-controls">
@@ -646,12 +970,13 @@ watch([currentTime, project, layers, scenes3D, nodes, nodeConnections, renderRoo
 .viewer-select { display: flex; height: 25px; align-items: center; gap: 6px; padding: 0 6px; color: var(--text-secondary); background: #171920; border: 1px solid var(--border-strong); border-radius: 4px; font: inherit; font-size: 9.5px; cursor: pointer; }
 .viewer-select:hover { color: var(--text-primary); background: var(--bg-hover); }
 .canvas-viewport { position: relative; display: flex; min-height: 0; flex: 1; align-items: center; justify-content: center; padding: 24px; overflow: hidden; background-color: #08090c; background-image: linear-gradient(45deg, #0c0e13 25%, transparent 25%), linear-gradient(-45deg, #0c0e13 25%, transparent 25%), linear-gradient(45deg, transparent 75%, #0c0e13 75%), linear-gradient(-45deg, transparent 75%, #0c0e13 75%); background-position: 0 0, 0 8px, 8px -8px, -8px 0; background-size: 16px 16px; touch-action: none; }
-.canvas-viewport.drawing-tool, .canvas-viewport.pen-tool { cursor: crosshair; }.canvas-viewport.drawing-tool .layer-hit-target, .canvas-viewport.drawing-tool .transform-box, .canvas-viewport.pen-tool .layer-hit-target, .canvas-viewport.pen-tool .transform-box { pointer-events: none; }
+.canvas-viewport.drawing-tool, .canvas-viewport.pen-tool, .canvas-viewport.rig-tool { cursor: crosshair; }.canvas-viewport.drawing-tool .layer-hit-target, .canvas-viewport.drawing-tool .transform-box, .canvas-viewport.pen-tool .layer-hit-target, .canvas-viewport.pen-tool .transform-box, .canvas-viewport.rig-tool .layer-hit-target, .canvas-viewport.rig-tool .transform-box { pointer-events: none; }
 .canvas-viewport.show-grid::after { position: absolute; inset: 0; background-image: linear-gradient(rgb(142 154 225 / .08) 1px, transparent 1px), linear-gradient(90deg, rgb(142 154 225 / .08) 1px, transparent 1px); background-size: 36px 36px; content: ''; pointer-events: none; }
 .canvas-viewport.hand-tool { cursor: grab; }.canvas-viewport.zoom-tool { cursor: zoom-in; }.canvas-viewport.panning { cursor: grabbing; user-select: none; }.canvas-stage { position: relative; flex: 0 0 auto; box-shadow: 0 15px 45px rgb(0 0 0 / .55), 0 0 0 1px #30333d; transform-origin: center; }
 .canvas-stage canvas { display: block; width: 100%; height: 100%; }
 .shape-draw-preview { position: absolute; z-index: 12; background: rgb(140 155 255 / .16); border: 1px solid #a5b4fc; box-shadow: 0 0 0 1px rgb(13 15 24 / .55); pointer-events: none; }
 .pen-draft-overlay { position: absolute; z-index: 12; inset: 0; width: 100%; height: 100%; overflow: visible; pointer-events: none; }.pen-draft-overlay path { fill: rgb(140 155 255 / .1); stroke: #a5b4fc; stroke-width: 3; vector-effect: non-scaling-stroke; }.pen-draft-overlay line { stroke: #717da9; stroke-width: 1; vector-effect: non-scaling-stroke; }.pen-draft-overlay circle.handle { fill: #151821; stroke: #8c9bff; stroke-width: 2; vector-effect: non-scaling-stroke; }.pen-draft-overlay circle.anchor { fill: #e0e7ff; stroke: #4f5d9d; stroke-width: 2; vector-effect: non-scaling-stroke; }
+.rig-overlay.passive { opacity: .38; }.rig-overlay { position: absolute; z-index: 13; inset: 0; width: 100%; height: 100%; overflow: visible; pointer-events: none; }.rig-overlay .rig-bounds { fill: rgb(199 154 224 / .05); stroke: rgb(199 154 224 / .45); stroke-dasharray: 6 4; stroke-width: 1; vector-effect: non-scaling-stroke; }.rig-bone line { stroke: #c79ae0; stroke-linecap: round; stroke-width: 3; vector-effect: non-scaling-stroke; }.rig-bone.selected line { stroke: #ffd9a0; stroke-width: 4; }.rig-head { fill: #1a1420; stroke: #c79ae0; stroke-width: 2; vector-effect: non-scaling-stroke; }.rig-tip { fill: #c79ae0; stroke: #1a1420; stroke-width: 1; vector-effect: non-scaling-stroke; }.rig-bone.selected .rig-head { stroke: #ffd9a0; }.rig-bone.selected .rig-tip { fill: #ffd9a0; }
 .safe-guides { position: absolute; inset: 5%; border: 1px solid rgb(230 233 246 / .22); pointer-events: none; }.safe-guides span:first-child { position: absolute; inset: 5%; border: 1px dashed rgb(230 233 246 / .15); }.safe-guides span:last-child::before, .safe-guides span:last-child::after { position: absolute; top: 50%; left: 50%; background: rgb(230 233 246 / .18); content: ''; }.safe-guides span:last-child::before { width: 1px; height: 12px; transform: translateY(-6px); }.safe-guides span:last-child::after { width: 12px; height: 1px; transform: translateX(-6px); }
 .layer-hit-target { position: absolute; z-index: 2; padding: 0; background: transparent; border: 0; outline: 0; cursor: move; touch-action: none; }.layer-hit-target:hover { box-shadow: inset 0 0 0 1px rgb(165 180 252 / .45); }.layer-hit-target.selected { pointer-events: none; }.transform-box { position: absolute; z-index: 4; width: 48%; height: 13%; border: 1px solid #9aa8ff; box-shadow: 0 0 0 1px rgb(20 24 39 / .45); cursor: move; touch-action: none; user-select: none; }.transform-box.background-layer { z-index: 1; }.transform-box.move { cursor: grabbing; }.transform-box.scale { cursor: nwse-resize; }.transform-box.rotate { cursor: crosshair; }.handle { position: absolute; z-index: 3; width: 8px; height: 8px; background: #dce2ff; border: 1px solid #6978d0; pointer-events: auto; }.handle:hover { background: #fff; box-shadow: 0 0 0 2px rgb(154 168 255 / .25); }.h-1 { top: -5px; left: -5px; cursor: nwse-resize; }.h-2 { top: -5px; left: 50%; cursor: ns-resize; }.h-3 { top: -5px; right: -5px; cursor: nesw-resize; }.h-4 { top: 50%; right: -5px; cursor: ew-resize; }.h-5 { right: -5px; bottom: -5px; cursor: nwse-resize; }.h-6 { bottom: -5px; left: 50%; cursor: ns-resize; }.h-7 { bottom: -5px; left: -5px; cursor: nesw-resize; }.h-8 { top: 50%; left: -5px; cursor: ew-resize; }.rotation-line { position: absolute; bottom: -29px; left: 50%; width: 11px; height: 29px; border-left: 1px solid #9aa8ff; pointer-events: auto; cursor: crosshair; }.rotation-line::after { position: absolute; bottom: -1px; left: -5px; width: 9px; height: 9px; background: #dce2ff; border: 1px solid #6978d0; border-radius: 50%; content: ''; }.rotation-line:hover::after { background: #fff; box-shadow: 0 0 0 2px rgb(154 168 255 / .25); }.anchor-point { position: absolute; top: 50%; left: 50%; display: grid; color: #edc68b; transform: translate(-50%, -50%); pointer-events: none; }
 .viewport-badge { position: absolute; top: 8px; left: 9px; display: flex; align-items: center; gap: 5px; padding: 4px 7px; color: #9ba0aa; background: rgb(12 14 19 / .72); border: 1px solid #262a32; border-radius: 3px; font-size: 8.5px; backdrop-filter: blur(5px); }.live-dot { width: 5px; height: 5px; border-radius: 50%; background: #7eb89f; }

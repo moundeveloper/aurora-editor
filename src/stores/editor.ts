@@ -1,18 +1,21 @@
 import { computed, ref, toRaw } from 'vue'
 import { defineStore } from 'pinia'
+import * as THREE from 'three'
 import type {
-  AnimatableProperty, Aurora3DScene, AuroraCamera, AuroraInfluenceType, AuroraLight,
-  AuroraPathOrientation, AuroraPathPointMode,
+  AnimatableProperty, Aurora3DObject, Aurora3DScene, AuroraCamera, AuroraInfluenceType, AuroraLight, AuroraRig, AuroraRigBone,
+  AuroraObjectFollowOrientation, AuroraPathOrientation, AuroraPathPointMode,
   AuroraCameraCut, EditorLayer, EditorNode, EditorNodeConnection, EditorNodeKind, EditorProject,
-  MediaAsset, SerializedEditorState, ShapePathPoint, WorkspaceId,
+  LayerEffectKind, MediaAsset, SerializedEditorState, ShapePathPoint, TimelineMarker, WorkspaceId,
 } from '@/models/editor'
 import { evaluateNumericProperty } from '@/engine/animation/evaluateProperty'
 import { ensureNumericKeyframe, setNumericPropertyAtTime, toggleNumericKeyframe } from '@/engine/animation/editNumericProperty'
 import { CURRENT_PROJECT_VERSION, deserializeEditorState, serializeEditorState } from '@/engine/project/serialization'
-import { auroraProjectDatabase } from '@/engine/project/AuroraProjectDatabase'
+import { auroraProjectLibrary } from '@/services/projectLibrary'
 import { importAsset, mediaUrl } from '@/services/mediaLibrary'
-import { kindForFile } from '#shared/contracts.ts'
-import { create3DPath, createCameraPathConstraint, createDemo3DScene, createEmpty3DScene, createPrimitiveObject, makeTransform3D, numericProperty } from '@/engine/scene3d/sceneFactory'
+import { kindForFile } from '../../shared/contracts.ts'
+import { aimRotationDegrees, create3DPath, createCameraObjectConstraint, createCameraPathConstraint, createDemo3DScene, createGroupObject, createPrimitiveObject, createStarter3DScene, makeTransform3D, numericProperty } from '@/engine/scene3d/sceneFactory'
+import { createRig, createRigBone, type RigBoneChannelKey } from '@/engine/rig/rigFactory'
+import { MAX_RIG_CELLS, MIN_RIG_CELLS } from '@/engine/rig/rigMesh'
 import {
   appendPathPoint, insertPathPoint, movePathHandle, movePathPoint, prependPathPoint, setPathPointMode,
   type PathHandleKey, type PathVector,
@@ -22,6 +25,8 @@ import { normalizeCameraCuts, sortedCameraCuts } from '@/engine/scene3d/cameraCu
 import {
   canConnect, createDemoNodeGraph, createNode, NODE_DEFINITIONS, syncDynamicInputs, type ConnectionRequest,
 } from '@/engine/nodes/nodeGraph'
+import { adjacentTimelineMarker, DEFAULT_TIMELINE_MARKER_COLOR, normalizeTimelineMarkers } from '@/engine/animation/timelineMarkers'
+import { createLayerEffect, layerEffectParameters } from '@/engine/nodes/layerEffects'
 
 const property = (id: string, value: number): AnimatableProperty<number> => ({
   id,
@@ -59,6 +64,18 @@ export interface ClusterSettings {
 function libraryKind(file: File): MediaAsset['kind'] {
   return kindForFile(file.name, file.type)
 }
+/** Hands a rendered file to the browser; the object URL outlives the click so the download can start. */
+function downloadBlob(blob: Blob, filename: string) {
+  const url = URL.createObjectURL(blob)
+  const anchor = document.createElement('a')
+  anchor.href = url
+  anchor.download = filename
+  document.body.appendChild(anchor)
+  anchor.click()
+  anchor.remove()
+  window.setTimeout(() => URL.revokeObjectURL(url), 10_000)
+}
+
 export const useEditorStore = defineStore('editor', () => {
   const project = ref<EditorProject>({
     id: 'aurora-demo',
@@ -70,6 +87,7 @@ export const useEditorStore = defineStore('editor', () => {
     backgroundColor: '#080b12',
     updatedAt: Date.now(),
     version: 3,
+    markers: [],
   })
   const makeProjectTransform = (prefix: string) => makeTransform(prefix, project.value.width / 2, project.value.height / 2)
   const availableProjects = ref<EditorProject[]>([])
@@ -100,6 +118,10 @@ export const useEditorStore = defineStore('editor', () => {
   const zoom = ref(100)
   const saveStatus = ref<'Saved' | 'Saving…' | 'Save failed'>('Saved')
   const exportProgress = ref(0)
+  const exportStatus = ref<'idle' | 'rendering' | 'done' | 'error'>('idle')
+  /** Result line under the progress bar: the finished size, or why the render stopped. */
+  const exportMessage = ref('')
+  let exportAbort: AbortController | null = null
   let clusterCounter = 1
   let visualTrackCounter = 1
   let audioTrackCounter = 1
@@ -112,17 +134,20 @@ export const useEditorStore = defineStore('editor', () => {
   ])
 
   const layers = ref<EditorLayer[]>([
-    { id: 'layer-adjust', name: 'Cinematic Grade', type: 'adjustment', start: 0, duration: 18, color: '#9b8fe8', visible: true, locked: false, muted: false, expanded: false, transform: makeTransform('grade'), effects: ['Color Matrix', 'Vignette'] },
-    { id: 'layer-title', name: 'BEYOND THE HORIZON', type: 'text', start: 2.2, duration: 8.6, color: '#d49b65', visible: true, locked: false, muted: false, expanded: true, transform: makeTransform('title'), effects: ['Glow'] },
+    { id: 'layer-adjust', name: 'Cinematic Grade', type: 'adjustment', start: 0, duration: 18, color: '#9b8fe8', visible: true, locked: false, muted: false, expanded: false, transform: makeTransform('grade'), effects: [createLayerEffect('colorMatrix', 'demo-color-matrix', { temperature: -8, contrast: 1.12 }), createLayerEffect('vignette', 'demo-vignette', { amount: 34, softness: 72 })] },
+    { id: 'layer-title', name: 'BEYOND THE HORIZON', type: 'text', start: 2.2, duration: 8.6, color: '#d49b65', visible: true, locked: false, muted: false, expanded: true, transform: makeTransform('title'), effects: [createLayerEffect('glow', 'demo-glow', { threshold: 62, radius: 28, intensity: 1.45 })] },
     { id: 'layer-3d-scene', name: 'Aurora 3D Study', type: '3d-scene', sceneId: 'scene-aurora-3d', start: 0, duration: 18, color: '#7888db', visible: true, locked: false, muted: false, expanded: false, transform: makeTransform('scene-3d'), effects: [] },
     { id: 'layer-logo', name: 'Aurora Mark', type: 'image', start: 1, duration: 14, color: '#6b99d5', visible: true, locked: false, muted: false, expanded: false, transform: makeTransform('logo'), effects: [] },
-    { id: 'layer-video', name: 'Ridge Expedition', type: 'video', start: 0, duration: 18, color: '#5477a8', visible: true, locked: false, muted: false, expanded: false, transform: makeTransform('video'), effects: ['Brightness / Contrast'] },
-    { id: 'layer-audio', name: 'Deep Signal', type: 'audio', start: 0, duration: 18, color: '#5c9b82', visible: true, locked: false, muted: false, expanded: false, transform: makeTransform('audio'), effects: ['Gain'] },
+    { id: 'layer-video', name: 'Ridge Expedition', type: 'video', start: 0, duration: 18, color: '#5477a8', visible: true, locked: false, muted: false, expanded: false, transform: makeTransform('video'), effects: [createLayerEffect('brightnessContrast', 'demo-brightness-contrast', { brightness: 4, contrast: 12 })] },
+    { id: 'layer-audio', name: 'Deep Signal', type: 'audio', start: 0, duration: 18, color: '#5c9b82', visible: true, locked: false, muted: false, expanded: false, transform: makeTransform('audio'), effects: [] },
   ])
   const scenes3D = ref<Aurora3DScene[]>([createDemo3DScene()])
   const demoGraph = createDemoNodeGraph(layers.value)
   const nodes = ref<EditorNode[]>(demoGraph.nodes)
   const nodeConnections = ref<EditorNodeConnection[]>(demoGraph.connections)
+  /** Deformation skeletons, shared project-wide so one rig can drive a layer and a 3D plane alike. */
+  const rigs = ref<AuroraRig[]>([])
+  const selectedRigBoneId = ref<string | null>(null)
   const selectedConnectionId = ref<string | null>(null)
   const renderRootNodeId = ref<string | null>(null)
 
@@ -147,7 +172,72 @@ export const useEditorStore = defineStore('editor', () => {
   let persistenceReady = false
   let saveTimer: number | null = null
   let changeRevision = 0
+  const renderRevision = ref(0)
+  const frameCacheStatus = ref<'idle' | 'caching' | 'ready' | 'cancelled' | 'error'>('idle')
+  const frameCacheFrames = ref<number[]>([])
+  const frameCacheProjectId = ref('')
+  const frameCacheRevision = ref(-1)
+  const frameCacheScope = ref('project')
+  const frameCacheProgress = ref({ completed: 0, total: 0 })
+  const frameCacheRange = ref({ start: 0, end: 0 })
+  const frameCacheRequestId = ref(0)
+  const frameCacheCancelId = ref(0)
+  const frameCacheClearId = ref(0)
   let saveQueue: Promise<void> = Promise.resolve()
+
+  function resetFrameCacheDisplay() {
+    frameCacheStatus.value = 'idle'
+    frameCacheFrames.value = []
+    frameCacheProjectId.value = ''
+    frameCacheRevision.value = -1
+    frameCacheScope.value = 'project'
+    frameCacheProgress.value = { completed: 0, total: 0 }
+  }
+
+  function requestFrameCacheRange(start: number, end: number) {
+    frameCacheRange.value = { start: Math.max(0, start), end: Math.max(start, end) }
+    frameCacheRequestId.value += 1
+  }
+
+  function cancelFrameCache() {
+    frameCacheCancelId.value += 1
+    if (frameCacheStatus.value === 'caching') frameCacheStatus.value = 'cancelled'
+  }
+
+  function requestFrameCacheClear() {
+    frameCacheClearId.value += 1
+  }
+
+  function beginFrameCache(projectId: string, revision: number, scope: string, total: number) {
+    frameCacheStatus.value = 'caching'
+    frameCacheProgress.value = { completed: 0, total }
+    if (frameCacheProjectId.value !== projectId || frameCacheRevision.value !== revision || frameCacheScope.value !== scope) {
+      frameCacheFrames.value = []
+      frameCacheProjectId.value = projectId
+      frameCacheRevision.value = revision
+      frameCacheScope.value = scope
+    }
+  }
+
+  function recordFrameCached(event: { projectId: string; revision: number; scope: string; frame: number }) {
+    if (frameCacheProjectId.value !== event.projectId || frameCacheRevision.value !== event.revision || frameCacheScope.value !== event.scope) {
+      frameCacheFrames.value = []
+      frameCacheProjectId.value = event.projectId
+      frameCacheRevision.value = event.revision
+      frameCacheScope.value = event.scope
+    }
+    if (!frameCacheFrames.value.includes(event.frame)) {
+      frameCacheFrames.value = [...frameCacheFrames.value, event.frame].sort((left, right) => left - right)
+    }
+  }
+
+  function updateFrameCacheProgress(completed: number, total: number) {
+    frameCacheProgress.value = { completed, total }
+  }
+
+  function finishFrameCache(status: 'ready' | 'cancelled' | 'error' = 'ready') {
+    frameCacheStatus.value = status
+  }
 
   function applyLoadedState(state: SerializedEditorState) {
     const addedStarterTracks = state.layers.length === 0
@@ -157,6 +247,8 @@ export const useEditorStore = defineStore('editor', () => {
     assets.value = state.assets
     nodes.value = state.nodes
     nodeConnections.value = state.nodeConnections
+    rigs.value = state.rigs ?? []
+    selectedRigBoneId.value = null
     if (!layers.value.length) layers.value = [makeEmptyTrack('visual'), makeEmptyTrack('audio')]
     // Repair before filling gaps, or a duplicate about to be folded away could be re-published.
     dedupeCompositionAssets()
@@ -183,6 +275,8 @@ export const useEditorStore = defineStore('editor', () => {
     openClusterTabs.value = []
     activeClusterId.value = null
     resetEditorHistory()
+    renderRevision.value += 1
+    resetFrameCacheDisplay()
     return addedStarterTracks
   }
 
@@ -193,7 +287,7 @@ export const useEditorStore = defineStore('editor', () => {
   }
 
   async function refreshProjects() {
-    availableProjects.value = await auroraProjectDatabase.listProjects()
+    availableProjects.value = await auroraProjectLibrary.listProjects()
     return availableProjects.value
   }
 
@@ -205,6 +299,7 @@ export const useEditorStore = defineStore('editor', () => {
       assets: assets.value,
       nodes: nodes.value,
       nodeConnections: nodeConnections.value,
+      rigs: rigs.value,
     }
   }
 
@@ -216,7 +311,7 @@ export const useEditorStore = defineStore('editor', () => {
     if (persistenceReady) return
     const legacyRaw = typeof window === 'undefined' ? null : window.localStorage.getItem('aurora-editor-project')
     try {
-      const databaseState = await auroraProjectDatabase.loadActiveSnapshot()
+      const databaseState = await auroraProjectLibrary.loadActiveSnapshot()
       const loadedState = databaseState
         ? deserializeEditorState(JSON.stringify(databaseState), defaultState)
         : deserializeEditorState(legacyRaw, defaultState)
@@ -250,13 +345,13 @@ export const useEditorStore = defineStore('editor', () => {
     projectBrowserError.value = ''
     try {
       await flushProjectSave()
-      const snapshot = await auroraProjectDatabase.loadSnapshot(projectId)
+      const snapshot = await auroraProjectLibrary.loadSnapshot(projectId)
       if (!snapshot) throw new Error('The selected project could not be found.')
       const addedStarterTracks = applyLoadedState(deserializeEditorState(JSON.stringify(snapshot), defaultState))
       if (addedStarterTracks) {
         changeRevision += 1
         await saveProjectNow()
-      } else await auroraProjectDatabase.setActiveProject(projectId)
+      } else await auroraProjectLibrary.setActiveProject(projectId)
       saveStatus.value = 'Saved'
       return true
     } catch (error) {
@@ -283,7 +378,7 @@ export const useEditorStore = defineStore('editor', () => {
         version: CURRENT_PROJECT_VERSION,
       }
       const graph = createDemoNodeGraph([])
-      applyLoadedState({ project: nextProject, layers: [], scenes3D: [], assets: [], nodes: graph.nodes, nodeConnections: graph.connections })
+      applyLoadedState({ project: nextProject, layers: [], scenes3D: [], assets: [], nodes: graph.nodes, nodeConnections: graph.connections, rigs: [] })
       changeRevision += 1
       await saveProjectNow()
       await refreshProjects()
@@ -309,6 +404,9 @@ export const useEditorStore = defineStore('editor', () => {
   const activeClusterId = ref<string | null>(null)
 
   interface EditorHistorySnapshot {
+    id: string
+    label: string
+    createdAt: number
     state: SerializedEditorState
     workspace: WorkspaceId
     currentTime: number
@@ -328,10 +426,22 @@ export const useEditorStore = defineStore('editor', () => {
   const canUndo = computed(() => undoStack.value.length > 0)
   const canRedo = computed(() => redoStack.value.length > 0)
   let historyPresent: EditorHistorySnapshot | null = null
+  let historySequence = 0
   let restoringHistory = false
+  /**
+   * Depth of in-flight viewport drags.
+   *
+   * A drag writes to a property on every pointer move, which would otherwise leave one undo step per
+   * frame and make the gesture impossible to take back. History stands down while one is running,
+   * and the whole drag lands as a single entry when it ends.
+   */
+  let interactiveEdits = 0
 
-  function captureHistorySnapshot(): EditorHistorySnapshot {
+  function captureHistorySnapshot(label = 'Edit project'): EditorHistorySnapshot {
     return {
+      id: `history-${Date.now()}-${++historySequence}`,
+      label,
+      createdAt: Date.now(),
       state: JSON.parse(serializeEditorState(currentState())) as SerializedEditorState,
       workspace: workspace.value,
       currentTime: currentTime.value,
@@ -350,26 +460,80 @@ export const useEditorStore = defineStore('editor', () => {
   function resetEditorHistory() {
     undoStack.value = []
     redoStack.value = []
-    historyPresent = captureHistorySnapshot()
+    historyPresent = captureHistorySnapshot('Project opened')
   }
 
   function historySignature(snapshot: EditorHistorySnapshot) {
+    const { id: _id, label: _label, createdAt: _createdAt, ...content } = snapshot
     return JSON.stringify({
-      ...snapshot,
+      ...content,
       state: { ...snapshot.state, project: { ...snapshot.state.project, updatedAt: 0 } },
     })
   }
 
+  function layerCount(list: EditorLayer[]): number {
+    return list.reduce((count, layer) => count + 1 + layerCount(layer.children ?? []), 0)
+  }
+
+  function describeHistoryChange(previous: EditorHistorySnapshot, current: EditorHistorySnapshot) {
+    const before = previous.state
+    const after = current.state
+    const beforeLayers = layerCount(before.layers)
+    const afterLayers = layerCount(after.layers)
+    if (afterLayers > beforeLayers) return 'Add layer'
+    if (afterLayers < beforeLayers) return 'Delete layer'
+    if (after.assets.length > before.assets.length) return 'Import asset'
+    if (after.assets.length < before.assets.length) return 'Delete asset'
+    if (after.nodes.length > before.nodes.length) return 'Add node'
+    if (after.nodes.length < before.nodes.length) return 'Delete node'
+    if (after.nodeConnections.length > before.nodeConnections.length) return 'Connect nodes'
+    if (after.nodeConnections.length < before.nodeConnections.length) return 'Disconnect nodes'
+    if (after.scenes3D.length > before.scenes3D.length) return 'Add 3D scene'
+    if (after.scenes3D.length < before.scenes3D.length) return 'Delete 3D scene'
+    if (after.project.duration !== before.project.duration || after.project.width !== before.project.width
+      || after.project.height !== before.project.height || after.project.frameRate !== before.project.frameRate) return 'Change project settings'
+    const selected = findLayerDeep(after.layers, current.selectedLayerId ?? '')
+    return selected ? `Edit ${selected.name}` : `Edit ${current.workspace}`
+  }
+
+  const historyEntries = computed(() => {
+    const sequence = [
+      ...undoStack.value,
+      ...(historyPresent ? [historyPresent] : []),
+      ...[...redoStack.value].reverse(),
+    ]
+    return sequence.map((snapshot, index) => ({
+      id: snapshot.id,
+      label: snapshot.label,
+      createdAt: snapshot.createdAt,
+      workspace: snapshot.workspace,
+      current: snapshot.id === historyPresent?.id,
+      position: index,
+    }))
+  })
+
   function recordHistoryChange() {
-    if (restoringHistory) return
+    if (restoringHistory || interactiveEdits > 0) return
     const current = captureHistorySnapshot()
     if (historyPresent && historySignature(historyPresent) === historySignature(current)) return
     if (historyPresent) {
+      current.label = describeHistoryChange(historyPresent, current)
       const previousInEditingWorkspace = { ...historyPresent, workspace: current.workspace }
       undoStack.value = [...undoStack.value.slice(-99), previousInEditingWorkspace]
     }
     historyPresent = current
     redoStack.value = []
+  }
+
+  /** Opens a viewport gesture; every edit until the matching end lands as one undo step. */
+  function beginInteractiveEdit() {
+    interactiveEdits += 1
+  }
+
+  function endInteractiveEdit() {
+    if (!interactiveEdits) return
+    interactiveEdits -= 1
+    if (!interactiveEdits) markChanged()
   }
 
   function restoreHistorySnapshot(snapshot: EditorHistorySnapshot) {
@@ -381,6 +545,8 @@ export const useEditorStore = defineStore('editor', () => {
     assets.value = state.assets
     nodes.value = state.nodes
     nodeConnections.value = state.nodeConnections
+    rigs.value = state.rigs ?? []
+    if (!rigs.value.some((rig) => rig.bones.some((bone) => bone.id === selectedRigBoneId.value))) selectedRigBoneId.value = null
     workspace.value = snapshot.workspace
     currentTime.value = Math.max(0, Math.min(project.value.duration, snapshot.currentTime))
     selectedLayerId.value = findLayerDeep(layers.value, snapshot.selectedLayerId ?? '')?.id ?? layers.value[0]?.id ?? null
@@ -408,7 +574,7 @@ export const useEditorStore = defineStore('editor', () => {
     undoStack.value = undoStack.value.slice(0, -1)
     redoStack.value = [...redoStack.value.slice(-99), current]
     restoreHistorySnapshot(target)
-    historyPresent = captureHistorySnapshot()
+    historyPresent = target
     scheduleProjectSave()
     return true
   }
@@ -420,7 +586,25 @@ export const useEditorStore = defineStore('editor', () => {
     redoStack.value = redoStack.value.slice(0, -1)
     undoStack.value = [...undoStack.value.slice(-99), current]
     restoreHistorySnapshot(target)
-    historyPresent = captureHistorySnapshot()
+    historyPresent = target
+    scheduleProjectSave()
+    return true
+  }
+
+  /** Restores any visible history state and rebuilds undo/redo around it. */
+  function jumpToHistory(id: string) {
+    const sequence = [
+      ...undoStack.value,
+      ...(historyPresent ? [historyPresent] : []),
+      ...[...redoStack.value].reverse(),
+    ]
+    const targetIndex = sequence.findIndex((snapshot) => snapshot.id === id)
+    if (targetIndex < 0) return false
+    const target = sequence[targetIndex]!
+    undoStack.value = sequence.slice(0, targetIndex)
+    redoStack.value = sequence.slice(targetIndex + 1).reverse()
+    restoreHistorySnapshot(target)
+    historyPresent = target
     scheduleProjectSave()
     return true
   }
@@ -569,6 +753,7 @@ export const useEditorStore = defineStore('editor', () => {
   }
 
   const selectedLayer = computed(() => findLayerDeep(layers.value, selectedLayerId.value ?? '') ?? timelineLayers.value[0] ?? layers.value[0])
+  const timelineMarkers = computed(() => project.value.markers ?? [])
   const selectedScene = computed(() => scenes3D.value.find((scene) => scene.id === selectedSceneId.value) ?? scenes3D.value[0])
   const selectedSceneEntity = computed(() => {
     const scene = selectedScene.value
@@ -611,14 +796,57 @@ export const useEditorStore = defineStore('editor', () => {
     currentTime.value = Math.max(0, Math.min(project.value.duration, value))
   }
 
+  function addTimelineMarker(name?: string, color = DEFAULT_TIMELINE_MARKER_COLOR, time = currentTime.value) {
+    const marker: TimelineMarker = {
+      id: crypto.randomUUID(),
+      name: name?.trim() || `Marker ${timelineMarkers.value.length + 1}`,
+      time,
+      color,
+    }
+    project.value.markers = normalizeTimelineMarkers([...timelineMarkers.value, marker], project.value.duration)
+    markChanged()
+    return project.value.markers.find((item) => item.id === marker.id) ?? null
+  }
+
+  function updateTimelineMarker(id: string, patch: Partial<Pick<TimelineMarker, 'name' | 'time' | 'color'>>) {
+    const marker = timelineMarkers.value.find((item) => item.id === id)
+    if (!marker) return false
+    const next = normalizeTimelineMarkers([{ ...marker, ...patch }], project.value.duration)[0]
+    if (!next) return false
+    Object.assign(marker, next)
+    project.value.markers = [...timelineMarkers.value].sort((left, right) => left.time - right.time || left.name.localeCompare(right.name))
+    markChanged()
+    return true
+  }
+
+  function deleteTimelineMarker(id: string) {
+    if (!timelineMarkers.value.some((marker) => marker.id === id)) return false
+    project.value.markers = timelineMarkers.value.filter((marker) => marker.id !== id)
+    markChanged()
+    return true
+  }
+
+  function jumpToAdjacentTimelineMarker(direction: -1 | 1) {
+    const marker = adjacentTimelineMarker(timelineMarkers.value, currentTime.value, direction, (0.5 / project.value.frameRate) + 0.0001)
+    if (!marker) return false
+    setTime(marker.time)
+    return true
+  }
+
   function stepFrame(direction: -1 | 1) {
     setTime(currentTime.value + direction / project.value.frameRate)
   }
 
+  /**
+   * The composition length is the author's call, not a function of what is on the timeline. Clips
+   * are free to run past the end — they simply never play — the same way every other editor treats
+   * a work area. Only a single frame is a hard floor, since a zero-length composition has no frames.
+   */
   function setProjectDuration(value: number) {
-    const longestLayer = layers.value.reduce((end, layer) => Math.max(end, layer.start + layer.duration), 1)
-    project.value.duration = Math.max(longestLayer, Math.min(86400, Number.isFinite(value) ? value : project.value.duration))
+    const minimum = 1 / project.value.frameRate
+    project.value.duration = Math.max(minimum, Math.min(86400, Number.isFinite(value) ? value : project.value.duration))
     currentTime.value = Math.min(currentTime.value, project.value.duration)
+    project.value.markers = normalizeTimelineMarkers(project.value.markers, project.value.duration)
     markChanged()
   }
 
@@ -651,6 +879,50 @@ export const useEditorStore = defineStore('editor', () => {
     })
     if (!result.changed) return
     if (result.keyframeId) selectedKeyframeId.value = result.keyframeId
+    markChanged()
+  }
+
+  function addLayerEffect(kind: LayerEffectKind) {
+    const layer = selectedLayer.value
+    if (!layer || layer.type === 'audio') return
+    layer.effects.push(createLayerEffect(kind))
+    markChanged()
+  }
+
+  function removeLayerEffect(effectId: string) {
+    const layer = selectedLayer.value
+    if (!layer) return
+    const next = layer.effects.filter((effect) => effect.id !== effectId)
+    if (next.length === layer.effects.length) return
+    layer.effects = next
+    markChanged()
+  }
+
+  function toggleLayerEffect(effectId: string) {
+    const effect = selectedLayer.value?.effects.find((item) => item.id === effectId)
+    if (!effect) return
+    effect.enabled = !effect.enabled
+    markChanged()
+  }
+
+  function moveLayerEffect(effectId: string, direction: -1 | 1) {
+    const effects = selectedLayer.value?.effects
+    if (!effects) return
+    const index = effects.findIndex((effect) => effect.id === effectId)
+    const destination = index + direction
+    if (index < 0 || destination < 0 || destination >= effects.length) return
+    const [effect] = effects.splice(index, 1)
+    effects.splice(destination, 0, effect!)
+    markChanged()
+  }
+
+  function setLayerEffectValue(effectId: string, key: string, value: number) {
+    const effect = selectedLayer.value?.effects.find((item) => item.id === effectId)
+    const parameter = effect && layerEffectParameters(effect.kind).find((item) => item.key === key)
+    if (!effect || !parameter || !Number.isFinite(value)) return
+    const next = Math.min(parameter.max ?? Number.POSITIVE_INFINITY, Math.max(parameter.min ?? Number.NEGATIVE_INFINITY, value))
+    if (effect.values[key] === next) return
+    effect.values[key] = next
     markChanged()
   }
 
@@ -783,12 +1055,33 @@ export const useEditorStore = defineStore('editor', () => {
       project.value.duration = Math.max(project.value.duration, layer.start + layer.duration)
       selectedLayerId.value = layer.id
       selectedKeyframeId.value = null
+      attachLayerToCompositeGraph(layer)
       markChanged()
       return layer
     }
     const type = asset.kind === 'composition' ? 'image' : asset.kind === 'scene3d' ? '3d-scene' : asset.kind
+
+    /*
+     * A 3D layer without a scene of its own is unrenderable: the frame graph keys its three-webgl
+     * pass on `sceneId`, and a pass whose scene cannot be resolved is dropped, so the layer would
+     * sit on the timeline and never appear in the Motion viewport. Library scenes that reach this
+     * path carry no reusable layer template but still carry the scene, so instantiate from that —
+     * and refuse the drop outright when there is no scene to instantiate.
+     */
+    const droppedScene = asset.kind === 'scene3d' && asset.sceneTemplate ? raw3DScene(asset.sceneTemplate) : null
+    if (asset.kind === 'scene3d' && !droppedScene) return
+    if (droppedScene) {
+      droppedScene.id = crypto.randomUUID()
+      droppedScene.name = asset.name
+      droppedScene.revision += 1
+      scenes3D.value.push(droppedScene)
+      selectedSceneId.value = droppedScene.id
+      selectedSceneEntityId.value = droppedScene.objects[0]?.id ?? droppedScene.cameras[0]?.id ?? droppedScene.lights[0]?.id ?? ''
+    }
+
     const layer: EditorLayer = {
       id: crypto.randomUUID(), name: asset.name.replace(/\.[^.]+$/, ''), type,
+      ...(droppedScene ? { sceneId: droppedScene.id } : {}),
       // The link back to the library entry, and through it to the media the vault serves.
       assetId: asset.id,
       start: dropTime, duration: Math.min(asset.duration ?? 6, Math.max(1 / project.value.frameRate, project.value.duration - dropTime)),
@@ -815,6 +1108,7 @@ export const useEditorStore = defineStore('editor', () => {
       list.splice(type === 'audio' ? list.length : 0, 0, layer)
     }
     selectedLayerId.value = layer.id
+    attachLayerToCompositeGraph(layer)
     markChanged()
     return layer
   }
@@ -980,12 +1274,14 @@ export const useEditorStore = defineStore('editor', () => {
       muted: false,
       expanded: false,
       transform: makeProjectTransform(id),
-      effects: preset === 'cinematic-grade' ? ['Color Matrix', 'Vignette'] : isAudio ? ['Gain'] : [],
+      effects: preset === 'cinematic-grade'
+        ? [createLayerEffect('colorMatrix', crypto.randomUUID(), { temperature: -8, contrast: 1.12 }), createLayerEffect('vignette')]
+        : [],
     }
 
     if (preset === '3d-scene') {
       const sceneNumber = scenes3D.value.length + 1
-      const scene = createEmpty3DScene(`3D Scene ${sceneNumber}`)
+      const scene = createStarter3DScene(`3D Scene ${sceneNumber}`)
       scenes3D.value.push(scene)
       layer.name = scene.name
       layer.sceneId = scene.id
@@ -997,6 +1293,7 @@ export const useEditorStore = defineStore('editor', () => {
     layerList().splice(isAudio ? layerList().length : 0, 0, layer)
     selectedLayerId.value = layer.id
     selectedKeyframeId.value = null
+    attachLayerToCompositeGraph(layer)
     markChanged()
     return layer
   }
@@ -1467,6 +1764,7 @@ export const useEditorStore = defineStore('editor', () => {
 
   function scheduleProjectSave() {
     changeRevision += 1
+    renderRevision.value += 1
     saveStatus.value = 'Saving…'
     if (typeof window === 'undefined') return
     if (saveTimer !== null) window.clearTimeout(saveTimer)
@@ -1490,7 +1788,7 @@ export const useEditorStore = defineStore('editor', () => {
     const save = async () => {
       project.value.updatedAt = Date.now()
       try {
-        await auroraProjectDatabase.saveSnapshot(projectSnapshot())
+        await auroraProjectLibrary.saveSnapshot(projectSnapshot())
         updateProjectSummary(project.value)
         if (revisionToSave === changeRevision) saveStatus.value = 'Saved'
       } catch (error) {
@@ -1564,6 +1862,109 @@ export const useEditorStore = defineStore('editor', () => {
     return object
   }
 
+  /** Creates a transform-only parent and optionally places existing objects beneath it. */
+  function add3DGroup(objectIds: string[] = []) {
+    const scene = selectedScene.value
+    if (!scene) return null
+    const selected = new Set(objectIds)
+    const group = createGroupObject(scene.objects.filter((item) => item.type === 'group').length + 1)
+    // If both a parent and its descendant were selected, grouping only the parent preserves the
+    // existing subtree instead of needlessly flattening it under the new group.
+    const byId = new Map(scene.objects.map((object) => [object.id, object]))
+    const roots = scene.objects.filter((object) => {
+      if (!selected.has(object.id)) return false
+      const visited = new Set<string>()
+      for (let parent = object.parentId ? byId.get(object.parentId) : undefined; parent; parent = parent.parentId ? byId.get(parent.parentId) : undefined) {
+        if (visited.has(parent.id)) break
+        visited.add(parent.id)
+        if (selected.has(parent.id)) return false
+      }
+      return true
+    })
+    const parentIds = new Set(roots.map((object) => object.parentId ?? ''))
+    // A transform can preserve sibling coordinates exactly. Objects from unrelated parent spaces
+    // need an explicit reparent operation, so they are not silently moved by this grouping action.
+    if (parentIds.size > 1) return null
+    const sharedParentId = roots[0]?.parentId
+    if (sharedParentId) group.parentId = sharedParentId
+    if (roots.length) {
+      ;(['x', 'y', 'z'] as const).forEach((axis) => {
+        const center = roots.reduce((sum, object) => sum + evaluateNumericProperty(object.transform.position[axis], currentTime.value), 0) / roots.length
+        group.transform.position[axis].value = center
+        roots.forEach((object) => {
+          const position = object.transform.position[axis]
+          position.value -= center
+          position.keyframes.forEach((keyframe) => { keyframe.value -= center })
+        })
+      })
+    }
+    scene.objects.push(group)
+    roots.forEach((object) => { object.parentId = group.id })
+    selectedSceneEntityId.value = group.id
+    markSceneChanged(scene)
+    return group
+  }
+
+  function composeGroupAndChildTransform(group: Aurora3DObject, child: Aurora3DObject) {
+    const channels = (transform: Aurora3DObject['transform']) => (['position', 'rotation', 'scale'] as const)
+      .flatMap((section) => (['x', 'y', 'z'] as const).map((axis) => transform[section][axis]))
+    const times = new Set<number>([currentTime.value])
+    ;[...channels(group.transform), ...channels(child.transform)].forEach((property) => {
+      if (property.animated) property.keyframes.forEach((keyframe) => times.add(keyframe.time))
+    })
+    const sample = (transform: Aurora3DObject['transform'], time: number) => new THREE.Matrix4().compose(
+      new THREE.Vector3(...(['x', 'y', 'z'] as const).map((axis) => evaluateNumericProperty(transform.position[axis], time)) as [number, number, number]),
+      new THREE.Quaternion().setFromEuler(new THREE.Euler(...(['x', 'y', 'z'] as const).map((axis) => THREE.MathUtils.degToRad(evaluateNumericProperty(transform.rotation[axis], time))) as [number, number, number], 'XYZ')),
+      new THREE.Vector3(...(['x', 'y', 'z'] as const).map((axis) => evaluateNumericProperty(transform.scale[axis], time)) as [number, number, number]),
+    )
+    const sortedTimes = [...times].sort((a, b) => a - b)
+    const samples = sortedTimes.map((time) => {
+      const position = new THREE.Vector3()
+      const rotation = new THREE.Quaternion()
+      const scale = new THREE.Vector3()
+      sample(group.transform, time).multiply(sample(child.transform, time)).decompose(position, rotation, scale)
+      const euler = new THREE.Euler().setFromQuaternion(rotation, 'XYZ')
+      return {
+        time,
+        position: [position.x, position.y, position.z],
+        rotation: [THREE.MathUtils.radToDeg(euler.x), THREE.MathUtils.radToDeg(euler.y), THREE.MathUtils.radToDeg(euler.z)],
+        scale: [scale.x, scale.y, scale.z],
+      } as const
+    })
+    ;(['position', 'rotation', 'scale'] as const).forEach((section) => {
+      ;(['x', 'y', 'z'] as const).forEach((axis, axisIndex) => {
+        const property = child.transform[section][axis]
+        const values = samples.map((item) => item[section][axisIndex])
+        property.value = values[sortedTimes.indexOf(currentTime.value)] ?? values[0]!
+        property.animated = sortedTimes.length > 1
+        property.keyframes = property.animated
+          ? sortedTimes.map((time, index) => ({ id: crypto.randomUUID(), time, value: values[index]!, interpolation: 'linear' }))
+          : []
+      })
+    })
+  }
+
+  function releaseGroupChildren(scene: Aurora3DScene, group: Aurora3DObject) {
+    scene.objects.forEach((object) => {
+      if (object.parentId !== group.id) return
+      composeGroupAndChildTransform(group, object)
+      if (group.parentId) object.parentId = group.parentId
+      else delete object.parentId
+    })
+  }
+
+  /** Removes a group node and releases its direct children back to the group's parent. */
+  function ungroup3DObject(groupId: string) {
+    const scene = selectedScene.value
+    const group = scene?.objects.find((object) => object.id === groupId && object.type === 'group')
+    if (!scene || !group) return false
+    releaseGroupChildren(scene, group)
+    scene.objects = scene.objects.filter((object) => object.id !== group.id)
+    selectedSceneEntityId.value = group.parentId ?? scene.objects[0]?.id ?? scene.cameras[0]?.id ?? ''
+    markSceneChanged(scene)
+    return true
+  }
+
   /** Creates an image card whose media can be changed later in the inspector. */
   function add3DImagePlane(assetId?: string) {
     const scene = selectedScene.value
@@ -1584,6 +1985,36 @@ export const useEditorStore = defineStore('editor', () => {
     return object
   }
 
+  /**
+   * Places an imported mesh in the scene.
+   *
+   * The file keeps its own materials and internal hierarchy, so the object is a host rather than a
+   * primitive: Aurora's PBR sliders and influences do not apply to it.
+   */
+  function add3DModel(assetId?: string) {
+    const scene = selectedScene.value
+    if (!scene) return null
+    const asset = assets.value.find((item) => item.id === assetId && item.kind === 'model3d')
+      ?? assets.value.find((item) => item.kind === 'model3d')
+    if (!asset) return null
+    const object = createPrimitiveObject('model', scene.objects.length + 1)
+    object.name = asset.name.replace(/\.[^.]+$/, '')
+    object.assetId = asset.id
+    scene.objects.push(object)
+    selectedSceneEntityId.value = object.id
+    markSceneChanged(scene)
+    return object
+  }
+
+  /** New aimed lights point at the authored content, so adding one lights the scene immediately. */
+  function sceneAimTarget(scene: Aurora3DScene): [number, number, number] {
+    const roots = scene.objects.filter((object) => !object.parentId)
+    if (!roots.length) return [0, 0, 0]
+    const mean = (axis: 'x' | 'y' | 'z') => roots
+      .reduce((sum, object) => sum + evaluateNumericProperty(object.transform.position[axis], currentTime.value), 0) / roots.length
+    return [mean('x'), mean('y'), mean('z')]
+  }
+
   function add3DLight(type: AuroraLight['type']) {
     const scene = selectedScene.value
     if (!scene) return null
@@ -1594,9 +2025,25 @@ export const useEditorStore = defineStore('editor', () => {
       visible: true,
       type,
       color: type === 'ambient' ? '#c5ccff' : '#ffffff',
-      intensity: numericProperty(`${id}-intensity`, type === 'point' ? 18 : 1.5),
+      intensity: numericProperty(`${id}-intensity`, type === 'spot' ? 80 : type === 'point' ? 18 : type === 'area' ? 12 : 1.5),
       transform: makeTransform3D(id, type === 'ambient' ? [0, 0, 0] : [4, 5, 3]),
-      castShadow: type !== 'ambient',
+      // RectAreaLight has no shadow support in Three, so an area light never claims to cast one.
+      castShadow: type !== 'ambient' && type !== 'area',
+    }
+    if (type === 'spot') {
+      light.angle = numericProperty(`${id}-angle`, 32)
+      light.distance = numericProperty(`${id}-distance`, 0)
+      light.penumbra = numericProperty(`${id}-penumbra`, .25)
+    }
+    if (type === 'area') {
+      light.width = numericProperty(`${id}-width`, 4)
+      light.height = numericProperty(`${id}-height`, 2)
+    }
+    if (type === 'directional' || type === 'spot' || type === 'area') {
+      const [rotationX, rotationY, rotationZ] = aimRotationDegrees([4, 5, 3], sceneAimTarget(scene))
+      light.transform.rotation.x.value = rotationX
+      light.transform.rotation.y.value = rotationY
+      light.transform.rotation.z.value = rotationZ
     }
     scene.lights.push(light)
     selectedSceneEntityId.value = light.id
@@ -1633,6 +2080,7 @@ export const useEditorStore = defineStore('editor', () => {
     )
     if (entity.kind === 'object') {
       const influenceProperties = (entity.value.influences ?? []).flatMap((influence) => influenceParameters(influence).map((item) => item.property))
+      if (entity.value.type !== 'mesh' || entity.value.primitive === 'model') return [...transformProperties, ...influenceProperties]
       return [
         ...transformProperties,
         entity.value.material.metalness, entity.value.material.roughness,
@@ -1645,10 +2093,26 @@ export const useEditorStore = defineStore('editor', () => {
       const constraintProperties = constraint
         ? [constraint.progress, constraint.bank, constraint.offset.x, constraint.offset.y, constraint.offset.z]
         : []
-      return [...transformProperties, entity.value.fov, ...constraintProperties]
+      const objectConstraint = entity.value.objectConstraint
+      const objectConstraintProperties = objectConstraint
+        ? [
+            objectConstraint.positionOffset.x, objectConstraint.positionOffset.y, objectConstraint.positionOffset.z,
+            objectConstraint.rotationOffset.x, objectConstraint.rotationOffset.y, objectConstraint.rotationOffset.z,
+          ]
+        : []
+      return [
+        ...transformProperties, entity.value.fov, ...constraintProperties, ...objectConstraintProperties,
+        entity.value.focusDistance, entity.value.fStop,
+      ].filter((property): property is AnimatableProperty<number> => Boolean(property))
     }
     if (entity.kind === 'path') return transformProperties
-    return [...transformProperties, entity.value.intensity]
+    return [
+      ...transformProperties,
+      entity.value.intensity,
+      entity.value.angle,
+      entity.value.distance,
+      entity.value.penumbra,
+    ].filter((property): property is AnimatableProperty<number> => Boolean(property))
   }
 
   function findSelected3DProperty(propertyId: string) {
@@ -1690,7 +2154,7 @@ export const useEditorStore = defineStore('editor', () => {
 
   function set3DObjectMaterial(key: 'metalness' | 'roughness' | 'opacity' | 'emissiveIntensity', value: number) {
     const entity = selectedSceneEntity.value
-    if (entity?.kind !== 'object') return
+    if (entity?.kind !== 'object' || entity.value.type !== 'mesh' || entity.value.primitive === 'model') return
     if (apply3DPropertyValue(entity.value.material[key], value)) markSceneChanged()
   }
 
@@ -1704,10 +2168,63 @@ export const useEditorStore = defineStore('editor', () => {
     return true
   }
 
+  /** Points the scene at a radiance map, which lights every material and can also be the backdrop. */
+  function set3DEnvironmentMap(assetId: string | null) {
+    const scene = selectedScene.value
+    if (!scene) return false
+    const asset = assetId ? assets.value.find((item) => item.id === assetId && item.kind === 'hdr') : undefined
+    if (assetId && !asset) return false
+    if (asset) scene.environmentAssetId = asset.id
+    else {
+      delete scene.environmentAssetId
+      scene.environmentBackground = false
+    }
+    markSceneChanged(scene)
+    return true
+  }
+
+  function set3DEnvironmentBackground(visible: boolean) {
+    const scene = selectedScene.value
+    if (!scene || !scene.environmentAssetId) return false
+    scene.environmentBackground = visible
+    markSceneChanged(scene)
+    return true
+  }
+
+  function set3DObjectModel(assetId: string | null) {
+    const entity = selectedSceneEntity.value
+    if (entity?.kind !== 'object' || entity.value.primitive !== 'model') return false
+    const asset = assetId ? assets.value.find((item) => item.id === assetId && item.kind === 'model3d') : undefined
+    if (assetId && !asset) return false
+    entity.value.assetId = asset?.id
+    markSceneChanged()
+    return true
+  }
+
   function set3DLightIntensity(value: number) {
     const entity = selectedSceneEntity.value
     if (entity?.kind !== 'light') return
     if (apply3DPropertyValue(entity.value.intensity, value)) markSceneChanged()
+  }
+
+  function set3DCameraLens(key: 'focusDistance' | 'fStop', value: number) {
+    const entity = selectedSceneEntity.value
+    const property = entity?.kind === 'camera' ? entity.value[key] : undefined
+    if (!property || !Number.isFinite(value)) return
+    const clamped = key === 'focusDistance'
+      ? Math.max(.01, Math.min(1000, value))
+      : Math.max(1, Math.min(22, value))
+    if (apply3DPropertyValue(property, clamped)) markSceneChanged()
+  }
+
+  function set3DCameraDepthOfField(enabled: boolean) {
+    const entity = selectedSceneEntity.value
+    if (entity?.kind !== 'camera') return false
+    entity.value.depthOfField = enabled
+    entity.value.focusDistance ??= numericProperty(`${entity.value.id}-focus-distance`, 8)
+    entity.value.fStop ??= numericProperty(`${entity.value.id}-f-stop`, 2.8)
+    markSceneChanged()
+    return true
   }
 
   function set3DCameraFov(value: number) {
@@ -1721,9 +2238,30 @@ export const useEditorStore = defineStore('editor', () => {
     return entity?.kind === 'object' ? entity.value : null
   }
 
+  function set3DLightCone(key: 'angle' | 'distance' | 'penumbra', value: number) {
+    const entity = selectedSceneEntity.value
+    const property = entity?.kind === 'light' && entity.value.type === 'spot' ? entity.value[key] : undefined
+    if (!property || !Number.isFinite(value)) return
+    const clamped = key === 'angle'
+      ? Math.max(1, Math.min(89, value))
+      : key === 'distance'
+        ? Math.max(0, Math.min(1000, value))
+        : Math.max(0, Math.min(1, value))
+    if (apply3DPropertyValue(property, clamped)) markSceneChanged()
+  }
+
+  function set3DLightArea(key: 'width' | 'height', value: number) {
+    const entity = selectedSceneEntity.value
+    const property = entity?.kind === 'light' && entity.value.type === 'area' ? entity.value[key] : undefined
+    if (!property || !Number.isFinite(value)) return
+    if (apply3DPropertyValue(property, Math.max(.01, Math.min(200, value)))) markSceneChanged()
+  }
+
   function add3DInfluence(type: AuroraInfluenceType) {
     const object = selectedObject()
-    if (!object) return null
+    // An imported subtree carries its own geometry, so nothing in the influence stack can reach it.
+    if (!object || object.primitive === 'model') return null
+    if (object.type !== 'mesh' && type !== 'array') return null
     if (!Array.isArray(object.influences)) object.influences = []
     const sameType = object.influences.filter((influence) => influence.type === type).length
     const influence = createInfluence(type, sameType + 1)
@@ -1811,10 +2349,14 @@ export const useEditorStore = defineStore('editor', () => {
     const cameraIndex = scene.cameras.findIndex((item) => item.id === entityId)
     const lightIndex = scene.lights.findIndex((item) => item.id === entityId)
     if (objectIndex >= 0) {
+      const object = scene.objects[objectIndex]!
+      if (object.type === 'group') releaseGroupChildren(scene, object)
       scene.objects.splice(objectIndex, 1)
       scene.objects.forEach((object) => { if (object.parentId === entityId) delete object.parentId })
       scene.cameras.forEach((camera) => {
         if (camera.pathConstraint?.lookAtEntityId === entityId) delete camera.pathConstraint.lookAtEntityId
+        if (camera.objectConstraint?.objectId === entityId) delete camera.objectConstraint
+        else if (camera.objectConstraint?.lookAtEntityId === entityId) delete camera.objectConstraint.lookAtEntityId
       })
     } else if (cameraIndex >= 0) {
       if (scene.cameras.length <= 1) return false
@@ -1922,8 +2464,11 @@ export const useEditorStore = defineStore('editor', () => {
     const camera = selectedCamera()
     if (!camera) return
     if (!pathId) delete camera.pathConstraint
-    else if (camera.pathConstraint) camera.pathConstraint.pathId = pathId
-    else camera.pathConstraint = createCameraPathConstraint(camera.id, pathId)
+    else {
+      delete camera.objectConstraint
+      if (camera.pathConstraint) camera.pathConstraint.pathId = pathId
+      else camera.pathConstraint = createCameraPathConstraint(camera.id, pathId)
+    }
     markSceneChanged()
   }
 
@@ -1965,6 +2510,47 @@ export const useEditorStore = defineStore('editor', () => {
     if (!constraint) return
     let changed = false
     ;(['x', 'y', 'z'] as const).forEach((axis) => { changed = apply3DPropertyValue(constraint.offset[axis], 0) || changed })
+    if (changed) markSceneChanged()
+  }
+
+  function setCameraObjectConstraint(objectId: string | null) {
+    const camera = selectedCamera()
+    if (!camera) return
+    if (!objectId) delete camera.objectConstraint
+    else {
+      delete camera.pathConstraint
+      if (camera.objectConstraint) camera.objectConstraint.objectId = objectId
+      else camera.objectConstraint = createCameraObjectConstraint(camera.id, objectId)
+    }
+    markSceneChanged()
+  }
+
+  function setCameraObjectOrientation(orientation: AuroraObjectFollowOrientation) {
+    const constraint = selectedCamera()?.objectConstraint
+    if (!constraint) return
+    constraint.orientation = orientation
+    markSceneChanged()
+  }
+
+  function setCameraObjectLookAtTarget(entityId: string | null) {
+    const constraint = selectedCamera()?.objectConstraint
+    if (!constraint) return
+    if (entityId) constraint.lookAtEntityId = entityId
+    else delete constraint.lookAtEntityId
+    markSceneChanged()
+  }
+
+  function setCameraObjectOffset(group: 'positionOffset' | 'rotationOffset', axis: 'x' | 'y' | 'z', value: number) {
+    const constraint = selectedCamera()?.objectConstraint
+    if (!constraint || !Number.isFinite(value)) return
+    if (apply3DPropertyValue(constraint[group][axis], value)) markSceneChanged()
+  }
+
+  function resetCameraObjectOffset(group: 'positionOffset' | 'rotationOffset') {
+    const constraint = selectedCamera()?.objectConstraint
+    if (!constraint) return
+    let changed = false
+    ;(['x', 'y', 'z'] as const).forEach((axis) => { changed = apply3DPropertyValue(constraint[group][axis], 0) || changed })
     if (changed) markSceneChanged()
   }
 
@@ -2236,27 +2822,283 @@ export const useEditorStore = defineStore('editor', () => {
     markChanged()
   }
 
-  function startExport() {
+  const selectedLayerRig = computed(() => rigs.value.find((rig) => rig.id === selectedLayer.value?.rigId) ?? null)
+  const selected3DObjectRig = computed(() => {
+    const entity = selectedSceneEntity.value
+    return entity?.kind === 'object' ? rigs.value.find((rig) => rig.id === entity.value.rigId) ?? null : null
+  })
+  const selectedRigBone = computed(() => {
+    const rig = selectedLayerRig.value ?? selected3DObjectRig.value
+    return rig?.bones.find((bone) => bone.id === selectedRigBoneId.value) ?? null
+  })
+
+  const findRig = (rigId: string | null | undefined) => rigs.value.find((rig) => rig.id === rigId) ?? null
+  const findRigBone = (rigId: string, boneId: string) => findRig(rigId)?.bones.find((bone) => bone.id === boneId) ?? null
+
+  function addRig(name?: string) {
+    const rig = createRig(name?.trim() || `Rig ${rigs.value.length + 1}`)
+    rigs.value = [...rigs.value, rig]
+    markChanged()
+    return rig
+  }
+
+  function renameRig(rigId: string, name: string) {
+    const rig = findRig(rigId)
+    if (!rig || !name.trim()) return
+    rig.name = name.trim()
+    markChanged()
+  }
+
+  /** Removing a rig also releases whatever it was bending, so nothing is left claiming a missing rig. */
+  function deleteRig(rigId: string) {
+    if (!findRig(rigId)) return
+    rigs.value = rigs.value.filter((rig) => rig.id !== rigId)
+    const release = (list: EditorLayer[]) => list.forEach((layer) => {
+      if (layer.rigId === rigId) delete layer.rigId
+      if (layer.children) release(layer.children)
+    })
+    release(layers.value)
+    scenes3D.value.forEach((scene) => {
+      let touched = false
+      scene.objects.forEach((object) => {
+        if (object.rigId !== rigId) return
+        delete object.rigId
+        touched = true
+      })
+      if (touched) scene.revision += 1
+    })
+    if (selectedRigBoneId.value) selectedRigBoneId.value = null
+    markChanged()
+  }
+
+  function setRigGrid(rigId: string, columns: number, rows: number) {
+    const rig = findRig(rigId)
+    if (!rig) return
+    const clamp = (value: number, fallback: number) => Math.max(MIN_RIG_CELLS, Math.min(MAX_RIG_CELLS, Math.round(Number.isFinite(value) ? value : fallback)))
+    rig.columns = clamp(columns, rig.columns)
+    rig.rows = clamp(rows, rig.rows)
+    markChanged()
+  }
+
+  /** Attaching is exclusive per target: a layer or object bends under one skeleton at a time. */
+  function attachRigToLayer(rigId: string | null) {
+    const layer = selectedLayer.value
+    if (!layer) return
+    if (rigId && findRig(rigId)) layer.rigId = rigId
+    else delete layer.rigId
+    selectedRigBoneId.value = null
+    markChanged()
+  }
+
+  function attachRigToObject(rigId: string | null) {
+    const entity = selectedSceneEntity.value
+    if (entity?.kind !== 'object') return
+    if (rigId && findRig(rigId)) entity.value.rigId = rigId
+    else delete entity.value.rigId
+    selectedRigBoneId.value = null
+    markSceneChanged()
+  }
+
+  function addRigBone(rigId: string, seed: Parameters<typeof createRigBone>[1] = {}) {
+    const rig = findRig(rigId)
+    if (!rig) return null
+    const bone = createRigBone(rig.bones.length + 1, seed)
+    rig.bones = [...rig.bones, bone]
+    selectedRigBoneId.value = bone.id
+    markChanged()
+    return bone
+  }
+
+  /** A deleted bone hands its children to its own parent, so a limb never detaches from the chain. */
+  function deleteRigBone(rigId: string, boneId: string) {
+    const rig = findRig(rigId)
+    const bone = rig?.bones.find((item) => item.id === boneId)
+    if (!rig || !bone) return
+    rig.bones = rig.bones.filter((item) => item.id !== boneId)
+    rig.bones.forEach((item) => {
+      if (item.parentId !== boneId) return
+      if (bone.parentId) item.parentId = bone.parentId
+      else delete item.parentId
+    })
+    if (selectedRigBoneId.value === boneId) selectedRigBoneId.value = rig.bones[0]?.id ?? null
+    markChanged()
+  }
+
+  function renameRigBone(rigId: string, boneId: string, name: string) {
+    const bone = findRigBone(rigId, boneId)
+    if (!bone || !name.trim()) return
+    bone.name = name.trim()
+    markChanged()
+  }
+
+  /** Refuses a parent that is already downstream, which would otherwise make the chain unposable. */
+  function setRigBoneParent(rigId: string, boneId: string, parentId: string | null) {
+    const rig = findRig(rigId)
+    const bone = rig?.bones.find((item) => item.id === boneId)
+    if (!rig || !bone) return
+    if (!parentId) {
+      delete bone.parentId
+      markChanged()
+      return
+    }
+    if (parentId === boneId) return
+    const byId = new Map(rig.bones.map((item) => [item.id, item]))
+    for (let ancestor = byId.get(parentId); ancestor; ancestor = ancestor.parentId ? byId.get(ancestor.parentId) : undefined) {
+      if (ancestor.id === boneId) return
+    }
+    bone.parentId = parentId
+    markChanged()
+  }
+
+  function setRigBoneRest(rigId: string, boneId: string, patch: Partial<Pick<AuroraRigBone, 'x' | 'y' | 'angle' | 'length' | 'falloff'>>) {
+    const bone = findRigBone(rigId, boneId)
+    if (!bone) return
+    let changed = false
+    ;(Object.entries(patch) as Array<[keyof typeof patch, number | undefined]>).forEach(([key, value]) => {
+      if (value === undefined || !Number.isFinite(value)) return
+      const next = key === 'length' || key === 'falloff' ? Math.max(0, value) : value
+      if (bone[key] === next) return
+      bone[key] = next
+      changed = true
+    })
+    if (changed) markChanged()
+  }
+
+  function setRigBonePose(rigId: string, boneId: string, channel: RigBoneChannelKey, value: number) {
+    const bone = findRigBone(rigId, boneId)
+    if (!bone || !Number.isFinite(value)) return
+    if (apply3DPropertyValue(bone[channel], channel === 'stretch' ? Math.max(.01, value) : value)) markChanged()
+  }
+
+  function resetRigBonePose(rigId: string, boneId: string) {
+    const bone = findRigBone(rigId, boneId)
+    if (!bone) return
+    let changed = false
+    ;([['rotation', 0], ['offsetX', 0], ['offsetY', 0], ['stretch', 1]] as Array<[RigBoneChannelKey, number]>)
+      .forEach(([channel, value]) => { changed = apply3DPropertyValue(bone[channel], value) || changed })
+    if (changed) markChanged()
+  }
+
+  /** Bones the given one can legally hang from: anything that is not itself or one of its descendants. */
+  function rigParentCandidates(rigId: string, boneId: string) {
+    const rig = findRig(rigId)
+    if (!rig) return []
+    const descendants = new Set([boneId])
+    let grew = true
+    while (grew) {
+      grew = false
+      rig.bones.forEach((bone) => {
+        if (bone.parentId && descendants.has(bone.parentId) && !descendants.has(bone.id)) {
+          descendants.add(bone.id)
+          grew = true
+        }
+      })
+    }
+    return rig.bones.filter((bone) => !descendants.has(bone.id))
+  }
+
+  /** Everything the offline renderers need, detached from the reactive store. */
+  function exportComposition() {
+    return {
+      project: toRaw(project.value),
+      layers: toRaw(layers.value),
+      scenes3D: toRaw(scenes3D.value),
+      assets: toRaw(assets.value),
+      nodes: toRaw(nodes.value),
+      nodeConnections: toRaw(nodeConnections.value),
+      renderRootNodeId: renderRootNodeId.value,
+      rigs: toRaw(rigs.value),
+    }
+  }
+
+  /** Shared plumbing for the offline renderers: one at a time, cancellable, with real progress. */
+  async function runExport(label: string, extension: string, filename: string, render: (report: (frame: number, total: number) => void, signal: AbortSignal) => Promise<Blob>) {
+    if (exportStatus.value === 'rendering') return
+    const controller = new AbortController()
+    exportAbort = controller
+    exportStatus.value = 'rendering'
+    exportMessage.value = ''
     exportProgress.value = 1
-    const interval = window.setInterval(() => {
-      exportProgress.value = Math.min(100, exportProgress.value + 4)
-      if (exportProgress.value >= 100) window.clearInterval(interval)
-    }, 90)
+    try {
+      const blob = await render(
+        (frame, total) => { exportProgress.value = Math.max(1, Math.round((frame / total) * 100)) },
+        controller.signal,
+      )
+      const name = filename.trim() || project.value.name
+      downloadBlob(blob, name.toLowerCase().endsWith(extension) ? name : `${name}${extension}`)
+      exportProgress.value = 100
+      exportStatus.value = 'done'
+      exportMessage.value = `${(blob.size / 1024 / 1024).toFixed(1)} MB written`
+    } catch (error) {
+      const cancelled = error instanceof DOMException && error.name === 'AbortError'
+      exportProgress.value = 0
+      exportStatus.value = cancelled ? 'idle' : 'error'
+      exportMessage.value = cancelled ? '' : error instanceof Error ? error.message : `The ${label} render failed.`
+    } finally {
+      exportAbort = null
+    }
+  }
+
+  /** Renders every frame of the composition into a WebM video and downloads it. */
+  async function exportVideo(options: { filename: string; maxWidth: number; frameRate: number; quality: 'web' | 'high' | 'master'; codec?: 'vp9' | 'vp8' | 'av1'; startTime?: number; endTime?: number }) {
+    await runExport('video', '.webm', options.filename, async (onProgress, signal) => {
+      const { exportProjectVideo } = await import('@/engine/rendering/videoExport')
+      return exportProjectVideo({
+        composition: exportComposition(),
+        maxWidth: options.maxWidth,
+        frameRate: options.frameRate,
+        quality: options.quality,
+        codec: options.codec,
+        startTime: options.startTime,
+        endTime: options.endTime,
+        signal,
+        onProgress,
+      })
+    })
+  }
+
+  /** Renders every frame of the composition into an animated GIF and downloads it. */
+  async function exportGif(options: { filename: string; maxWidth: number; frameRate: number; colors: number; loop: boolean; startTime?: number; endTime?: number }) {
+    await runExport('GIF', '.gif', options.filename, async (onProgress, signal) => {
+      const { exportProjectGif } = await import('@/engine/rendering/gifExport')
+      return exportProjectGif({
+        composition: exportComposition(),
+        maxWidth: options.maxWidth,
+        frameRate: options.frameRate,
+        colors: options.colors,
+        loop: options.loop,
+        startTime: options.startTime,
+        endTime: options.endTime,
+        signal,
+        onProgress,
+      })
+    })
+  }
+
+  function cancelExport() {
+    exportAbort?.abort()
   }
 
   resetEditorHistory()
 
   return {
-    project, availableProjects, projectBrowserBusy, projectBrowserError,
-    workspace, currentTime, playing, loop, autoKey, snap, ripple, selectedLayerId, selectedKeyframeId,
-    canUndo, canRedo, undo, redo,
-    selectedNodeId, selectedSceneId, selectedSceneEntityId, zoom, saveStatus, exportProgress, assets, layers, scenes3D,
+    project, availableProjects, projectBrowserBusy, projectBrowserError, renderRevision,
+    frameCacheStatus, frameCacheFrames, frameCacheProjectId, frameCacheRevision, frameCacheScope,
+    frameCacheProgress, frameCacheRange, frameCacheRequestId, frameCacheCancelId, frameCacheClearId,
+    workspace, currentTime, playing, loop, autoKey, snap, ripple, selectedLayerId, selectedKeyframeId, timelineMarkers,
+    canUndo, canRedo, historyEntries, undo, redo, jumpToHistory, beginInteractiveEdit, endInteractiveEdit,
+    selectedNodeId, selectedSceneId, selectedSceneEntityId, zoom, saveStatus, exportProgress, exportStatus, exportMessage, assets, layers, scenes3D,
     nodes, nodeConnections, selectedConnectionId, renderRootNodeId,
+    rigs, selectedRigBoneId, selectedLayerRig, selected3DObjectRig, selectedRigBone,
+    addRig, renameRig, deleteRig, setRigGrid, attachRigToLayer, attachRigToObject,
+    addRigBone, deleteRigBone, renameRigBone, setRigBoneParent, setRigBoneRest, setRigBonePose, resetRigBonePose,
+    rigParentCandidates, findRig,
     selectNode, selectNodeConnection, addNode, moveNode, deleteNode, connectNodes, disconnectNodes,
     setNodeSource, setNodeSocketValue, setNodeProperty, toggleNodeMuted, setRenderRootNode,
     ensureMaskSegments, setMaskSegmentFeather, setMaskSegmentFeatherAll, selectedMaskSegment,
     selectedLayer, selectedScene, selectedSceneEntity,
-    togglePlayback, setTime, stepFrame, setProjectDuration, addKeyframe, setLayerValue, addFiles,
+    togglePlayback, setTime, stepFrame, setProjectDuration, addTimelineMarker, updateTimelineMarker, deleteTimelineMarker, jumpToAdjacentTimelineMarker, addKeyframe, setLayerValue,
+    addLayerEffect, removeLayerEffect, toggleLayerEffect, moveLayerEffect, setLayerEffectValue, addFiles,
     deleteMediaAsset, mediaAssetReferenceCount,
     importFailures, draggingAssetId, addAssetToTimeline, addGeneratedLayer, addPathLayer, addTimelineLayer, reorderTrack, moveSegmentToTrack, moveSegmentToNewTrack, addEmptyTrack, rippleTrackSegments,
     renameTimelineLayers, setTimelineLayersVisible, deleteTimelineLayers,
@@ -2264,17 +3106,20 @@ export const useEditorStore = defineStore('editor', () => {
     openClusterTabs, activeClusterId, activeCluster, timelineLayers, clusterTabs,
     enterCluster, activateTimelineTab, closeClusterTab, fitClusterToChildren, publishClusterAsset, ensureClusterAssets, dedupeCompositionAssets,
     splitLayerAt, splitSelectedLayer, markChanged, saveProjectNow, flushProjectSave, initializePersistence,
-    refreshProjects, openProject, createEmptyProject, setProjectFormat, setWorkspace, create3DSceneFromWorkspace, startExport,
+    requestFrameCacheRange, cancelFrameCache, requestFrameCacheClear, beginFrameCache,
+    recordFrameCached, updateFrameCacheProgress, finishFrameCache, resetFrameCacheDisplay,
+    refreshProjects, openProject, createEmptyProject, setProjectFormat, setWorkspace, create3DSceneFromWorkspace, exportVideo, exportGif, cancelExport,
     publish3DSceneAsset, ensure3DSceneAssets,
-    selectSceneEntity, select3DLayer, markSceneChanged, add3DPrimitive, add3DImagePlane, add3DLight, add3DCamera, set3DEntityTransform,
+    selectSceneEntity, select3DLayer, markSceneChanged, add3DPrimitive, add3DGroup, ungroup3DObject, add3DImagePlane, add3DModel, add3DLight, add3DCamera, set3DEntityTransform,
     rename3DEntity, set3DEntityVisible, delete3DEntity,
-    update3DEntityTransform, set3DObjectMaterial, set3DObjectImage, set3DLightIntensity, set3DCameraFov,
+    update3DEntityTransform, set3DObjectMaterial, set3DObjectImage, set3DObjectModel, set3DLightIntensity, set3DLightCone, set3DLightArea, set3DEnvironmentMap, set3DEnvironmentBackground, set3DCameraFov, set3DCameraLens, set3DCameraDepthOfField,
     toggle3DKeyframe, keySelected3DTransform, move3DKeyframe, delete3DKeyframe, setActive3DCamera,
     add3DCameraCut, set3DCameraCutCamera, move3DCameraCut, delete3DCameraCut,
     add3DPath, delete3DPath, findScenePath, move3DPathPoint, set3DPathPointAxis, set3DPathPointMode,
     add3DPathPoint, add3DPathEndpoint, delete3DPathPoint, toggle3DPathClosed, set3DPathColor, set3DPathLocked,
     setCameraPathConstraint, setCameraPathOrientation, setCameraPathTarget, setCameraPathProgress, setCameraPathBank,
     setCameraPathOffset, resetCameraPathOffset,
+    setCameraObjectConstraint, setCameraObjectOrientation, setCameraObjectLookAtTarget, setCameraObjectOffset, resetCameraObjectOffset,
     toggleLayerPropertyKeyframe, toggle3DPropertyKeyframe, stepToAdjacentKeyframe, hasAdjacentKeyframe, isKeyedAtPlayhead,
     add3DInfluence, remove3DInfluence, toggle3DInfluence, move3DInfluence, set3DInfluenceParameter,
   }

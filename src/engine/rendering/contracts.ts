@@ -1,5 +1,6 @@
-import type { Aurora3DScene, EditorLayer, EditorNode, EditorNodeConnection, EditorProject, MediaAsset } from '@/models/editor'
+import type { Aurora3DScene, AuroraRig, EditorLayer, EditorNode, EditorNodeConnection, EditorProject, MediaAsset } from '@/models/editor'
 import { evaluateNodeGraph, NEUTRAL_EFFECTS, type GraphEffects, type NodeBlendMode } from '@/engine/nodes/evaluateGraph'
+import { evaluateLayerEffectStack } from '@/engine/nodes/layerEffects'
 
 export type RenderBackendId = 'pixi-webgl' | 'three-webgl' | 'canvas2d'
 export type RenderQuality = 'draft' | 'preview' | 'full'
@@ -38,12 +39,28 @@ export interface RenderFrameRequest {
   assets?: MediaAsset[]
   nodes?: EditorNode[]
   nodeConnections?: EditorNodeConnection[]
+  /** Deformation skeletons a layer or 3D object may be attached to. */
+  rigs?: AuroraRig[]
   /** A Viewer node takes over the frame when one is active; otherwise the Composite node is the root. */
   renderRootNodeId?: string | null
+  /** Structural editor revision; time changes do not invalidate the compiled graph. */
+  revision?: number
+  /** Distinguishes the main composition from isolated cluster timelines in the persistent cache. */
+  cacheScope?: string
+  /** Stable after a save, but unique while edits are pending, so persisted frames survive reloads. */
+  cacheVersion?: string | number
+  /** Explicit background renders opt into the GPU readback and persistent write cost. */
+  cacheWrite?: boolean
+  /** Viewport-only auxiliary passes can omit the project and 3D world backgrounds for compositing. */
+  transparentBackground?: boolean
   time: number
+  /** Sequential playback uses the media decoder clock; scrubbing and export request exact seeks. */
+  playback?: boolean
   width: number
   height: number
   quality: RenderQuality
+  /** Supplied by AuroraFrameEngine so the device never recompiles editor nodes. */
+  compiledPlan?: RenderPlan
 }
 
 export interface RendererInitializationOptions {
@@ -56,7 +73,17 @@ export interface RenderBackend {
   initialize(options: RendererInitializationOptions): Promise<void>
   resize(width: number, height: number, pixelRatio: number): void
   renderFrame(request: RenderFrameRequest): Promise<RenderSurface>
+  /** Optional top-down RGBA readback used by the persistent frame cache. */
+  readPixels?(): CachedFramePixels | null
+  /** Optional fast path that presents a cached top-down RGBA frame without evaluating the scene. */
+  presentPixels?(frame: CachedFramePixels): Promise<RenderSurface> | RenderSurface
   dispose(): Promise<void>
+}
+
+export interface CachedFramePixels {
+  width: number
+  height: number
+  data: Uint8ClampedArray
 }
 
 export const HYBRID_ALPHA_CONTRACT = Object.freeze({
@@ -105,26 +132,28 @@ export function createRenderPlan(request: RenderFrameRequest): RenderPlan {
     ? graphPasses.flatMap((pass) => {
       const layer = layerMap.get(pass.layerId)
       if (!layer || !isLayerLive(layer, request.time)) return []
-      const mask = pass.effects.mask
-      if (!mask) return [makePass(`pass-${pass.nodeId}`, layer, pass.effects, pass.blendMode)]
-      /*
-       * A mask shape is a clip on the timeline, so it only exists inside its own range. Outside it
-       * there is no shape to keep anything, and a mask that keeps nothing shows nothing — the layer
-       * drops out rather than appearing unmasked before its shape arrives. Inverted is the mirror of
-       * that: with nothing to cut away, the whole layer comes through.
-       */
-      const maskLayer = layerMap.get(mask.layerId)
-      if (maskLayer && isLayerLive(maskLayer, request.time)) {
-        return [makePass(`pass-${pass.nodeId}`, layer, pass.effects, pass.blendMode)]
-      }
-      return mask.inverted
-        ? [makePass(`pass-${pass.nodeId}`, layer, { ...pass.effects, mask: null }, pass.blendMode)]
-        : []
+      return evaluateLayerEffectStack(layer, pass.effects, pass.blendMode).flatMap((effectPass) => {
+        const id = `pass-${pass.nodeId}-${effectPass.nodeId}`
+        const mask = effectPass.effects.mask
+        if (!mask) return [makePass(id, layer, effectPass.effects, effectPass.blendMode)]
+        /*
+         * A mask shape is a clip on the timeline, so it only exists inside its own range. Outside it
+         * there is no shape to keep anything, and a mask that keeps nothing shows nothing — the layer
+         * drops out rather than appearing unmasked before its shape arrives. Inverted is the mirror of
+         * that: with nothing to cut away, the whole layer comes through.
+         */
+        const maskLayer = layerMap.get(mask.layerId)
+        if (maskLayer && isLayerLive(maskLayer, request.time)) return [makePass(id, layer, effectPass.effects, effectPass.blendMode)]
+        return mask.inverted
+          ? [makePass(id, layer, { ...effectPass.effects, mask: null }, effectPass.blendMode)]
+          : []
+      })
     })
     : request.layers
       .filter((layer) => isLayerLive(layer, request.time))
       .reverse()
-      .map((layer) => makePass(`pass-${layer.id}`, layer, NEUTRAL_EFFECTS))
+      .flatMap((layer) => evaluateLayerEffectStack(layer).map((pass) =>
+        makePass(`pass-${pass.nodeId}`, layer, pass.effects, pass.blendMode)))
 
   return {
     width: request.width,

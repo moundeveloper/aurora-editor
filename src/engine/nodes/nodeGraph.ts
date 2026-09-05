@@ -347,42 +347,6 @@ const kindForLayer = (layer: EditorLayer): EditorNodeKind =>
   layer.type === '3d-scene' ? 'scene3d' : layer.type === 'text' ? 'text' : 'image'
 
 /**
- * Effects already carried on a layer become real nodes in the chain, so the starting graph shows
- * the composite the project actually describes rather than a bare list of sources.
- */
-export const LAYER_EFFECT_NODES: Record<string, EditorNodeKind> = {
-  'Glow': 'glow',
-  'Vignette': 'vignette',
-  'Color Matrix': 'colorMatrix',
-  'Brightness / Contrast': 'brightnessContrast',
-  'Hue / Saturation': 'hueSaturation',
-  'Blur': 'blur',
-}
-
-/** Defaults matching the values the layer inspector shows for each effect. */
-const LAYER_EFFECT_VALUES: Record<string, number[]> = {
-  'Glow': [62, 28, 1.45],
-  'Vignette': [34, 72],
-  'Color Matrix': [-8, 1.12],
-  'Brightness / Contrast': [4, 12],
-}
-
-function effectChainFor(layer: EditorLayer, x: number, y: number) {
-  const nodes: EditorNode[] = []
-  layer.effects.forEach((effect) => {
-    const kind = LAYER_EFFECT_NODES[effect]
-    if (!kind) return
-    const node = createNode(kind, x + nodes.length * 190, y, `node-effect-${layer.id}-${nodes.length}`)
-    LAYER_EFFECT_VALUES[effect]?.forEach((value, index) => {
-      const socket = node.inputs[index + 1]
-      if (socket) socket.value = value
-    })
-    nodes.push(node)
-  })
-  return nodes
-}
-
-/**
  * The starting graph mirrors the layer stack exactly — one bound source per visible layer, piled
  * bottom-first into a Stack — so turning the graph into the render path changes nothing on screen
  * until the user rewires it.
@@ -401,7 +365,7 @@ export function createDemoNodeGraph(layers: EditorLayer[] = []): { nodes: Editor
     })
   }
 
-  // Each layer becomes a source followed by its own effect chain, exactly as the layer describes it.
+  // Per-layer effects are evaluated at the source by the frame planner, independent of graph edits.
   const branches = stackOrder.map((layer, index) => {
     const row = 40 + index * 132
     const source = createNode(kindForLayer(layer), 40, row, `node-source-${layer.id}`)
@@ -409,17 +373,10 @@ export function createDemoNodeGraph(layers: EditorLayer[] = []): { nodes: Editor
     source.title = layer.name
     nodes.push(source)
 
-    const chain = effectChainFor(layer, 240, row)
-    nodes.push(...chain)
-    let tail = source
-    chain.forEach((effect) => {
-      connect(tail, effect, 0)
-      tail = effect
-    })
-    return tail
+    return source
   })
 
-  const chainColumn = 240 + Math.max(...[1, ...stackOrder.map((layer) => layer.effects.filter((effect) => LAYER_EFFECT_NODES[effect]).length)]) * 190
+  const chainColumn = 430
 
   // Mixes chain bottom-up, the way Blender combines more than two streams.
   let composite = branches[0] ?? null

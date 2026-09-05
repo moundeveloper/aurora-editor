@@ -37,6 +37,20 @@ export const INFLUENCE_DEFINITIONS: Record<AuroraInfluenceType, InfluenceDefinit
       { key: 'scaleStep', label: 'Scale step', value: 1, min: .01, step: .05 },
     ],
   },
+  'radial-array': {
+    type: 'radial-array',
+    label: 'Radial array',
+    description: 'Copies the geometry around a centre point, rotated in equal steps.',
+    parameters: [
+      { key: 'count', label: 'Count', value: 6, min: 1, max: 64, step: 1 },
+      { key: 'centerX', label: 'Centre X', value: 0, step: .1 },
+      { key: 'centerY', label: 'Centre Y', value: 0, step: .1 },
+      { key: 'centerZ', label: 'Centre Z', value: 2.5, step: .1 },
+      { key: 'axis', label: 'Axis (0=X 1=Y 2=Z)', value: 1, min: 0, max: 2, step: 1 },
+      { key: 'angle', label: 'Sweep', value: 360, step: 5, suffix: '°' },
+      { key: 'orient', label: 'Rotate copies', value: 1, min: 0, max: 1, step: 1 },
+    ],
+  },
   mirror: {
     type: 'mirror',
     label: 'Mirror',
@@ -98,6 +112,35 @@ function parameterValue(influence: AuroraInfluence, key: string, time: number) {
   return property ? evaluateNumericProperty(property, time) : fallback
 }
 
+export interface LinearArrayCopy {
+  index: number
+  matrix: THREE.Matrix4
+}
+
+/** Shared by mesh geometry arrays and transform-only group arrays. */
+export function linearArrayCopies(influence: AuroraInfluence, time: number): LinearArrayCopy[] {
+  if (!influence.enabled || influence.type !== 'array') return []
+  const count = Math.max(1, Math.min(32, Math.round(parameterValue(influence, 'count', time))))
+  const offset = new THREE.Vector3(
+    parameterValue(influence, 'offsetX', time),
+    parameterValue(influence, 'offsetY', time),
+    parameterValue(influence, 'offsetZ', time),
+  )
+  const rotationStep = THREE.MathUtils.degToRad(parameterValue(influence, 'rotationStep', time))
+  const scaleStep = parameterValue(influence, 'scaleStep', time)
+  return Array.from({ length: count }, (_, index) => {
+    const scale = Math.pow(scaleStep, index)
+    return {
+      index,
+      matrix: new THREE.Matrix4().compose(
+        offset.clone().multiplyScalar(index),
+        new THREE.Quaternion().setFromEuler(new THREE.Euler(0, rotationStep * index, 0)),
+        new THREE.Vector3(scale, scale, scale),
+      ),
+    }
+  })
+}
+
 /** Rebuilding geometry is expensive, so the runtime only does it when this signature changes. */
 export function influenceSignature(influences: AuroraInfluence[] | undefined, time: number) {
   if (!influences?.length) return 'none'
@@ -141,25 +184,53 @@ function valueNoise(x: number, y: number, z: number, seed: number) {
 const vertexCount = (geometry: THREE.BufferGeometry) => geometry.getAttribute('position')?.count ?? 0
 
 function applyArray(geometry: THREE.BufferGeometry, influence: AuroraInfluence, time: number) {
+  const transforms = linearArrayCopies(influence, time)
+  if (transforms.length <= 1) return geometry
+  const copies: THREE.BufferGeometry[] = []
+  for (const { index, matrix } of transforms) {
+    if (vertexCount(geometry) * (index + 1) > MAX_VERTICES) break
+    const copy = geometry.clone()
+    copy.applyMatrix4(matrix)
+    copies.push(copy)
+  }
+  const merged = copies.length > 1 ? mergeGeometries(copies) : copies[0]!
+  copies.forEach((copy) => { if (copy !== merged) copy.dispose() })
+  return merged ?? geometry
+}
+
+/**
+ * Repeats the geometry around an authored centre rather than the object origin, which is what a
+ * radial layout needs: the pivot is almost never the thing being copied.
+ */
+function applyRadialArray(geometry: THREE.BufferGeometry, influence: AuroraInfluence, time: number) {
   const count = Math.max(1, Math.round(parameterValue(influence, 'count', time)))
   if (count <= 1) return geometry
-  const offset = new THREE.Vector3(
-    parameterValue(influence, 'offsetX', time),
-    parameterValue(influence, 'offsetY', time),
-    parameterValue(influence, 'offsetZ', time),
+  const center = new THREE.Vector3(
+    parameterValue(influence, 'centerX', time),
+    parameterValue(influence, 'centerY', time),
+    parameterValue(influence, 'centerZ', time),
   )
-  const rotationStep = THREE.MathUtils.degToRad(parameterValue(influence, 'rotationStep', time))
-  const scaleStep = parameterValue(influence, 'scaleStep', time)
+  const axisIndex = Math.max(0, Math.min(2, Math.round(parameterValue(influence, 'axis', time))))
+  const axis = new THREE.Vector3(Number(axisIndex === 0), Number(axisIndex === 1), Number(axisIndex === 2))
+  const sweep = THREE.MathUtils.degToRad(parameterValue(influence, 'angle', time))
+  // A full turn lands the last copy on top of the first, so it spans `count` steps rather than `count - 1`.
+  const fullTurn = Math.abs(Math.abs(sweep) - Math.PI * 2) < 1e-6
+  const step = sweep / (fullTurn ? count : Math.max(1, count - 1))
+  const orient = parameterValue(influence, 'orient', time) >= .5
   const copies: THREE.BufferGeometry[] = []
   for (let index = 0; index < count; index += 1) {
     if (vertexCount(geometry) * (index + 1) > MAX_VERTICES) break
     const copy = geometry.clone()
-    const scale = Math.pow(scaleStep, index)
-    copy.applyMatrix4(new THREE.Matrix4().compose(
-      offset.clone().multiplyScalar(index),
-      new THREE.Quaternion().setFromEuler(new THREE.Euler(0, rotationStep * index, 0)),
-      new THREE.Vector3(scale, scale, scale),
-    ))
+    const matrix = new THREE.Matrix4()
+      .makeTranslation(center.x, center.y, center.z)
+      .multiply(new THREE.Matrix4().makeRotationAxis(axis, step * index))
+      .multiply(new THREE.Matrix4().makeTranslation(-center.x, -center.y, -center.z))
+    // Without orientation the copy only travels to its rotated slot; its own axes stay where they were.
+    if (!orient) {
+      const slot = new THREE.Vector3().applyMatrix4(matrix)
+      matrix.makeTranslation(slot.x, slot.y, slot.z)
+    }
+    copy.applyMatrix4(matrix)
     copies.push(copy)
   }
   const merged = copies.length > 1 ? mergeGeometries(copies) : copies[0]!
@@ -306,6 +377,7 @@ function applyTwist(geometry: THREE.BufferGeometry, influence: AuroraInfluence, 
 
 const APPLIERS: Record<AuroraInfluenceType, (geometry: THREE.BufferGeometry, influence: AuroraInfluence, time: number) => THREE.BufferGeometry> = {
   array: applyArray,
+  'radial-array': applyRadialArray,
   mirror: applyMirror,
   subdivide: applySubdivide,
   displace: applyDisplace,

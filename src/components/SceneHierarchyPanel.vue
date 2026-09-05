@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { storeToRefs } from 'pinia'
-import { Box, Camera, ChevronDown, Circle, Eye, EyeOff, Image as ImageIcon, Layers3, Lightbulb, Lock, Pencil, Plus, Spline, Square, Sun, Trash2 } from '@lucide/vue'
+import { Box, Camera, ChevronDown, Circle, Eye, EyeOff, Image as ImageIcon, Layers3, Lightbulb, Lock, Pencil, Plus, Spline, Square, Sun, Trash2, Ungroup } from '@lucide/vue'
+import type { Aurora3DObject } from '@/models/editor'
 import { useEditorStore } from '@/stores/editor'
 import { cameraIdAtTime } from '@/engine/scene3d/cameraCuts'
 import PanelHeader from './common/PanelHeader.vue'
@@ -9,16 +10,75 @@ import MSelect, { type MSelectOption } from './common/MSelect.vue'
 import MDialog from './common/MDialog.vue'
 
 const store = useEditorStore()
-const { layers, selectedLayerId, selectedScene, selectedSceneEntityId, currentTime } = storeToRefs(store)
+const { layers, selectedLayerId, selectedScene, selectedSceneEntityId, currentTime, assets } = storeToRefs(store)
 /** The menu drops from whichever control opened it, so it is never detached from its trigger. */
 const addMenu = ref<'header' | 'footer' | null>(null)
 const contextMenu = ref<{ kind: 'layer' | 'entity'; id: string; x: number; y: number } | null>(null)
 const dialog = ref<{ mode: 'rename' | 'delete'; kind: 'layer' | 'entity'; id: string; name: string } | null>(null)
 const renameValue = ref('')
 const sections = ref({ cameras: true, objects: true, lights: true, paths: true })
+const pickedObjectIds = ref<Set<string>>(new Set())
+const collapsedGroupIds = ref<Set<string>>(new Set())
+const modelAssetCount = computed(() => assets.value.filter((asset) => asset.kind === 'model3d').length)
 const scenePaths = computed(() => selectedScene.value?.paths ?? [])
 const entityCount = computed(() => (selectedScene.value?.objects.length ?? 0) + (selectedScene.value?.cameras.length ?? 0) + (selectedScene.value?.lights.length ?? 0) + scenePaths.value.length)
 const programCameraId = computed(() => selectedScene.value ? cameraIdAtTime(selectedScene.value, currentTime.value) : null)
+interface ObjectTreeRow { object: Aurora3DObject; depth: number; hasChildren: boolean; effectiveVisible: boolean }
+const objectRows = computed<ObjectTreeRow[]>(() => {
+  const objects = selectedScene.value?.objects ?? []
+  const byId = new Map(objects.map((object) => [object.id, object]))
+  const children = new Map<string, Aurora3DObject[]>()
+  objects.forEach((object) => {
+    const parent = object.parentId ? byId.get(object.parentId) : undefined
+    if (!parent || parent.type !== 'group') return
+    const list = children.get(parent.id) ?? []
+    list.push(object)
+    children.set(parent.id, list)
+  })
+  const rows: ObjectTreeRow[] = []
+  const visited = new Set<string>()
+  const walk = (object: Aurora3DObject, depth: number, parentVisible = true) => {
+    if (visited.has(object.id)) return
+    visited.add(object.id)
+    const nested = children.get(object.id) ?? []
+    const effectiveVisible = parentVisible && object.visible
+    rows.push({ object, depth, hasChildren: nested.length > 0, effectiveVisible })
+    if (!collapsedGroupIds.value.has(object.id)) nested.forEach((child) => walk(child, depth + 1, effectiveVisible))
+  }
+  const roots = objects.filter((object) => !object.parentId || !byId.has(object.parentId) || byId.get(object.parentId)?.type !== 'group')
+  // Collapsing a group must hide its subtree, so the orphan sweep below only covers objects that
+  // no root can reach at all: parent cycles surviving an out-of-band edit.
+  const reachable = new Set<string>()
+  const markReachable = (object: Aurora3DObject) => {
+    if (reachable.has(object.id)) return
+    reachable.add(object.id)
+    ;(children.get(object.id) ?? []).forEach(markReachable)
+  }
+  roots.forEach(markReachable)
+  roots.forEach((object) => walk(object, 0))
+  objects.filter((object) => !reachable.has(object.id)).forEach((object) => walk(object, 0))
+  return rows
+})
+const pickedObjects = computed(() => (selectedScene.value?.objects ?? []).filter((object) => pickedObjectIds.value.has(object.id)))
+const groupableCount = computed(() => pickedObjects.value.length)
+/** Grouping keeps coordinates by sharing one parent space, so mixed parents need an explicit reparent first. */
+const groupableRoots = computed(() => {
+  const byId = new Map((selectedScene.value?.objects ?? []).map((object) => [object.id, object]))
+  return pickedObjects.value.filter((object) => {
+    const visited = new Set<string>()
+    for (let parent = object.parentId ? byId.get(object.parentId) : undefined; parent; parent = parent.parentId ? byId.get(parent.parentId) : undefined) {
+      if (visited.has(parent.id)) break
+      visited.add(parent.id)
+      if (pickedObjectIds.value.has(parent.id)) return false
+    }
+    return true
+  })
+})
+const groupBlockedReason = computed(() => {
+  if (groupableCount.value < 2) return 'Ctrl/Cmd-click at least two object rows first'
+  if (new Set(groupableRoots.value.map((object) => object.parentId ?? '')).size > 1) return 'Selected objects sit under different parents · move them into one parent first'
+  return ''
+})
 const sceneLayerOptions = computed<MSelectOption[]>(() => layers.value
   .filter((layer) => layer.type === '3d-scene' && layer.sceneId)
   .map((layer) => ({ value: layer.id, label: layer.name })))
@@ -31,8 +91,46 @@ const selected3DLayerId = computed({
 })
 const selected3DLayer = computed(() => layers.value.find((layer) => layer.id === selected3DLayerId.value) ?? null)
 
+watch(selectedSceneEntityId, (id) => {
+  if (pickedObjectIds.value.has(id)) return
+  const object = selectedScene.value?.objects.find((item) => item.id === id)
+  pickedObjectIds.value = object ? new Set([object.id]) : new Set()
+})
+
 function select(id: string) {
-  if (selectedScene.value) store.selectSceneEntity(selectedScene.value.id, id)
+  if (!selectedScene.value) return
+  if (!selectedScene.value.objects.some((object) => object.id === id)) pickedObjectIds.value = new Set()
+  store.selectSceneEntity(selectedScene.value.id, id)
+}
+
+function selectObject(event: MouseEvent | KeyboardEvent, id: string) {
+  const additive = event.ctrlKey || event.metaKey || event.shiftKey
+  const next = additive ? new Set(pickedObjectIds.value) : new Set<string>()
+  if (additive && next.has(id)) next.delete(id)
+  else next.add(id)
+  pickedObjectIds.value = next
+  const active = next.has(id) ? id : [...next].at(-1)
+  if (active && selectedScene.value) store.selectSceneEntity(selectedScene.value.id, active)
+}
+
+function toggleGroup(groupId: string) {
+  const next = new Set(collapsedGroupIds.value)
+  if (next.has(groupId)) next.delete(groupId)
+  else next.add(groupId)
+  collapsedGroupIds.value = next
+}
+
+function addEmptyGroup() {
+  const group = store.add3DGroup()
+  if (group) pickedObjectIds.value = new Set([group.id])
+  addMenu.value = null
+}
+
+function groupPickedObjects() {
+  if (groupBlockedReason.value) return
+  const group = store.add3DGroup([...pickedObjectIds.value])
+  if (group) pickedObjectIds.value = new Set([group.id])
+  addMenu.value = null
 }
 
 function toggleAddMenu(anchor: 'header' | 'footer') {
@@ -79,7 +177,11 @@ function toggleLayerVisible() {
 
 function openContextMenu(event: MouseEvent, kind: 'layer' | 'entity', id: string) {
   event.preventDefault()
-  select(kind === 'entity' ? id : selectedSceneEntityId.value)
+  const object = selectedScene.value?.objects.find((item) => item.id === id)
+  if (kind === 'entity' && object) {
+    if (!pickedObjectIds.value.has(id)) pickedObjectIds.value = new Set([id])
+    select(id)
+  } else select(kind === 'entity' ? id : selectedSceneEntityId.value)
   contextMenu.value = {
     kind,
     id,
@@ -88,10 +190,23 @@ function openContextMenu(event: MouseEvent, kind: 'layer' | 'entity', id: string
   }
 }
 
+function ungroupContextTarget() {
+  const target = contextTarget()
+  if (!target || !('type' in target) || target.type !== 'group') return
+  store.ungroup3DObject(target.id)
+  pickedObjectIds.value = new Set()
+  contextMenu.value = null
+}
+
 function contextTarget() {
   const menu = contextMenu.value
   if (!menu) return null
   return menu.kind === 'layer' ? selected3DLayer.value : entityById(menu.id)
+}
+
+function contextTargetIsGroup() {
+  const target = contextTarget()
+  return Boolean(target && 'type' in target && target.type === 'group')
 }
 
 function renameContextTarget() {
@@ -151,10 +266,12 @@ function confirmDialog() {
       <section>
         <button class="section-row" type="button" @click="sections.objects = !sections.objects"><ChevronDown :size="10" :class="{ closed: !sections.objects }" /><Square :size="11" /><span>Objects</span><small>{{ selectedScene?.objects.length ?? 0 }}</small></button>
         <template v-if="sections.objects">
-          <div v-for="object in selectedScene?.objects" :key="object.id" class="entity-row" :class="{ active: selectedSceneEntityId === object.id, muted: !object.visible }" :title="object.name" role="button" tabindex="0" @click="select(object.id)" @keydown.enter="select(object.id)" @contextmenu="openContextMenu($event, 'entity', object.id)">
-            <button class="visibility" type="button" :title="object.visible ? 'Hide object' : 'Show object'" @click.stop="toggleVisible(object.id)"><Eye v-if="object.visible" :size="10" /><EyeOff v-else :size="10" /></button>
-            <component :is="object.primitive === 'sphere' ? Circle : object.primitive === 'plane' && object.assetId ? ImageIcon : object.primitive === 'plane' ? Square : Box" :size="11" />
-            <span>{{ object.name }}</span><Lock v-if="object.locked" :size="9" />
+          <div v-for="row in objectRows" :key="row.object.id" class="entity-row object-tree-row" :class="{ active: selectedSceneEntityId === row.object.id, picked: pickedObjectIds.has(row.object.id), muted: !row.effectiveVisible }" :style="{ paddingLeft: `${6 + row.depth * 13}px` }" :title="row.object.type === 'group' ? `${row.object.name} · transform parent` : row.object.name" role="button" tabindex="0" @click="selectObject($event, row.object.id)" @keydown.enter="selectObject($event, row.object.id)" @contextmenu="openContextMenu($event, 'entity', row.object.id)">
+            <button v-if="row.object.type === 'group' && row.hasChildren" class="tree-toggle" type="button" :title="collapsedGroupIds.has(row.object.id) ? 'Expand group' : 'Collapse group'" @click.stop="toggleGroup(row.object.id)"><ChevronDown :size="9" :class="{ closed: collapsedGroupIds.has(row.object.id) }" /></button><span v-else class="tree-spacer" />
+            <button class="visibility" type="button" :title="row.object.visible ? `Hide ${row.object.type === 'group' ? 'group' : 'object'}` : `Show ${row.object.type === 'group' ? 'group' : 'object'}`" @click.stop="toggleVisible(row.object.id)"><Eye v-if="row.object.visible" :size="10" /><EyeOff v-else :size="10" /></button>
+            <Layers3 v-if="row.object.type === 'group'" :size="11" />
+            <component :is="row.object.primitive === 'sphere' ? Circle : row.object.primitive === 'plane' && row.object.assetId ? ImageIcon : row.object.primitive === 'plane' ? Square : Box" v-else :size="11" />
+            <span>{{ row.object.name }}</span><Lock v-if="row.object.locked" :size="9" /><small v-if="row.object.type === 'group'">GROUP</small>
           </div>
         </template>
       </section>
@@ -178,16 +295,22 @@ function confirmDialog() {
       <button type="button" @click="store.add3DPrimitive('box'); addMenu = null"><Box :size="12" /> Cube</button>
       <button type="button" @click="store.add3DPrimitive('sphere'); addMenu = null"><Circle :size="12" /> Sphere</button>
       <button type="button" @click="store.add3DImagePlane(); addMenu = null"><ImageIcon :size="12" /> Image plane</button>
+      <button type="button" :disabled="!modelAssetCount" :title="modelAssetCount ? 'Place an imported glTF mesh' : 'Import a .glb or .gltf file in the Media library first'" @click="store.add3DModel(); addMenu = null"><Box :size="12" /> Imported mesh <small v-if="modelAssetCount">{{ modelAssetCount }}</small></button>
+      <button type="button" @click="addEmptyGroup"><Layers3 :size="12" /> Empty group</button>
+      <button type="button" :disabled="Boolean(groupBlockedReason)" :title="groupBlockedReason || `Parent ${groupableCount} selected objects to a new group`" @click="groupPickedObjects"><Layers3 :size="12" /> Group selected <small v-if="groupableCount">{{ groupableCount }}</small></button>
       <button type="button" @click="store.add3DCamera(); addMenu = null"><Camera :size="12" /> Camera</button>
       <button type="button" @click="store.add3DPath(); addMenu = null"><Spline :size="12" /> Bézier path</button>
       <button type="button" @click="store.add3DLight('directional'); addMenu = null"><Sun :size="12" /> Directional light</button>
       <button type="button" @click="store.add3DLight('point'); addMenu = null"><Lightbulb :size="12" /> Point light</button>
+      <button type="button" @click="store.add3DLight('spot'); addMenu = null"><Lightbulb :size="12" /> Spot light</button>
+      <button type="button" @click="store.add3DLight('area'); addMenu = null"><Square :size="12" /> Area light</button>
     </div>
     <footer v-if="selectedScene"><button class="add-menu-trigger" type="button" @click="toggleAddMenu('footer')"><Plus :size="11" /> Add entity</button></footer>
     <Teleport to="body">
       <div v-if="contextMenu" class="scene-context-menu" :style="{ left: `${contextMenu.x}px`, top: `${contextMenu.y}px` }" role="menu" @contextmenu.prevent>
         <button type="button" role="menuitem" @click="renameContextTarget"><Pencil :size="11" /> Rename</button>
         <button type="button" role="menuitem" @click="toggleContextTarget"><EyeOff v-if="contextTarget()?.visible" :size="11" /><Eye v-else :size="11" /> {{ contextTarget()?.visible ? 'Hide' : 'Show' }}</button>
+        <button v-if="contextTargetIsGroup()" type="button" role="menuitem" @click="ungroupContextTarget"><Ungroup :size="11" /> Ungroup children</button>
         <span />
         <button type="button" class="danger" role="menuitem" :disabled="contextMenu.kind === 'entity' && selectedScene?.cameras.length === 1 && selectedScene.cameras[0]?.id === contextMenu.id" @click="deleteContextTarget"><Trash2 :size="11" /> Delete</button>
       </div>
@@ -218,4 +341,9 @@ function confirmDialog() {
 :global(.scene-context-menu > button:disabled) { opacity: .35; cursor: default; }
 :global(.scene-context-menu > span) { height: 1px; margin: 3px 2px; background: var(--border-subtle); }
 .dialog-warning { margin: 0; color: var(--text-secondary); font-size: 9px; }
+.entity-row.picked { color: #dce2ff; background: rgb(91 108 191 / .12); border-color: rgb(122 140 230 / .28); }
+.entity-row.active { background: var(--bg-selected); border-color: var(--accent-border); }
+.tree-toggle, .tree-spacer { display: grid; width: 11px; height: 18px; flex: 0 0 11px; place-items: center; padding: 0; color: var(--text-muted); background: transparent; border: 0; }
+.tree-toggle { cursor: pointer; }.tree-toggle:hover { color: var(--text-primary); }.tree-toggle svg.closed { transform: rotate(-90deg); }
+.add-menu button small { margin-left: auto; color: var(--accent); }.add-menu button:disabled { opacity: .35; cursor: default; }.add-menu button:hover:disabled { color: var(--text-secondary); background: transparent; border-color: transparent; }
 </style>

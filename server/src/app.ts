@@ -1,6 +1,8 @@
 import { Hono } from 'hono'
 import { assetRoutes } from './routes/assets.ts'
 import { mediaRoutes } from './routes/media.ts'
+import { projectRoutes } from './routes/projects.ts'
+import { ProjectRepository } from './projects/ProjectRepository.ts'
 import { AssetIndex } from './storage/db.ts'
 import { ensureVault, vaultLayout, type VaultLayout } from './storage/paths.ts'
 
@@ -8,6 +10,7 @@ export interface AuroraServer {
   app: Hono
   layout: VaultLayout
   index: AssetIndex
+  projects: ProjectRepository
   close(): void
 }
 
@@ -18,10 +21,12 @@ export interface AuroraServer {
 export async function createServer(root?: string): Promise<AuroraServer> {
   const layout = await ensureVault(vaultLayout(root))
   const index = new AssetIndex(layout.database)
+  const projects = new ProjectRepository(layout)
 
   const app = new Hono()
     .get('/api/health', (context) => context.json({ ok: true, vault: layout.root }))
     .route('/api/assets', assetRoutes({ layout, index }))
+    .route('/api/projects', projectRoutes(projects))
     .route('/media', mediaRoutes({ layout, index }))
     .onError((error, context) => {
       console.error('[aurora]', error)
@@ -29,5 +34,5 @@ export async function createServer(root?: string): Promise<AuroraServer> {
     })
     .notFound((context) => context.json({ error: 'no such route' }, 404))
 
-  return { app, layout, index, close: () => index.close() }
+  return { app, layout, index, projects, close: () => index.close() }
 }

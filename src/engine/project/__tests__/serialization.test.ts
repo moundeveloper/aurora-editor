@@ -4,12 +4,13 @@ import * as THREE from 'three'
 import { evaluateNumericProperty } from '@/engine/animation/evaluateProperty'
 import { setNumericPropertyAtTime, toggleNumericKeyframe } from '@/engine/animation/editNumericProperty'
 import { createRenderPlan, HYBRID_ALPHA_CONTRACT, resolveRenderSize } from '@/engine/rendering/contracts'
-import { createDemo3DScene } from '@/engine/scene3d/sceneFactory'
+import { createDemo3DScene, createPrimitiveObject } from '@/engine/scene3d/sceneFactory'
 import { ThreeSceneRuntimeRegistry } from '@/engine/scene3d/ThreeSceneRuntime'
 import { CURRENT_PROJECT_VERSION, deserializeEditorState, serializeEditorState } from '@/engine/project/serialization'
 import { createDemoNodeGraph } from '@/engine/nodes/nodeGraph'
+import { createRig, createRigBone } from '@/engine/rig/rigFactory'
 import { AuroraProjectDatabase } from '@/engine/project/AuroraProjectDatabase'
-import type { EditorLayer, EditorProject, SerializedEditorState } from '@/models/editor'
+import type { EditorLayer, EditorProject, Scene3DSettings, SerializedEditorState } from '@/models/editor'
 
 const project: EditorProject = {
   id: 'test-project', name: 'Test', width: 1920, height: 1080, frameRate: 30,
@@ -57,6 +58,17 @@ describe('hybrid project architecture', () => {
     expect(restored.nodes.map((node) => node.kind)).toEqual(['output'])
   })
 
+  it('round-trips named timeline markers and backfills old projects with none', () => {
+    const state: SerializedEditorState = {
+      project: { ...project, markers: [{ id: 'reveal', name: 'Title reveal', time: 3.5, color: '#a5b4fc' }] },
+      layers, scenes3D: [], assets: [], rigs: [], ...createDemoNodeGraph2(),
+    }
+
+    expect(deserializeEditorState(serializeEditorState(state), state).project.markers).toEqual(state.project.markers)
+    const legacy = JSON.stringify({ ...state, project: { ...project, version: 13 } })
+    expect(deserializeEditorState(legacy, state).project.markers).toEqual([])
+  })
+
   it('migrates a version-one project with the demo 3D scene and layer', () => {
     const fallback: SerializedEditorState = { project, layers, scenes3D: [createDemo3DScene()], assets: [], ...createDemoNodeGraph2() }
     const legacy = JSON.stringify({ project: { ...project, version: 1 }, layers: [layers[0]] })
@@ -64,6 +76,76 @@ describe('hybrid project architecture', () => {
     expect(restored.project.version).toBe(CURRENT_PROJECT_VERSION)
     expect(restored.scenes3D).toHaveLength(1)
     expect(restored.layers.some((layer) => layer.type === '3d-scene')).toBe(true)
+  })
+
+  it('migrates legacy effect names and bypasses their generated graph nodes', () => {
+    const legacyLayer = { ...layers[0]!, effects: ['Blur', 'Unknown effect', 'Gain'] }
+    const source = {
+      id: 'node-source-title', kind: 'text', title: 'Title', x: 0, y: 0, muted: false, sourceId: 'title', properties: {},
+      inputs: [], outputs: [{ id: 'source-out', label: 'Image', type: 'image' }],
+    }
+    const generated = {
+      id: 'node-effect-title-0', kind: 'blur', title: 'Blur', x: 100, y: 0, muted: true, properties: {},
+      inputs: [{ id: 'blur-in', label: 'Image', type: 'image' }, { id: 'blur-radius', label: 'Radius', type: 'value', value: 47 }],
+      outputs: [{ id: 'blur-out', label: 'Image', type: 'image' }],
+    }
+    const prefixedButAuthored = {
+      id: 'node-effect-user-authored', kind: 'brightnessContrast', title: 'Authored grade', x: 50, y: 0, muted: false, properties: {},
+      inputs: [
+        { id: 'authored-in', label: 'Image', type: 'image' },
+        { id: 'authored-brightness', label: 'Bright', type: 'value', value: 3 },
+        { id: 'authored-contrast', label: 'Contrast', type: 'value', value: 5 },
+      ],
+      outputs: [{ id: 'authored-out', label: 'Image', type: 'image' }],
+    }
+    const output = {
+      id: 'node-output', kind: 'output', title: 'Composite', x: 200, y: 0, muted: false, properties: {},
+      inputs: [{ id: 'output-in', label: 'Image', type: 'image' }], outputs: [],
+    }
+    const legacy = JSON.stringify({
+      project: { ...project, version: 13 }, layers: [legacyLayer], scenes3D: [], assets: [],
+      nodes: [source, prefixedButAuthored, generated, output],
+      nodeConnections: [
+        { id: 'source-authored', fromNodeId: source.id, fromPortId: 'source-out', toNodeId: prefixedButAuthored.id, toPortId: 'authored-in' },
+        { id: 'authored-generated', fromNodeId: prefixedButAuthored.id, fromPortId: 'authored-out', toNodeId: generated.id, toPortId: 'blur-in' },
+        { id: 'generated-output', fromNodeId: generated.id, fromPortId: 'blur-out', toNodeId: output.id, toPortId: 'output-in' },
+      ],
+    })
+
+    const restored = deserializeEditorState(legacy, { project, layers, scenes3D: [], assets: [] })
+
+    expect(restored.layers[0]?.effects).toEqual([{
+      id: 'title-effect-0', kind: 'blur', enabled: false, values: { radius: 47 },
+    }])
+    expect(restored.nodes.map((node) => node.id)).toEqual(['node-source-title', 'node-effect-user-authored', 'node-output'])
+    expect(restored.nodeConnections).toHaveLength(2)
+    expect(restored.nodeConnections).toEqual(expect.arrayContaining([expect.objectContaining({
+      fromNodeId: 'node-effect-user-authored', fromPortId: 'authored-out', toNodeId: 'node-output', toPortId: 'output-in',
+    })]))
+  })
+
+  it('normalizes layer-effect parameters and unique ids in layers and asset templates', () => {
+    const malformed = {
+      ...layers[0]!,
+      effects: [
+        { id: 'duplicate', kind: 'blur', enabled: true, values: { radius: 999 } },
+        { id: 'duplicate', kind: 'vignette', enabled: true, values: { amount: -20 } },
+      ],
+    }
+    const asset = {
+      id: 'asset-template', name: 'Template', kind: 'image', duration: 1, layerTemplate: {
+        ...layers[0]!, id: 'template-layer', effects: ['Glow'],
+      },
+    }
+    const state = { project, layers: [malformed], scenes3D: [], assets: [asset], ...createDemoNodeGraph2() }
+
+    const restored = deserializeEditorState(JSON.stringify(state), { project, layers, scenes3D: [], assets: [] })
+
+    expect(restored.layers[0]?.effects).toEqual([
+      expect.objectContaining({ id: 'duplicate', values: { radius: 200 } }),
+      expect.objectContaining({ id: 'title-effect-1', values: { amount: 0, softness: 72 } }),
+    ])
+    expect(restored.assets[0]?.layerTemplate?.effects[0]).toMatchObject({ kind: 'glow', enabled: true })
   })
 
   it('centers the untouched legacy demo camera without overwriting a customized camera', () => {
@@ -131,6 +213,80 @@ describe('hybrid project architecture', () => {
     registry.dispose()
   })
 
+  it('reconciles 3D value edits without destroying the runtime scene', () => {
+    const scene = createDemo3DScene()
+    const registry = new ThreeSceneRuntimeRegistry()
+    const first = registry.get(scene, 1280, 720, 0)
+    const cube = first.objects.get('object-aurora-cube')
+
+    scene.objects[0]!.transform.position.x.value = 4
+    scene.revision += 1
+    const valueEdit = registry.get(scene, 1280, 720, 0)
+    expect(valueEdit).toBe(first)
+    expect(valueEdit.objects.get('object-aurora-cube')).toBe(cube)
+    expect(cube?.position.x).toBe(4)
+
+    scene.objects.push(createPrimitiveObject('sphere', 3))
+    scene.revision += 1
+    const topologyEdit = registry.get(scene, 1280, 720, 0)
+    expect(topologyEdit).not.toBe(first)
+    expect(topologyEdit.objects.size).toBe(3)
+    registry.dispose()
+  })
+
+  it('keeps image planes visible from either side and outside stale deformation bounds', () => {
+    const scene = createDemo3DScene()
+    const imagePlane = createPrimitiveObject('plane', scene.objects.length + 1)
+    scene.objects.push(imagePlane)
+    const registry = new ThreeSceneRuntimeRegistry()
+    const runtime = registry.get(scene, 1280, 720, 0)
+    const mesh = runtime.objects.get(imagePlane.id) as THREE.Mesh<THREE.BufferGeometry, THREE.MeshStandardMaterial>
+
+    expect(mesh.material.side).toBe(THREE.DoubleSide)
+    expect(mesh.frustumCulled).toBe(false)
+    registry.dispose()
+  })
+
+  it('fits authored shadow maps to the scene and applies environment lighting', () => {
+    const scene = createDemo3DScene()
+    scene.settings.shadowMapSize = 2048
+    scene.environmentIntensity = 1.5
+    const registry = new ThreeSceneRuntimeRegistry()
+    const runtime = registry.get(scene, 1280, 720, 0)
+    const key = runtime.lights.get('light-key') as THREE.DirectionalLight
+    const ambient = runtime.lights.get('light-ambient') as THREE.AmbientLight
+    const material = (runtime.objects.get('object-aurora-cube') as THREE.Mesh).material as THREE.MeshStandardMaterial
+
+    expect(key.shadow.mapSize.width).toBe(2048)
+    expect(key.shadow.camera.right - key.shadow.camera.left).toBeGreaterThan(10)
+    expect(key.shadow.normalBias).toBeGreaterThan(0)
+    expect(ambient.intensity).toBeCloseTo(.7 * 1.5)
+    expect(material.envMapIntensity).toBeCloseTo(1.5)
+    registry.dispose()
+  })
+
+  it('backfills GTAO settings when an older project is loaded', () => {
+    const fallback: SerializedEditorState = { project, layers, scenes3D: [createDemo3DScene()], assets: [], ...createDemoNodeGraph2() }
+    const legacy = JSON.parse(serializeEditorState(fallback)) as SerializedEditorState
+    const legacySettings = legacy.scenes3D[0]!.settings as Partial<Scene3DSettings>
+    delete legacySettings.ambientOcclusion
+    delete legacySettings.ambientOcclusionIntensity
+    delete legacySettings.ambientOcclusionRadius
+    delete legacySettings.motionBlur
+    delete legacySettings.motionBlurShutter
+    delete legacySettings.motionBlurSamples
+
+    const restored = deserializeEditorState(JSON.stringify(legacy), fallback)
+    expect(restored.scenes3D[0]?.settings).toMatchObject({
+      ambientOcclusion: true,
+      ambientOcclusionIntensity: 1,
+      ambientOcclusionRadius: .35,
+      motionBlur: false,
+      motionBlurShutter: 180,
+      motionBlurSamples: 8,
+    })
+  })
+
   it('keeps bottom-to-top backend ordering in the render plan', () => {
     const plan = createRenderPlan({ project, layers, scenes3D: [createDemo3DScene()], time: 4, width: 1280, height: 720, quality: 'preview' })
     expect(plan.passes.map((pass) => [pass.layerId, pass.backend])).toEqual([
@@ -150,16 +306,106 @@ describe('hybrid project architecture', () => {
     const scene = createDemo3DScene()
     scene.objects[0]!.transform.position.x.value = 3.75
     scene.cameras[0]!.transform.rotation.y.value = 22
-    const state: SerializedEditorState = { project, layers, scenes3D: [scene], assets: [], ...createDemoNodeGraph2() }
+    const state: SerializedEditorState = {
+      project: { ...project, markers: [{ id: 'middle', name: 'Middle', time: 9, color: '#8c9bff' }] },
+      layers, scenes3D: [scene], assets: [], ...createDemoNodeGraph2(),
+    }
     await database.saveSnapshot(state)
     const restored = await database.loadActiveSnapshot()
     expect(restored?.layers.map((layer) => layer.id)).toEqual(layers.map((layer) => layer.id))
     expect(restored?.scenes3D[0]?.objects[0]?.transform.position.x.value).toBe(3.75)
     expect(restored?.scenes3D[0]?.cameras[0]?.transform.rotation.y.value).toBe(22)
+    expect(restored?.project.markers).toEqual(state.project.markers)
     expect(await database.projects.count()).toBe(1)
     expect(await database.layers.count()).toBe(layers.length)
     expect(await database.scenes3D.count()).toBe(1)
     expect((await database.listProjects()).map((item) => item.id)).toEqual([project.id])
     await database.delete()
+  })
+})
+
+describe('rig persistence', () => {
+  const riggedState = () => {
+    const rig = createRig('Leaf')
+    rig.bones = [createRigBone(1, { x: 0, y: -.6, angle: 90, length: .8 })]
+    rig.bones[0]!.rotation.value = 12
+    const image: EditorLayer = {
+      id: 'leaf', name: 'Leaf', type: 'image', rigId: rig.id, start: 0, duration: 4, color: '#8f8',
+      visible: true, locked: false, muted: false, expanded: false, transform: transform('leaf'), effects: [],
+    }
+    return { project, layers: [image], scenes3D: [], assets: [], rigs: [rig], ...createDemoNodeGraph2() } as SerializedEditorState
+  }
+
+  it('round-trips rigs and the layers attached to them', () => {
+    const state = riggedState()
+    const restored = deserializeEditorState(serializeEditorState(state), { project, layers, scenes3D: [], assets: [] })
+    expect(restored.rigs).toHaveLength(1)
+    expect(restored.rigs[0]!.bones[0]!.rotation.value).toBe(12)
+    expect(restored.layers[0]!.rigId).toBe(restored.rigs[0]!.id)
+  })
+
+  it('releases a layer whose rig did not survive the file', () => {
+    const state = riggedState()
+    const withoutRigs = JSON.parse(serializeEditorState(state)) as SerializedEditorState
+    withoutRigs.rigs = []
+    const restored = deserializeEditorState(JSON.stringify(withoutRigs), { project, layers, scenes3D: [], assets: [] })
+    expect(restored.layers[0]!.rigId).toBeUndefined()
+  })
+
+  it('repairs a rig saved with a broken bone', () => {
+    const state = riggedState()
+    const raw = JSON.parse(serializeEditorState(state)) as Record<string, unknown>
+    const rigs = raw.rigs as Array<Record<string, unknown>>
+    rigs[0]!.columns = 4000
+    const bones = rigs[0]!.bones as Array<Record<string, unknown>>
+    bones[0]!.length = Number.NaN
+    bones[0]!.parentId = 'a-bone-that-never-existed'
+    delete bones[0]!.stretch
+    const restored = deserializeEditorState(JSON.stringify(raw), { project, layers, scenes3D: [], assets: [] })
+    const bone = restored.rigs[0]!.bones[0]!
+    expect(restored.rigs[0]!.columns).toBe(64)
+    expect(bone.length).toBe(.5)
+    expect(bone.parentId).toBeUndefined()
+    expect(bone.stretch.value).toBe(1)
+  })
+
+  it('carries the environment map and camera lens through a save and reload', () => {
+    const scene = createDemo3DScene()
+    scene.environmentAssetId = 'env-1'
+    scene.environmentBackground = true
+    const camera = scene.cameras[0]!
+    camera.depthOfField = true
+    const state: SerializedEditorState = {
+      project, layers: [], scenes3D: [scene], assets: [], nodes: [], nodeConnections: [], rigs: [],
+    }
+
+    const restored = deserializeEditorState(serializeEditorState(state), state).scenes3D[0]!
+
+    expect(restored.environmentAssetId).toBe('env-1')
+    expect(restored.environmentBackground).toBe(true)
+    expect(restored.cameras[0]?.depthOfField).toBe(true)
+  })
+
+  it('backfills lens defaults on every camera, constrained or not', () => {
+    const scene = createDemo3DScene()
+    // The demo camera has no constraint, which is the path the normaliser returns early from.
+    const camera = scene.cameras[0]!
+    delete camera.focusDistance
+    delete camera.fStop
+    delete camera.depthOfField
+    scene.environmentBackground = undefined
+    scene.environmentAssetId = ''
+    const state: SerializedEditorState = {
+      project, layers: [], scenes3D: [scene], assets: [], nodes: [], nodeConnections: [], rigs: [],
+    }
+
+    const restored = deserializeEditorState(serializeEditorState(state), state).scenes3D[0]!
+
+    expect(restored.cameras[0]?.focusDistance?.value).toBe(8)
+    expect(restored.cameras[0]?.fStop?.value).toBe(2.8)
+    // Off by default: an existing project must not suddenly render with a blurred lens.
+    expect(restored.cameras[0]?.depthOfField).toBe(false)
+    expect(restored.environmentAssetId).toBeUndefined()
+    expect(restored.environmentBackground).toBe(false)
   })
 })

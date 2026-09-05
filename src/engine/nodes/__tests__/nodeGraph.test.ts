@@ -7,6 +7,7 @@ import { contributingNodeIds, evaluateNodeGraph } from '@/engine/nodes/evaluateG
 import { createRenderPlan } from '@/engine/rendering/contracts'
 import { CURRENT_PROJECT_VERSION, deserializeEditorState } from '@/engine/project/serialization'
 import { createDemo3DScene, numericProperty } from '@/engine/scene3d/sceneFactory'
+import { createLayerEffect } from '@/engine/nodes/layerEffects'
 import type { EditorLayer, EditorNode, EditorNodeConnection, EditorProject, SerializedEditorState } from '@/models/editor'
 
 const project: EditorProject = {
@@ -89,21 +90,18 @@ describe('node graph', () => {
     expect(plan.passes.map((pass) => pass.layerId)).toEqual(['layer-video'])
   })
 
-  it('turns the effects a layer already carries into real nodes in its chain', () => {
+  it('evaluates an ordered layer stack independently of authored graph nodes', () => {
     const graded = layer('layer-grade', 'adjustment')
-    graded.effects = ['Color Matrix', 'Vignette']
+    graded.effects = [
+      createLayerEffect('colorMatrix', 'grade-color', { temperature: -8, contrast: 1.12 }),
+      createLayerEffect('vignette', 'grade-vignette', { amount: 34, softness: 72 }),
+    ]
     const titled = layer('layer-titled', 'text')
-    titled.effects = ['Glow']
+    titled.effects = [createLayerEffect('glow', 'title-glow', { threshold: 62, radius: 28, intensity: 1.45 })]
     const { nodes, connections } = createDemoNodeGraph([titled, graded])
 
-    expect(nodes.filter((node) => node.kind === 'colorMatrix')).toHaveLength(1)
-    expect(nodes.filter((node) => node.kind === 'vignette')).toHaveLength(1)
-    expect(nodes.filter((node) => node.kind === 'glow')).toHaveLength(1)
-    // Defaults come from what the layer inspector shows for that effect.
-    expect(nodes.find((node) => node.kind === 'colorMatrix')!.inputs[1]!.value).toBe(-8)
-    expect(nodes.find((node) => node.kind === 'glow')!.inputs[2]!.value).toBe(28)
-
-    const passes = evaluateNodeGraph(nodes, connections)!
+    expect(nodes.some((node) => node.id.startsWith('node-effect-'))).toBe(false)
+    const passes = createRenderPlan({ ...planRequest(nodes, connections), layers: [titled, graded] }).passes
     const grade = passes.find((pass) => pass.layerId === 'layer-grade')!
     expect(grade.effects.temperature).toBe(-8)
     expect(grade.effects.vignetteAmount).toBe(34)
@@ -112,6 +110,16 @@ describe('node graph', () => {
     expect(titlePasses).toHaveLength(2)
     expect(titlePasses[1]!.blendMode).toBe('add')
     expect(titlePasses[1]!.effects.blur).toBe(28)
+  })
+
+  it('skips disabled layer effects and applies reordered parameter values', () => {
+    const effected = layer('layer-effected', 'image')
+    effected.effects = [
+      { ...createLayerEffect('blur', 'blur', { radius: 12 }), enabled: false },
+      createLayerEffect('brightnessContrast', 'grade', { brightness: 7, contrast: 18 }),
+    ]
+    const plan = createRenderPlan({ ...planRequest([], []), layers: [effected], nodes: [] })
+    expect(plan.passes[0]!.effects).toMatchObject({ blur: 0, brightness: 7, contrast: 18 })
   })
 
   it('combines branches with chained Mix nodes rather than one catch-all input list', () => {

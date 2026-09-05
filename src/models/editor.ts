@@ -54,7 +54,7 @@ export interface AuroraPBRMaterial {
 
 export type Aurora3DPrimitive = 'box' | 'sphere' | 'plane' | 'model'
 
-export type AuroraInfluenceType = 'array' | 'mirror' | 'subdivide' | 'displace' | 'twist'
+export type AuroraInfluenceType = 'array' | 'radial-array' | 'mirror' | 'subdivide' | 'displace' | 'twist'
 
 /** A non-destructive geometry operation, evaluated in stack order on top of the primitive. */
 export interface AuroraInfluence {
@@ -63,6 +63,44 @@ export interface AuroraInfluence {
   name: string
   enabled: boolean
   parameters: Record<string, AnimatableProperty<number>>
+}
+
+/**
+ * A bone of a 2D deformation rig.
+ *
+ * Rest pose is absolute in rig space — a square running from -1 to 1 on both axes, centred on the
+ * image, with Y pointing up — so the same skeleton fits a timeline image layer and a 3D image plane
+ * without either of them having to know the other's units. Parenting only chains the *pose*: a bone
+ * inherits what its parent was posed into, never where its parent rests.
+ */
+export interface AuroraRigBone {
+  id: string
+  name: string
+  parentId?: string
+  /** Rest pivot in rig space. */
+  x: number
+  y: number
+  /** Rest direction in degrees, counter-clockwise from +X, and the bone's length in rig units. */
+  angle: number
+  length: number
+  /** How far past its own segment the bone still moves the image, in rig units. */
+  falloff: number
+  /** Pose, layered on the rest pose. Rotation is in degrees, offsets in rig units. */
+  rotation: AnimatableProperty<number>
+  offsetX: AnimatableProperty<number>
+  offsetY: AnimatableProperty<number>
+  /** Stretch along the bone; 1 leaves its length alone. */
+  stretch: AnimatableProperty<number>
+}
+
+/** A skeleton that bends whatever it is attached to. Rigs are project-wide and can be shared. */
+export interface AuroraRig {
+  id: string
+  name: string
+  /** Deformation mesh density. More cells bend more smoothly and cost more per frame. */
+  columns: number
+  rows: number
+  bones: AuroraRigBone[]
 }
 
 export interface Aurora3DObject {
@@ -79,6 +117,8 @@ export interface Aurora3DObject {
   transform: Transform3D
   material: AuroraPBRMaterial
   influences: AuroraInfluence[]
+  /** Deformation rig bending this object's surface. Only image planes are rigged today. */
+  rigId?: string
 }
 
 export interface AuroraCamera {
@@ -88,9 +128,16 @@ export interface AuroraCamera {
   projection: 'perspective' | 'orthographic'
   transform: Transform3D
   fov: AnimatableProperty<number>
+  /** Renders a lens blur outside the focus plane. Off keeps every depth pin-sharp. */
+  depthOfField?: boolean
+  /** Distance to the sharp plane, in scene units. */
+  focusDistance?: AnimatableProperty<number>
+  /** Lens f-number. Lower opens the aperture, shrinking the sharp range and growing the bokeh. */
+  fStop?: AnimatableProperty<number>
   near: number
   far: number
   pathConstraint?: AuroraCameraPathConstraint
+  objectConstraint?: AuroraCameraObjectConstraint
 }
 
 /** A camera edit; it remains active until the next cut marker. */
@@ -133,13 +180,36 @@ export interface AuroraCameraPathConstraint {
   lookAtEntityId?: string
 }
 
+export type AuroraObjectFollowOrientation = 'target' | 'look-at'
+
+export interface AuroraCameraObjectConstraint {
+  objectId: string
+  /** Position displacement in the followed object's local axes. */
+  positionOffset: AnimatableVector3
+  /** Euler displacement, in degrees, applied after the inherited or look-at orientation. */
+  rotationOffset: AnimatableVector3
+  orientation: AuroraObjectFollowOrientation
+  /** Defaults to the followed object when omitted in look-at mode. */
+  lookAtEntityId?: string
+}
+
 export interface AuroraLight {
   id: string
   name: string
   visible: boolean
-  type: 'ambient' | 'directional' | 'point'
+  type: 'ambient' | 'directional' | 'point' | 'spot' | 'area'
   color: string
   intensity: AnimatableProperty<number>
+  /** Spot cone half-angle in degrees. Optional so projects authored before spot lights remain valid. */
+  angle?: AnimatableProperty<number>
+  /** Maximum illuminated distance. Zero means unbounded in Three, but authored spots use a finite range. */
+  distance?: AnimatableProperty<number>
+  /** Fraction of the cone edge blended from full intensity to darkness. */
+  penumbra?: AnimatableProperty<number>
+  /** Rect area-light emitter width in scene units. Optional so pre-area-light projects stay valid. */
+  width?: AnimatableProperty<number>
+  /** Rect area-light emitter height in scene units. */
+  height?: AnimatableProperty<number>
   transform: Transform3D
   castShadow: boolean
 }
@@ -147,6 +217,15 @@ export interface AuroraLight {
 export interface Scene3DSettings {
   shadows: boolean
   shadowMapSize: number
+  ambientOcclusion: boolean
+  ambientOcclusionIntensity: number
+  ambientOcclusionRadius: number
+  /** Accumulates deterministic subframes around the playhead for animated 3D motion. */
+  motionBlur: boolean
+  /** Exposure duration expressed like a physical camera shutter, from 0 to 360 degrees. */
+  motionBlurShutter: number
+  /** Authored full-quality sample count. Preview quality caps this to keep the editor responsive. */
+  motionBlurSamples: number
   quality: 'draft' | 'preview' | 'full'
   backgroundColor: string | null
 }
@@ -161,6 +240,8 @@ export interface Aurora3DScene {
   paths: Aurora3DPath[]
   activeCameraId: string | null
   environmentAssetId?: string
+  /** Draws the environment map behind the scene instead of the flat background colour. */
+  environmentBackground?: boolean
   environmentIntensity: number
   settings: Scene3DSettings
   revision: number
@@ -178,6 +259,23 @@ export interface ShapePath {
   points: ShapePathPoint[]
 }
 
+/** Single-input node operators that can also be applied directly to a timeline layer. */
+export type LayerEffectKind =
+  | 'translate' | 'rotate' | 'scale'
+  | 'blur' | 'glow' | 'vignette'
+  | 'invert' | 'brightnessContrast' | 'colorMatrix' | 'hueSaturation' | 'rgbToBw'
+
+/**
+ * An ordered, independently switchable instance of a node-graph operator.
+ * Parameter keys are the matching node input keys (`radius`, `temperature`, and so on).
+ */
+export interface LayerEffect {
+  id: string
+  kind: LayerEffectKind
+  enabled: boolean
+  values: Record<string, number>
+}
+
 export interface EditorLayer {
   id: string
   trackId?: string
@@ -192,6 +290,8 @@ export interface EditorLayer {
   shapePath?: ShapePath
   textContent?: string
   sceneId?: string
+  /** A 3D scene can opt this layer out of its scene-level motion-blur pass. Defaults to true. */
+  motionBlur?: boolean
   /** Library entry this cluster publishes itself to, kept in step as the cluster is edited. */
   assetId?: string
   /** False after the user explicitly removes this reusable item from the Library. */
@@ -201,13 +301,15 @@ export interface EditorLayer {
   height?: number
   children?: EditorLayer[]
   isPlaceholder?: boolean
+  /** Deformation rig bending this layer. Only image layers are rigged today. */
+  rigId?: string
   color: string
   visible: boolean
   locked: boolean
   muted: boolean
   expanded: boolean
   transform: LayerTransform
-  effects: string[]
+  effects: LayerEffect[]
 }
 
 export interface MediaAsset {
@@ -293,6 +395,15 @@ export interface EditorProject {
   backgroundColor: string
   updatedAt: number
   version: number
+  /** Named composition cues shared by every timeline view. */
+  markers?: TimelineMarker[]
+}
+
+export interface TimelineMarker {
+  id: string
+  name: string
+  time: number
+  color: string
 }
 
 export interface SerializedEditorState {
@@ -302,4 +413,5 @@ export interface SerializedEditorState {
   assets: MediaAsset[]
   nodes: EditorNode[]
   nodeConnections: EditorNodeConnection[]
+  rigs: AuroraRig[]
 }

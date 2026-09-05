@@ -4,6 +4,7 @@ import { storeToRefs } from 'pinia'
 import { Activity, ChevronDown, Focus, Move, Spline, TimerReset, ZoomIn, ZoomOut } from '@lucide/vue'
 import { useEditorStore } from '@/stores/editor'
 import { influenceParameters } from '@/engine/scene3d/influences'
+import { rigBoneChannels } from '@/engine/rig/rigFactory'
 import type { AnimatableProperty, EditorLayer, Keyframe } from '@/models/editor'
 
 type TransformKey = keyof EditorLayer['transform']
@@ -27,7 +28,7 @@ interface MarqueeState { startX: number; startY: number; baseSelection: string[]
 
 const props = withDefaults(defineProps<{ mode?: 'motion' | '3d' }>(), { mode: 'motion' })
 const store = useEditorStore()
-const { project, selectedLayer, selectedSceneEntity, selectedKeyframeId, snap } = storeToRefs(store)
+const { project, selectedLayer, selectedSceneEntity, selectedKeyframeId, snap, rigs } = storeToRefs(store)
 const graphRef = ref<HTMLElement>()
 const graphSize = ref({ width: 900, height: 220 })
 const activeProperty = ref('')
@@ -52,10 +53,27 @@ const motionChannelDefinitions = [
   { key: 'opacity' as TransformKey, label: 'Opacity', color: '#70b596', suffix: '%' },
 ]
 
+/** Every bone's pose channels, so a rigged image can be tuned in the graph like any other curve. */
+function rigChannels(rigId: string | undefined): ChannelOption[] {
+  const rig = rigs.value.find((item) => item.id === rigId)
+  if (!rig) return []
+  return rig.bones.flatMap((bone) => rigBoneChannels(bone).map((channel) => ({
+    key: channel.property.id,
+    label: `${bone.name} · ${channel.label}`,
+    color: '#c79ae0',
+    suffix: channel.suffix,
+    property: channel.property,
+  })))
+}
+
 const channelDefinitions = computed<ChannelOption[]>(() => {
   if (props.mode === 'motion') {
     const transform = selectedLayer.value?.transform
-    return transform ? motionChannelDefinitions.map((definition) => ({ ...definition, key: transform[definition.key].id, property: transform[definition.key] })) : []
+    if (!transform) return []
+    return [
+      ...motionChannelDefinitions.map((definition) => ({ ...definition, key: transform[definition.key].id, property: transform[definition.key] })),
+      ...rigChannels(selectedLayer.value?.rigId),
+    ]
   }
   const selected = selectedSceneEntity.value
   if (!selected) return []
@@ -75,16 +93,33 @@ const channelDefinitions = computed<ChannelOption[]>(() => {
     ;(selected.value.influences ?? []).forEach((influence) => influenceParameters(influence).forEach((parameter) => rows.push({
       key: parameter.property.id, label: `${influence.name} · ${parameter.definition.label}`, color: influence.enabled ? '#8fd3b6' : '#5d6470', suffix: parameter.definition.suffix ?? '', property: parameter.property,
     })))
+    rows.push(...rigChannels(selected.value.rigId))
   } else if (selected.kind === 'camera') {
     rows.push({ key: selected.value.fov.id, label: 'Field of view', color: '#8ca9e8', suffix: '°', property: selected.value.fov })
+    const lens = selected.value
+    if (lens.depthOfField && lens.focusDistance && lens.fStop) {
+      rows.push({ key: lens.focusDistance.id, label: 'Focus distance', color: '#c2a0e8', suffix: '', property: lens.focusDistance })
+      rows.push({ key: lens.fStop.id, label: 'Aperture f/', color: '#c2a0e8', suffix: '', property: lens.fStop })
+    }
     const constraint = selected.value.pathConstraint
     if (constraint) {
       rows.push({ key: constraint.progress.id, label: 'Path progress', color: '#7ee0c0', suffix: '', property: constraint.progress })
       rows.push({ key: constraint.bank.id, label: 'Path bank', color: '#7ee0c0', suffix: '°', property: constraint.bank })
       ;(['x', 'y', 'z'] as const).forEach((axis) => rows.push({ key: constraint.offset[axis].id, label: `Path offset ${axis.toUpperCase()}`, color: colors[axis], suffix: '', property: constraint.offset[axis] }))
     }
+    const objectConstraint = selected.value.objectConstraint
+    if (objectConstraint) {
+      ;(['x', 'y', 'z'] as const).forEach((axis) => rows.push({ key: objectConstraint.positionOffset[axis].id, label: `Follow position ${axis.toUpperCase()}`, color: colors[axis], suffix: '', property: objectConstraint.positionOffset[axis] }))
+      ;(['x', 'y', 'z'] as const).forEach((axis) => rows.push({ key: objectConstraint.rotationOffset[axis].id, label: `Follow rotation ${axis.toUpperCase()}`, color: colors[axis], suffix: '°', property: objectConstraint.rotationOffset[axis] }))
+    }
   } else if (selected.kind === 'light') {
     rows.push({ key: selected.value.intensity.id, label: 'Intensity', color: '#d3aa72', suffix: '', property: selected.value.intensity })
+    const spot = selected.value
+    if (spot.type === 'spot' && spot.angle && spot.distance && spot.penumbra) {
+      rows.push({ key: spot.angle.id, label: 'Cone angle', color: '#ffd37a', suffix: '°', property: spot.angle })
+      rows.push({ key: spot.distance.id, label: 'Cone range', color: '#ffd37a', suffix: '', property: spot.distance })
+      rows.push({ key: spot.penumbra.id, label: 'Cone softness', color: '#ffd37a', suffix: '', property: spot.penumbra })
+    }
   }
   return rows
 })

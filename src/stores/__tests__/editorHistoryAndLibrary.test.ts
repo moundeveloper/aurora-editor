@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
+import { contributingNodeIds } from '@/engine/nodes/evaluateGraph'
 import { useEditorStore } from '../editor'
 
 describe('editor history and Library management', () => {
@@ -23,6 +24,26 @@ describe('editor history and Library management', () => {
     expect(store.redo()).toBe(true)
     expect(store.workspace).toBe('Nodes')
     expect(store.layers.some((item) => item.id === layer.id)).toBe(true)
+  })
+
+  it('exposes named history states and can jump between them without discarding the future', () => {
+    const store = useEditorStore()
+    const initialCount = store.layers.length
+    store.addTimelineLayer('rectangle')
+    store.addTimelineLayer('text')
+
+    expect(store.historyEntries).toHaveLength(3)
+    expect(store.historyEntries.map((entry) => entry.label)).toEqual(['Project opened', 'Add layer', 'Add layer'])
+    const firstEdit = store.historyEntries[1]
+    expect(store.jumpToHistory(firstEdit.id)).toBe(true)
+    expect(store.layers).toHaveLength(initialCount + 1)
+    expect(store.historyEntries.find((entry) => entry.id === firstEdit.id)?.current).toBe(true)
+    expect(store.canRedo).toBe(true)
+
+    const latest = store.historyEntries.at(-1)!
+    expect(store.jumpToHistory(latest.id)).toBe(true)
+    expect(store.layers).toHaveLength(initialCount + 2)
+    expect(store.canRedo).toBe(false)
   })
 
   it('creates and edits independently sized clusters while rejecting duplicate names', () => {
@@ -64,5 +85,41 @@ describe('editor history and Library management', () => {
     expect(store.deleteMediaAsset('asset-logo')).toBe(true)
     expect(layer.assetId).toBeUndefined()
     expect(store.assets.some((asset) => asset.id === 'asset-logo')).toBe(false)
+  })
+
+  it('adds, edits, navigates, deletes, and undoes project timeline markers', () => {
+    const store = useEditorStore()
+    store.setTime(2)
+    const first = store.addTimelineMarker('Intro', '#a5b4fc')!
+    store.setTime(7)
+    const second = store.addTimelineMarker('Drop', '#69d49e')!
+
+    expect(store.timelineMarkers.map((marker) => marker.name)).toEqual(['Intro', 'Drop'])
+    store.setTime(4)
+    expect(store.jumpToAdjacentTimelineMarker(-1)).toBe(true)
+    expect(store.currentTime).toBe(2)
+    expect(store.jumpToAdjacentTimelineMarker(1)).toBe(true)
+    expect(store.currentTime).toBe(7)
+
+    expect(store.updateTimelineMarker(second.id, { name: 'Beat drop', time: 6 })).toBe(true)
+    expect(store.timelineMarkers[1]).toMatchObject({ id: second.id, name: 'Beat drop', time: 6 })
+    expect(store.deleteTimelineMarker(first.id)).toBe(true)
+    expect(store.timelineMarkers).toHaveLength(1)
+    expect(store.undo()).toBe(true)
+    expect(store.timelineMarkers.map((marker) => marker.id)).toContain(first.id)
+  })
+
+  it('connects newly created and reused 3D scenes to the Motion render graph', () => {
+    const store = useEditorStore()
+    const sceneLayer = store.addTimelineLayer('3d-scene')
+    const source = store.nodes.find((node) => node.sourceId === sceneLayer.id)
+
+    expect(source?.kind).toBe('scene3d')
+    expect(contributingNodeIds(store.nodes, store.nodeConnections, store.renderRootNodeId)).toContain(source!.id)
+
+    const copy = store.addAssetToTimeline(sceneLayer.assetId!, 1)!
+    const copySource = store.nodes.find((node) => node.sourceId === copy.id)
+    expect(copySource?.kind).toBe('scene3d')
+    expect(contributingNodeIds(store.nodes, store.nodeConnections, store.renderRootNodeId)).toContain(copySource!.id)
   })
 })

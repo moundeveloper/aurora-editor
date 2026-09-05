@@ -17,7 +17,7 @@ describe('timeline layer creation', () => {
       type: 'adjustment',
       start: 0,
       duration: store.project.duration,
-      effects: ['Color Matrix', 'Vignette'],
+      effects: [{ kind: 'colorMatrix' }, { kind: 'vignette' }],
     })
     expect(store.layers[0]?.id).toBe(layer.id)
     expect(store.selectedLayerId).toBe(layer.id)
@@ -32,7 +32,10 @@ describe('timeline layer creation', () => {
 
     expect(store.scenes3D).toHaveLength(initialSceneCount + 1)
     expect(scene).toBeDefined()
-    expect(scene?.objects).toEqual([])
+    // The Motion viewport draws scene geometry only, so a new scene ships with something to see.
+    expect(scene?.objects.length).toBeGreaterThan(0)
+    expect(scene?.objects.every((object) => object.visible)).toBe(true)
+    expect(scene?.lights.some((light) => light.type === 'directional')).toBe(true)
     expect(scene?.cameras).toHaveLength(1)
     expect(scene?.cameraCuts[0]?.cameraId).toBe(scene?.cameras[0]?.id)
     expect(store.selectedSceneId).toBe(scene?.id)
@@ -49,14 +52,41 @@ describe('timeline layer creation', () => {
     const asset = store.assets.find((item) => item.id === layer.assetId)!
 
     store.add3DPrimitive('box')
-    expect(asset.sceneTemplate?.objects).toHaveLength(1)
+    expect(asset.sceneTemplate?.objects).toHaveLength(3)
     expect(asset.sceneLayerTemplate?.sceneId).toBe(layer.sceneId)
 
     const copy = store.addAssetToTimeline(asset.id, 4)!
     expect(copy.type).toBe('3d-scene')
     expect(copy.sceneId).not.toBe(layer.sceneId)
     expect(copy.assetId).toBe(asset.id)
-    expect(store.scenes3D.find((scene) => scene.id === copy.sceneId)?.objects).toHaveLength(1)
+    expect(store.scenes3D.find((scene) => scene.id === copy.sceneId)?.objects).toHaveLength(3)
+  })
+
+  it('gives a template-less 3D Library asset its own scene instead of an unrenderable layer', () => {
+    const store = useEditorStore()
+    const seed = store.addTimelineLayer('3d-scene')
+    const asset = store.assets.find((item) => item.id === seed.assetId)!
+    // Scene assets restored from older projects carry the scene but no reusable layer template.
+    delete asset.sceneLayerTemplate
+
+    const dropped = store.addAssetToTimeline(asset.id, 2)!
+
+    expect(dropped.type).toBe('3d-scene')
+    expect(dropped.sceneId).toBeTruthy()
+    expect(dropped.sceneId).not.toBe(seed.sceneId)
+    expect(store.scenes3D.find((scene) => scene.id === dropped.sceneId)?.objects.length).toBeGreaterThan(0)
+  })
+
+  it('refuses a 3D Library drop that carries no scene at all', () => {
+    const store = useEditorStore()
+    const seed = store.addTimelineLayer('3d-scene')
+    const asset = store.assets.find((item) => item.id === seed.assetId)!
+    delete asset.sceneLayerTemplate
+    delete asset.sceneTemplate
+    const before = store.layers.length
+
+    expect(store.addAssetToTimeline(asset.id, 2)).toBeUndefined()
+    expect(store.layers).toHaveLength(before)
   })
 
   it('auto-keys a transform channel that was previously static', () => {
@@ -99,8 +129,27 @@ describe('timeline layer creation', () => {
     const audio = store.addTimelineLayer('audio')
 
     expect(shape).toMatchObject({ type: 'shape', shapeKind: 'ellipse', start: 5 })
-    expect(audio).toMatchObject({ type: 'audio', start: 5, effects: ['Gain'] })
+    expect(audio).toMatchObject({ type: 'audio', start: 5, effects: [] })
     expect(store.layers.at(-1)?.id).toBe(audio.id)
+  })
+
+  it('adds, configures, toggles, reorders, and removes layer effects', () => {
+    const store = useEditorStore()
+    const shape = store.addTimelineLayer('rectangle')
+
+    store.addLayerEffect('blur')
+    store.addLayerEffect('vignette')
+    const blur = shape.effects[0]!
+    const vignette = shape.effects[1]!
+    store.setLayerEffectValue(blur.id, 'radius', 410)
+    store.toggleLayerEffect(vignette.id)
+    store.moveLayerEffect(vignette.id, -1)
+
+    expect(shape.effects.map((effect) => effect.kind)).toEqual(['vignette', 'blur'])
+    expect(shape.effects[0]?.enabled).toBe(false)
+    expect(shape.effects[1]?.values.radius).toBe(200)
+    store.removeLayerEffect(vignette.id)
+    expect(shape.effects.map((effect) => effect.kind)).toEqual(['blur'])
   })
 
   it('uses the configured resolution and frame rate for new content', () => {

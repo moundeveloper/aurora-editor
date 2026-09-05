@@ -6,18 +6,37 @@ import * as THREE from 'three'
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js'
 import { TransformControls, type TransformControlsMode } from 'three/addons/controls/TransformControls.js'
 import { useEditorStore } from '@/stores/editor'
-import { ThreeSceneRuntimeRegistry, type Scene3DRuntime } from '@/engine/scene3d/ThreeSceneRuntime'
+import { planeHalfExtents, ThreeSceneRuntimeRegistry, type Scene3DRuntime } from '@/engine/scene3d/ThreeSceneRuntime'
+import { evaluateNumericProperty } from '@/engine/animation/evaluateProperty'
+import { applyMatrix, boneTransforms } from '@/engine/rig/skeleton'
+import { poseOffsetTowards, poseRotationTowards, restAimTowards } from '@/engine/rig/rigPosing'
 import { pathTransformComponents, sampleLocalPath } from '@/engine/scene3d/pathEvaluation'
 import { movePathHandle, movePathPoint, type PathHandleKey, type PathVector } from '@/engine/scene3d/pathEditing'
-import type { Aurora3DPath, Aurora3DPathPoint, Aurora3DScene } from '@/models/editor'
+import { AuroraSceneRenderPipeline } from '@/engine/rendering/AuroraSceneRenderPipeline'
+import { AuroraSolidViewport } from '@/engine/rendering/AuroraSolidViewport'
+import { AuroraViewportModes, beginViewportShadingPass, type ViewportShadingMode } from '@/engine/rendering/AuroraViewportModes'
+import { useViewportShading } from '@/composables/useViewportShading'
+import {
+  applyGestureKey, beginGesture, gestureDelta, gestureLabel, type GestureBasis, type GestureMode, type GestureState,
+} from '@/engine/scene3d/transformGesture'
+import type { Aurora3DObject, Aurora3DPath, Aurora3DPathPoint, Aurora3DScene, AuroraRig } from '@/models/editor'
 import IconButton from './common/IconButton.vue'
 
 const store = useEditorStore()
-const { selectedLayer, selectedScene, selectedSceneEntityId, currentTime, playing, assets } = storeToRefs(store)
+const { project, selectedLayer, selectedScene, selectedSceneEntity, selectedSceneEntityId, currentTime, playing, assets, rigs } = storeToRefs(store)
 const viewport = ref<HTMLElement>()
 const canvas = ref<HTMLCanvasElement>()
 const transformMode = ref<TransformControlsMode>('translate')
-const cameraView = ref('Perspective')
+type EditorCameraView = 'Perspective' | 'Front' | 'Right' | 'Top' | 'User'
+const cameraView = ref<EditorCameraView>('Perspective')
+const shading = useViewportShading()
+const shadingModes: Array<{ id: ViewportShadingMode; label: string; title: string }> = [
+  { id: 'solid', label: 'Solid', title: 'Solid shading (Z): camera-relative studio lights, material color, and cavity definition' },
+  { id: 'rendered', label: 'Rendered', title: 'Use authored materials, lights, shadows, and ambient occlusion' },
+  { id: 'wireframe', label: 'Wire', title: 'Wireframe: unlit edges only' },
+  { id: 'matcap', label: 'Matcap', title: 'Matcap: a baked clay sphere, independent of scene lighting' },
+  { id: 'xray', label: 'X-ray', title: 'X-ray: additive translucency that reveals overlapping geometry' },
+]
 const stats = ref({ calls: 0, triangles: 0 })
 interface PathPointSelection { pathId: string; pointId: string; target: PathHandleKey }
 /** Point-level selection lives beside the entity selection; it only applies while its path stays selected. */
@@ -25,13 +44,36 @@ const pathSelection = ref<PathPointSelection | null>(null)
 const activePathPoint = computed(() => pathSelection.value?.pathId === selectedSceneEntityId.value ? pathSelection.value : null)
 
 const PATH_GROUP_PREFIX = 'aurora-editor-path-'
+const RIG_GROUP_PREFIX = 'aurora-editor-rig-'
+const INFLUENCE_GROUP_PREFIX = 'aurora-editor-influence-'
+const SPOT_GROUP_PREFIX = 'aurora-editor-spot-'
+
+const assetMap = computed(() => new Map(assets.value.map((asset) => [asset.id, asset])))
 
 const runtimeRegistry = new ThreeSceneRuntimeRegistry(() => renderViewport())
 let renderer: THREE.WebGLRenderer | null = null
+let scenePipeline: AuroraSceneRenderPipeline | null = null
+const solidViewport = new AuroraSolidViewport()
+const viewportModes = new AuroraViewportModes()
 let perspectiveCamera: THREE.PerspectiveCamera | null = null
 let orthographicCamera: THREE.OrthographicCamera | null = null
 let editorCamera: THREE.Camera | null = null
 let orbit: OrbitControls | null = null
+/** Orientation the active axis preset landed on, compared against to notice a user orbit. */
+let axisViewOrientation: THREE.Quaternion | null = null
+
+/** A modal transform in progress: the pointer drives it until it is confirmed or cancelled. */
+const gesture = ref<GestureState | null>(null)
+interface GestureAnchor {
+  entityId: string
+  /** Where the pointer sat when travel started. Null until the first move, since a keyboard-started
+   * gesture has no pointer yet and must not treat the cursor's absolute position as travel. */
+  pointer: { x: number; y: number } | null
+  position: [number, number, number]
+  rotation: [number, number, number]
+  scale: [number, number, number]
+}
+let gestureAnchor: GestureAnchor | null = null
 let transform: TransformControls | null = null
 let runtime: Scene3DRuntime | null = null
 let resizeObserver: ResizeObserver | null = null
@@ -53,7 +95,40 @@ interface PathDragState {
 }
 let pathDrag: PathDragState | null = null
 
+/** A direct grab on a rig bone or an influence centre, dragged on a plane facing the camera. */
+interface GizmoDragState {
+  pointerId: number
+  kind: 'rig' | 'influence' | 'spot'
+  objectId: string
+  rigId: string
+  boneId: string
+  target: 'head' | 'tip'
+  influenceId: string
+  /** Shift edits where the skeleton rests instead of how it is posed. */
+  rest: boolean
+  host: THREE.Object3D
+  plane: THREE.Plane
+  grabOffset: THREE.Vector3
+}
+let gizmoDrag: GizmoDragState | null = null
+
 const activeSceneLabel = computed(() => selectedScene.value?.name ?? 'No 3D scene')
+
+const viewportHelp = computed(() => {
+  if (selectedPath.value) return 'Click an anchor or handle to edit it · drag with the gizmo · G/R/S: transform'
+  const object = selectedScene.value?.objects.find((item) => item.id === selectedSceneEntityId.value)
+  if (object?.type === 'group') {
+    const children = selectedScene.value?.objects.filter((item) => item.parentId === object.id).length ?? 0
+    return `Group transform controls ${children} direct ${children === 1 ? 'child' : 'children'} · G/R/S: transform`
+  }
+  const rigged = object?.rigId && rigs.value.some((rig) => rig.id === object.rigId && rig.bones.length)
+  if (rigged) return 'Drag a bone tip to rotate · drag its head to shift · Shift+drag edits the rest pose'
+  if (object && radialInfluences(object).length) return 'Drag the green marker to move the radial array centre · G/R/S: transform'
+  const light = selectedScene.value?.lights.find((item) => item.id === selectedSceneEntityId.value)
+  if (light?.type === 'spot') return 'Drag the gold cone rim to widen or narrow the cone · G/R: move or aim the light'
+  if (selectedCamera.value) return 'Ctrl+Alt+C snaps this camera to the current view · Orbit: left-drag · Zoom: wheel'
+  return 'G/R/S: move, rotate, scale · then X/Y/Z to constrain, or type a number · . frames the selection'
+})
 
 function makeCameraOutline(id: string) {
   const corners = [[-.65, .4, -1], [.65, .4, -1], [.65, -.4, -1], [-.65, -.4, -1]] as const
@@ -228,6 +303,201 @@ function syncPathHelpers(target: Scene3DRuntime, sceneDefinition: Aurora3DScene)
   })
 }
 
+const rigHelperSignature = (rig: AuroraRig) => rig.bones.map((bone) => bone.id).join(',')
+
+function makeRigHandle(kind: 'head' | 'tip', objectId: string, rigId: string, boneId: string) {
+  const mesh = new THREE.Mesh(
+    new THREE.SphereGeometry(kind === 'head' ? .075 : .055, 12, 8),
+    new THREE.MeshBasicMaterial({ color: kind === 'head' ? '#c79ae0' : '#efd7ff', depthTest: false, transparent: true, opacity: .95 }),
+  )
+  mesh.name = `${kind}-${boneId}`
+  mesh.userData = { editorOnly: true, auroraId: objectId, rigId, rigBoneId: boneId, rigTarget: kind }
+  mesh.renderOrder = 24
+  return mesh
+}
+
+/** Bones are drawn as children of the plane they bend, so they inherit its transform for free. */
+function makeRigHelper(objectId: string, rig: AuroraRig) {
+  const group = new THREE.Group()
+  group.name = `${RIG_GROUP_PREFIX}${objectId}`
+  group.userData = { editorOnly: true, auroraId: objectId, signature: rigHelperSignature(rig) }
+  const shafts = new THREE.LineSegments(
+    new THREE.BufferGeometry(),
+    new THREE.LineBasicMaterial({ color: '#c79ae0', depthTest: false, transparent: true, opacity: .9 }),
+  )
+  shafts.name = 'rig-shafts'
+  shafts.userData = { editorOnly: true }
+  shafts.renderOrder = 23
+  group.add(shafts)
+  rig.bones.forEach((bone) => {
+    group.add(makeRigHandle('head', objectId, rig.id, bone.id))
+    group.add(makeRigHandle('tip', objectId, rig.id, bone.id))
+  })
+  return group
+}
+
+function updateRigHelper(group: THREE.Object3D, object: Aurora3DObject, rig: AuroraRig, time: number) {
+  const { halfWidth, halfHeight } = planeHalfExtents(object, assetMap.value)
+  const transforms = boneTransforms(rig, time)
+  const segments: number[] = []
+  // A hair in front of the card, so the handles never fight the plane for depth.
+  const toLocal = (point: { x: number; y: number }) => new THREE.Vector3(point.x * halfWidth, point.y * halfHeight, .02)
+  rig.bones.forEach((bone) => {
+    const world = transforms.get(bone.id)?.world
+    const head = toLocal(world ? applyMatrix(world, 0, 0) : { x: bone.x, y: bone.y })
+    const tip = toLocal(world ? applyMatrix(world, bone.length, 0) : { x: bone.x, y: bone.y })
+    segments.push(head.x, head.y, head.z, tip.x, tip.y, tip.z)
+    const selected = store.selectedRigBoneId === bone.id
+    ;([['head', head], ['tip', tip]] as const).forEach(([kind, position]) => {
+      const handle = group.getObjectByName(`${kind}-${bone.id}`) as THREE.Mesh | undefined
+      if (!handle) return
+      handle.position.copy(position)
+      handle.scale.setScalar(selected ? 1.45 : 1)
+      ;(handle.material as THREE.MeshBasicMaterial).color.set(selected ? '#ffd9a0' : kind === 'head' ? '#c79ae0' : '#efd7ff')
+    })
+  })
+  const shafts = group.getObjectByName('rig-shafts') as THREE.LineSegments | undefined
+  if (shafts) {
+    shafts.geometry.setAttribute('position', new THREE.Float32BufferAttribute(segments, 3))
+    shafts.geometry.computeBoundingSphere()
+  }
+}
+
+function syncRigHelpers(target: Scene3DRuntime, sceneDefinition: Aurora3DScene) {
+  sceneDefinition.objects.forEach((object) => {
+    const mesh = target.objects.get(object.id)
+    if (!mesh) return
+    const rig = object.rigId ? rigs.value.find((item) => item.id === object.rigId) : undefined
+    const usable = Boolean(rig?.bones.length) && object.primitive === 'plane'
+    let group = mesh.getObjectByName(`${RIG_GROUP_PREFIX}${object.id}`)
+    if (group && (!usable || group.userData.signature !== rigHelperSignature(rig!))) {
+      disposeHelperRoot(group)
+      group = undefined
+    }
+    if (!usable || !rig) return
+    if (!group) {
+      group = makeRigHelper(object.id, rig)
+      mesh.add(group)
+    }
+    // Only the selected plane shows its skeleton; every rig at once would bury the scene.
+    group.visible = selectedSceneEntityId.value === object.id
+    if (group.visible) updateRigHelper(group, object, rig, currentTime.value)
+  })
+}
+
+const radialInfluences = (object: Aurora3DObject) =>
+  (object.influences ?? []).filter((influence) => influence.type === 'radial-array' && influence.enabled)
+
+const influenceParameterValue = (object: Aurora3DObject, influenceId: string, key: string, fallback: number) => {
+  const property = (object.influences ?? []).find((item) => item.id === influenceId)?.parameters[key]
+  return property ? evaluateNumericProperty(property, currentTime.value) : fallback
+}
+
+/** The centre a radial array sweeps around, shown where it actually is and draggable from there. */
+function makeInfluenceHelper(objectId: string, influenceId: string) {
+  const group = new THREE.Group()
+  group.name = `${INFLUENCE_GROUP_PREFIX}${influenceId}`
+  group.userData = { editorOnly: true, auroraId: objectId, influenceId }
+
+  const ring = new THREE.LineLoop(
+    new THREE.BufferGeometry().setFromPoints(Array.from({ length: 48 }, (_, index) => {
+      const angle = (index / 48) * Math.PI * 2
+      return new THREE.Vector3(Math.cos(angle) * .38, 0, Math.sin(angle) * .38)
+    })),
+    new THREE.LineBasicMaterial({ color: '#8fd3b6', depthTest: false, transparent: true, opacity: .85 }),
+  )
+  ring.name = 'influence-ring'
+  ring.userData = { editorOnly: true }
+  ring.renderOrder = 23
+  group.add(ring)
+
+  const knob = new THREE.Mesh(
+    new THREE.OctahedronGeometry(.1),
+    new THREE.MeshBasicMaterial({ color: '#8fd3b6', depthTest: false, transparent: true, opacity: .95 }),
+  )
+  knob.name = 'influence-center'
+  knob.userData = { editorOnly: true, auroraId: objectId, influenceId, influenceTarget: 'center' }
+  knob.renderOrder = 24
+  group.add(knob)
+  return group
+}
+
+function updateInfluenceHelper(group: THREE.Object3D, object: Aurora3DObject, influenceId: string) {
+  group.position.set(
+    influenceParameterValue(object, influenceId, 'centerX', 0),
+    influenceParameterValue(object, influenceId, 'centerY', 0),
+    influenceParameterValue(object, influenceId, 'centerZ', 0),
+  )
+  const ring = group.getObjectByName('influence-ring')
+  if (!ring) return
+  // The ring lies in the plane the copies sweep through, so the axis parameter reads at a glance.
+  const axis = Math.max(0, Math.min(2, Math.round(influenceParameterValue(object, influenceId, 'axis', 1))))
+  ring.rotation.set(axis === 2 ? Math.PI / 2 : 0, 0, axis === 0 ? Math.PI / 2 : 0)
+}
+
+function syncInfluenceHelpers(target: Scene3DRuntime, sceneDefinition: Aurora3DScene) {
+  sceneDefinition.objects.forEach((object) => {
+    const mesh = target.objects.get(object.id)
+    if (!mesh) return
+    const live = selectedSceneEntityId.value === object.id ? radialInfluences(object) : []
+    const liveIds = new Set(live.map((influence) => influence.id))
+    mesh.children
+      .filter((child) => child.name.startsWith(INFLUENCE_GROUP_PREFIX) && !liveIds.has(child.userData.influenceId as string))
+      .forEach(disposeHelperRoot)
+    live.forEach((influence) => {
+      let group = mesh.getObjectByName(`${INFLUENCE_GROUP_PREFIX}${influence.id}`)
+      if (!group) {
+        group = makeInfluenceHelper(object.id, influence.id)
+        mesh.add(group)
+      }
+      updateInfluenceHelper(group, object, influence.id)
+    })
+  })
+}
+
+/** A selected spot uses a local -Z cone, matching the direction used by the renderer and Blender. */
+function makeSpotConeHelper(id: string) {
+  const group = new THREE.Group()
+  group.name = `${SPOT_GROUP_PREFIX}${id}`
+  group.userData = { editorOnly: true, auroraId: id }
+  const line = new THREE.LineSegments(
+    new THREE.BufferGeometry(),
+    new THREE.LineBasicMaterial({ color: '#ffd37a', depthTest: false, transparent: true, opacity: .9 }),
+  )
+  line.name = 'cone-lines'
+  line.renderOrder = 1001
+  const handle = new THREE.Mesh(
+    new THREE.SphereGeometry(.13, 12, 8),
+    new THREE.MeshBasicMaterial({ color: '#ffd37a', depthTest: false }),
+  )
+  handle.name = 'cone-rim-handle'
+  handle.renderOrder = 1002
+  handle.userData = { editorOnly: true, auroraId: id, spotTarget: 'cone-rim' }
+  group.add(line, handle)
+  return group
+}
+
+function updateSpotConeHelper(group: THREE.Object3D, light: THREE.SpotLight) {
+  // A zero range means the beam never falls off, so the drawn cone uses a readable stand-in length.
+  const distance = Math.max(.1, light.distance || 18)
+  const radius = Math.tan(Math.min(THREE.MathUtils.degToRad(89), light.angle)) * distance
+  const segments: number[] = []
+  const divisions = 32
+  for (let index = 0; index < divisions; index += 1) {
+    const a = (index / divisions) * Math.PI * 2
+    const b = ((index + 1) / divisions) * Math.PI * 2
+    segments.push(Math.cos(a) * radius, Math.sin(a) * radius, -distance)
+    segments.push(Math.cos(b) * radius, Math.sin(b) * radius, -distance)
+  }
+  ;[0, .5, 1, 1.5].forEach((turn) => {
+    const angle = turn * Math.PI
+    segments.push(0, 0, 0, Math.cos(angle) * radius, Math.sin(angle) * radius, -distance)
+  })
+  const line = group.getObjectByName('cone-lines') as THREE.LineSegments | undefined
+  line?.geometry.setAttribute('position', new THREE.Float32BufferAttribute(segments, 3))
+  group.getObjectByName('cone-rim-handle')?.position.set(radius, 0, -distance)
+}
+
 function ensureEditorHelpers(target: Scene3DRuntime) {
   if (!target.scene.getObjectByName('aurora-editor-grid')) {
     const grid = new THREE.GridHelper(20, 20, '#3d466e', '#242a3b')
@@ -246,10 +516,13 @@ function ensureEditorHelpers(target: Scene3DRuntime) {
     camera.add(makeCameraOutline(id))
   })
   target.lights.forEach((light, id) => {
-    const name = `aurora-editor-light-helper-${id}`
+    const name = light instanceof THREE.SpotLight ? `${SPOT_GROUP_PREFIX}${id}` : `aurora-editor-light-helper-${id}`
     if (target.scene.getObjectByName(name)) return
     let helper: THREE.Object3D
-    if (light instanceof THREE.DirectionalLight) helper = new THREE.DirectionalLightHelper(light, .7, '#ffd37a')
+    if (light instanceof THREE.SpotLight) {
+      helper = makeSpotConeHelper(id)
+      light.add(helper)
+    } else if (light instanceof THREE.DirectionalLight) helper = new THREE.DirectionalLightHelper(light, .7, '#ffd37a')
     else if (light instanceof THREE.PointLight) helper = new THREE.PointLightHelper(light, .32, '#ffd37a')
     else {
       helper = new THREE.Mesh(
@@ -259,6 +532,7 @@ function ensureEditorHelpers(target: Scene3DRuntime) {
     }
     helper.name = name
     helper.userData = { editorOnly: true, auroraId: id }
+    if (light instanceof THREE.SpotLight) return
     if (light instanceof THREE.AmbientLight) light.add(helper)
     else target.scene.add(helper)
   })
@@ -271,13 +545,20 @@ function ensureEditorHelpers(target: Scene3DRuntime) {
 function updateEditorHelpers(target: Scene3DRuntime) {
   target.scene.updateMatrixWorld(true)
   target.lights.forEach((light) => {
-    if (!(light instanceof THREE.DirectionalLight)) return
+    if (!(light instanceof THREE.DirectionalLight) && !(light instanceof THREE.SpotLight)) return
     const direction = new THREE.Vector3(0, 0, -1).applyQuaternion(light.quaternion)
     light.target.position.copy(light.position).add(direction)
     light.target.updateMatrixWorld(true)
   })
   target.scene.traverse((object) => {
-    if (object instanceof THREE.DirectionalLightHelper || object instanceof THREE.PointLightHelper) {
+    if (object.name.startsWith(SPOT_GROUP_PREFIX)) {
+      const light = target.lights.get(object.userData.auroraId as string)
+      object.visible = light instanceof THREE.SpotLight
+        && selectedLayer.value?.visible !== false
+        && selectedSceneEntityId.value === object.userData.auroraId
+        && light.visible
+      if (light instanceof THREE.SpotLight) updateSpotConeHelper(object, light)
+    } else if (object instanceof THREE.DirectionalLightHelper || object instanceof THREE.PointLightHelper) {
       const light = selectedScene.value?.lights.find((item) => item.id === object.userData.auroraId)
       object.visible = selectedLayer.value?.visible !== false && light?.visible !== false
       object.update()
@@ -301,34 +582,62 @@ function attachSelection() {
     pathSelection.value = null
   }
   transform.setMode(transformMode.value)
-  const constrainedCamera = selectedScene.value?.cameras.some((camera) => camera.id === id && camera.pathConstraint)
+  const constrainedCamera = selectedScene.value?.cameras.some((camera) => camera.id === id && (camera.pathConstraint || camera.objectConstraint))
   const target = runtime.objects.get(id) ?? runtime.cameras.get(id) ?? runtime.lights.get(id)
     ?? runtime.scene.getObjectByName(`${PATH_GROUP_PREFIX}${id}`)
   if (target && !constrainedCamera) transform.attach(target)
   else transform.detach()
 }
 
-function renderViewport() {
+let viewportFrame = 0
+
+function renderViewportNow() {
   const sceneDefinition = selectedScene.value
   const host = viewport.value
   if (!renderer || !editorCamera || !host || !sceneDefinition) return
-  const syncScene = !transform?.dragging || !runtime || runtime.sceneId !== sceneDefinition.id
+  // A running modal gesture previews straight onto the Three object, like a gizmo drag, so the runtime
+  // must not be re-synced from the (still original) definition mid-gesture or the preview is clobbered.
+  const syncScene = (!transform?.dragging && !gesture.value) || !runtime || runtime.sceneId !== sceneDefinition.id
   if (syncScene) {
-    if (runtime && (runtime.sceneId !== sceneDefinition.id || runtime.revision !== sceneDefinition.revision)) disposeEditorHelpers(runtime)
-    runtime = runtimeRegistry.get(sceneDefinition, host.clientWidth, host.clientHeight, currentTime.value, assets.value)
+    if (runtime && runtime.sceneId !== sceneDefinition.id) disposeEditorHelpers(runtime)
+    runtime = runtimeRegistry.get(sceneDefinition, host.clientWidth, host.clientHeight, currentTime.value, assets.value, rigs.value)
   }
   const targetRuntime = runtime
   if (!targetRuntime) return
   ensureEditorHelpers(targetRuntime)
   targetRuntime.root.visible = selectedLayer.value?.visible !== false
   syncPathHelpers(targetRuntime, sceneDefinition)
+  syncRigHelpers(targetRuntime, sceneDefinition)
+  syncInfluenceHelpers(targetRuntime, sceneDefinition)
   if (syncScene) attachSelection()
   updateEditorHelpers(targetRuntime)
-  renderer.shadowMap.enabled = sceneDefinition.settings.shadows
+  const pass = beginViewportShadingPass({
+    mode: shading.mode,
+    wireOverlay: shading.wireOverlay,
+    scene: targetRuntime.scene,
+    root: targetRuntime.root,
+    camera: editorCamera,
+    baseSettings: sceneDefinition.settings,
+    solidViewport,
+    viewportModes,
+  })
+  renderer.shadowMap.enabled = pass.shadowsEnabled
   renderer.setScissorTest(false)
   renderer.setViewport(0, 0, host.clientWidth, host.clientHeight)
-  renderer.render(targetRuntime.scene, editorCamera)
+  try {
+    scenePipeline?.render(targetRuntime.scene, editorCamera, pass.settings, host.clientWidth, host.clientHeight, 'screen')
+  } finally {
+    pass.restore()
+  }
   stats.value = { calls: renderer.info.render.calls, triangles: renderer.info.render.triangles }
+}
+
+function renderViewport() {
+  if (viewportFrame) return
+  viewportFrame = requestAnimationFrame(() => {
+    viewportFrame = 0
+    renderViewportNow()
+  })
 }
 
 function resizeViewport() {
@@ -388,7 +697,8 @@ function deleteSelectedPathPoint() {
   if (store.delete3DPathPoint(path.id, selection.pointId)) clearPathPointSelection()
 }
 
-function setCameraView(view: 'Perspective' | 'Front' | 'Right' | 'Top') {
+/** Axis views are snap targets, not modes: the view stays orbitable after it lands. */
+function setCameraView(view: Exclude<EditorCameraView, 'User'>) {
   if (!perspectiveCamera || !orthographicCamera || !orbit) return
   cameraView.value = view
   orbit.target.set(0, 0, 0)
@@ -399,31 +709,208 @@ function setCameraView(view: 'Perspective' | 'Front' | 'Right' | 'Top') {
   if (view === 'Front') editorCamera.position.set(0, 0, 10)
   else if (view === 'Right') editorCamera.position.set(10, 0, 0)
   else if (view === 'Top') {
-    editorCamera.position.set(0, 10, 0)
-    editorCamera.up.set(0, 0, -1)
+    // Sitting exactly on the pole makes `up` parallel to the view direction, which both breaks
+    // lookAt and traps OrbitControls. A hair off the pole renders identically and orbits freely.
+    editorCamera.position.set(0, 10, .01)
   } else editorCamera.position.set(7, 5, 8)
   editorCamera.lookAt(orbit.target)
-  orbit.enableRotate = view === 'Perspective'
-  orbit.mouseButtons.LEFT = view === 'Perspective' ? THREE.MOUSE.ROTATE : THREE.MOUSE.PAN
+  axisViewOrientation = view === 'Perspective' ? null : editorCamera.quaternion.clone()
   orbit.update()
   renderViewport()
 }
 
-/** Keeps the axis presets mathematically square after OrbitControls pans or zooms the view. */
-function enforceAxisView() {
-  if (!editorCamera || !orbit || cameraView.value === 'Perspective') return
-  const distance = Math.max(.1, editorCamera.position.distanceTo(orbit.target))
-  editorCamera.up.set(0, 1, 0)
-  if (cameraView.value === 'Front') editorCamera.position.copy(orbit.target).add(new THREE.Vector3(0, 0, distance))
-  else if (cameraView.value === 'Right') editorCamera.position.copy(orbit.target).add(new THREE.Vector3(distance, 0, 0))
-  else {
-    editorCamera.position.copy(orbit.target).add(new THREE.Vector3(0, distance, 0))
-    editorCamera.up.set(0, 0, -1)
+const selectedCamera = computed(() => selectedScene.value?.cameras.find((camera) => camera.id === selectedSceneEntityId.value) ?? null)
+const cameraAlignBlocked = computed(() => Boolean(selectedCamera.value?.pathConstraint || selectedCamera.value?.objectConstraint))
+const cameraAlignLabel = computed(() => {
+  const camera = selectedCamera.value
+  if (!camera) return 'Select a scene camera to snap it to this viewport view'
+  if (cameraAlignBlocked.value) return `${camera.name} is driven by a constraint, so its own transform is ignored`
+  return `Move ${camera.name} to this viewport view (Ctrl+Alt+C)`
+})
+
+/**
+ * Drops the selected scene camera exactly where the viewport is looking from.
+ *
+ * Only the transform moves: the lens stays whatever the shot was framed with, so aligning never
+ * silently re-frames the composition behind the user's back.
+ */
+function alignCameraToView() {
+  const camera = selectedCamera.value
+  if (!camera || !editorCamera || cameraAlignBlocked.value) return
+  editorCamera.updateMatrixWorld(true)
+  const position = editorCamera.getWorldPosition(new THREE.Vector3())
+  const euler = new THREE.Euler().setFromQuaternion(editorCamera.getWorldQuaternion(new THREE.Quaternion()), 'XYZ')
+  store.update3DEntityTransform(camera.id, {
+    position: [position.x, position.y, position.z],
+    rotation: [THREE.MathUtils.radToDeg(euler.x), THREE.MathUtils.radToDeg(euler.y), THREE.MathUtils.radToDeg(euler.z)],
+    scale: (['x', 'y', 'z'] as const).map((axis) => evaluateNumericProperty(camera.transform.scale[axis], currentTime.value)) as [number, number, number],
+  })
+  renderViewport()
+}
+
+/**
+ * Drops the axis label once the user orbits away from the preset.
+ *
+ * Panning and zooming move the camera without reorienting it, so an axis view survives both and
+ * stays exactly square. Rotating is what makes it a free view — including a horizontal spin from
+ * Top, which keeps looking straight down but no longer has X across the screen. The projection
+ * stays orthographic so leaving a preset is a label change rather than a jump: the Perspective
+ * button is the way back.
+ */
+function syncAxisViewLabel() {
+  if (!editorCamera || !axisViewOrientation || cameraView.value === 'Perspective' || cameraView.value === 'User') return
+  if (editorCamera.quaternion.angleTo(axisViewOrientation) > .02) cameraView.value = 'User'
+}
+
+/**
+ * How the pointer maps into the scene for the active view.
+ *
+ * A perspective camera covers more world per pixel the further the subject is, so the scale is
+ * taken at the orbit target. An orthographic view has one scale everywhere.
+ */
+function currentGestureBasis(): GestureBasis {
+  const host = viewport.value
+  const height = Math.max(1, host?.clientHeight ?? 1)
+  if (!editorCamera || !orbit) return { right: [1, 0, 0], up: [0, 1, 0], unitsPerPixel: .01 }
+  editorCamera.updateMatrixWorld(true)
+  const matrix = editorCamera.matrixWorld
+  const right = new THREE.Vector3().setFromMatrixColumn(matrix, 0).normalize()
+  const up = new THREE.Vector3().setFromMatrixColumn(matrix, 1).normalize()
+  let unitsPerPixel = .01
+  if (editorCamera instanceof THREE.PerspectiveCamera) {
+    const distance = Math.max(.1, editorCamera.position.distanceTo(orbit.target))
+    unitsPerPixel = (2 * distance * Math.tan(THREE.MathUtils.degToRad(editorCamera.fov) / 2)) / height
+  } else if (editorCamera instanceof THREE.OrthographicCamera) {
+    unitsPerPixel = (editorCamera.top - editorCamera.bottom) / (height * editorCamera.zoom)
   }
-  editorCamera.lookAt(orbit.target)
+  return { right: right.toArray(), up: up.toArray(), unitsPerPixel }
+}
+
+const gestureStatus = computed(() => gesture.value ? gestureLabel(gesture.value, currentGestureBasis()) : '')
+
+/** Starts a modal transform on the selected entity, anchored to its current values. */
+function startGesture(mode: GestureMode, event?: PointerEvent) {
+  const entity = selectedSceneEntity.value
+  if (!entity || activePathPoint.value) return false
+  const transformOf = entity.value.transform
+  const read = (section: 'position' | 'rotation' | 'scale') => (['x', 'y', 'z'] as const)
+    .map((axis) => evaluateNumericProperty(transformOf[section][axis], currentTime.value)) as [number, number, number]
+  gestureAnchor = {
+    entityId: entity.value.id,
+    // A pointer-started gesture anchors here; a key-started one waits for the first move.
+    pointer: event ? { x: event.clientX, y: event.clientY } : null,
+    position: read('position'),
+    rotation: read('rotation'),
+    scale: read('scale'),
+  }
+  gesture.value = beginGesture(mode)
+  if (orbit) orbit.enabled = false
+  if (transform) transform.enabled = false
+  renderViewport()
+  return true
+}
+
+/** The transform the gesture currently describes, in the store's units. */
+function gestureTransformValues(state: GestureState, anchor: GestureAnchor) {
+  const delta = gestureDelta(state, currentGestureBasis())
+  return {
+    position: anchor.position.map((value, index) => value + delta.translate[index]!) as [number, number, number],
+    rotation: anchor.rotation.map((value, index) => value + delta.rotate[index]!) as [number, number, number],
+    scale: anchor.scale.map((value, index) => value * delta.scale[index]!) as [number, number, number],
+  }
+}
+
+/**
+ * Previews a gesture by writing straight onto the runtime's Three object, the way a gizmo drag does.
+ * The store write — which bumps the scene revision and republishes the scene asset — is deferred to
+ * confirmation, so dragging stays smooth instead of re-serialising the scene on every pointer move.
+ */
+function applyGesture() {
+  const state = gesture.value
+  const anchor = gestureAnchor
+  if (!state || !anchor || !runtime) return
+  const target = runtime.objects.get(anchor.entityId) ?? runtime.cameras.get(anchor.entityId) ?? runtime.lights.get(anchor.entityId)
+  if (!target) return
+  const values = gestureTransformValues(state, anchor)
+  target.position.set(values.position[0], values.position[1], values.position[2])
+  target.rotation.set(
+    THREE.MathUtils.degToRad(values.rotation[0]),
+    THREE.MathUtils.degToRad(values.rotation[1]),
+    THREE.MathUtils.degToRad(values.rotation[2]),
+  )
+  target.scale.set(values.scale[0], values.scale[1], values.scale[2])
+  target.updateMatrixWorld(true)
+  renderViewport()
+}
+
+function endGesture(outcome: 'confirm' | 'cancel') {
+  const state = gesture.value
+  const anchor = gestureAnchor
+  // Commit once on confirm. On cancel we wrote nothing to the store, so the next render re-syncs the
+  // object back to its original definition on its own.
+  if (outcome === 'confirm' && state && anchor) {
+    store.update3DEntityTransform(anchor.entityId, gestureTransformValues(state, anchor))
+  }
+  gesture.value = null
+  gestureAnchor = null
+  if (orbit) orbit.enabled = true
+  if (transform) transform.enabled = true
+  attachSelection()
+  renderViewport()
+}
+
+function onGesturePointerMove(event: PointerEvent) {
+  const state = gesture.value
+  if (!state || !gestureAnchor) return
+  // A key-started gesture has no pointer origin yet: adopt this position as zero travel, don't jump.
+  if (!gestureAnchor.pointer) {
+    gestureAnchor.pointer = { x: event.clientX, y: event.clientY }
+    return
+  }
+  gesture.value = {
+    ...state,
+    screen: { x: event.clientX - gestureAnchor.pointer.x, y: event.clientY - gestureAnchor.pointer.y },
+  }
+  applyGesture()
+}
+
+/** Frames the selection, so a lost or off-screen entity is one key away. */
+function frameSelected() {
+  const entity = selectedSceneEntity.value
+  if (!entity || !runtime || !editorCamera || !orbit) return
+  const target = runtime.objects.get(entity.value.id)
+    ?? runtime.cameras.get(entity.value.id)
+    ?? runtime.lights.get(entity.value.id)
+  if (!target) return
+  target.updateMatrixWorld(true)
+  const bounds = new THREE.Box3().setFromObject(target)
+  const center = bounds.isEmpty() ? target.getWorldPosition(new THREE.Vector3()) : bounds.getCenter(new THREE.Vector3())
+  const radius = bounds.isEmpty() ? 1 : Math.max(.5, bounds.getBoundingSphere(new THREE.Sphere()).radius)
+  const direction = editorCamera.position.clone().sub(orbit.target)
+  const distance = editorCamera instanceof THREE.PerspectiveCamera
+    ? radius / Math.max(.05, Math.sin(THREE.MathUtils.degToRad(editorCamera.fov) / 2)) * 1.2
+    : Math.max(1, direction.length())
+  orbit.target.copy(center)
+  editorCamera.position.copy(center).add(direction.normalize().multiplyScalar(distance))
+  editorCamera.lookAt(center)
+  orbit.update()
+  renderViewport()
+}
+
+/** Blender's toggle: a gizmo aligned to the world, or to the entity's own axes. */
+const gizmoSpace = ref<'world' | 'local'>('world')
+function toggleGizmoSpace() {
+  gizmoSpace.value = gizmoSpace.value === 'world' ? 'local' : 'world'
+  transform?.setSpace(gizmoSpace.value)
+  renderViewport()
 }
 
 function rememberPickStart(event: PointerEvent) {
+  if (gesture.value) {
+    endGesture(event.button === 0 ? 'confirm' : 'cancel')
+    skipNextPick = true
+    return
+  }
   if (event.button !== 0) {
     pickStart = null
     finishTransformInteraction()
@@ -436,6 +923,7 @@ function rememberPickStart(event: PointerEvent) {
   }
   pickStart = { x: event.clientX, y: event.clientY }
   if (transform && !transform.dragging) transform.axis = null
+  if (beginGizmoDrag(event)) return
   beginPathDrag(event)
 }
 
@@ -495,6 +983,116 @@ function finishPathDrag() {
   if (!pathDrag) return
   if (pathDrag.moved) store.move3DPathPoint(pathDrag.pathId, pathDrag.pointId, pathDrag.target, pathDrag.position)
   pathDrag = null
+  if (orbit) orbit.enabled = true
+  if (transform) transform.enabled = true
+  attachSelection()
+  renderViewport()
+}
+
+/**
+ * Rig bones and influence centres are grabbed the same way path points are: press to select and
+ * drag on a plane facing the camera. They draw with `depthTest: false`, so they get their own hit
+ * pass — what you see in front is what you grab, whatever solid geometry the ray crosses first.
+ */
+function pickGizmoControl(raycaster: THREE.Raycaster) {
+  const groups: THREE.Object3D[] = []
+  runtime?.scene.traverse((object) => {
+    if (object.visible && (object.name.startsWith(RIG_GROUP_PREFIX) || object.name.startsWith(INFLUENCE_GROUP_PREFIX) || object.name.startsWith(SPOT_GROUP_PREFIX))) groups.push(object)
+  })
+  if (!groups.length) return null
+  const hits = raycaster.intersectObjects(groups, true).filter((item) => item.object.visible)
+  // Tips sit on top of shafts, and a bone handle wins over the wider influence knob beneath it.
+  return hits.find((item) => item.object.userData.rigTarget === 'tip')?.object
+    ?? hits.find((item) => item.object.userData.rigTarget === 'head')?.object
+    ?? hits.find((item) => item.object.userData.spotTarget === 'cone-rim')?.object
+    ?? hits.find((item) => item.object.userData.influenceTarget === 'center')?.object
+    ?? null
+}
+
+function beginGizmoDrag(event: PointerEvent) {
+  const scene = selectedScene.value
+  const raycaster = raycasterAt(event.clientX, event.clientY)
+  const control = scene && raycaster && !transform?.dragging ? pickGizmoControl(raycaster) : null
+  const host = control?.parent?.parent
+  if (!scene || !control || !host || !editorCamera) return false
+
+  const worldPosition = control.getWorldPosition(new THREE.Vector3())
+  const plane = new THREE.Plane().setFromNormalAndCoplanarPoint(editorCamera.getWorldDirection(new THREE.Vector3()), worldPosition)
+  const grab = raycaster!.ray.intersectPlane(plane, new THREE.Vector3())
+  if (!grab) return false
+
+  const objectId = control.userData.auroraId as string
+  store.selectSceneEntity(scene.id, objectId)
+  if (control.userData.rigBoneId) store.selectedRigBoneId = control.userData.rigBoneId as string
+  gizmoDrag = {
+    pointerId: event.pointerId,
+    kind: control.userData.spotTarget ? 'spot' : control.userData.rigTarget ? 'rig' : 'influence',
+    objectId,
+    rigId: (control.userData.rigId as string) ?? '',
+    boneId: (control.userData.rigBoneId as string) ?? '',
+    target: (control.userData.rigTarget as 'head' | 'tip') ?? 'head',
+    influenceId: (control.userData.influenceId as string) ?? '',
+    rest: event.shiftKey,
+    host,
+    plane,
+    grabOffset: worldPosition.clone().sub(grab),
+  }
+  skipNextPick = true
+  if (orbit) orbit.enabled = false
+  if (transform) transform.enabled = false
+  store.beginInteractiveEdit()
+  attachSelection()
+  renderViewport()
+  return true
+}
+
+function onGizmoDragMove(event: PointerEvent) {
+  const drag = gizmoDrag
+  if (!drag || event.pointerId !== drag.pointerId) return
+  const raycaster = raycasterAt(event.clientX, event.clientY)
+  const hit = raycaster?.ray.intersectPlane(drag.plane, new THREE.Vector3())
+  if (!hit) return
+  drag.host.updateMatrixWorld(true)
+  const local = drag.host.worldToLocal(hit.add(drag.grabOffset))
+
+  if (drag.kind === 'spot') {
+    const axialDistance = Math.max(.1, -local.z)
+    const radius = Math.hypot(local.x, local.y)
+    // Range is a separate, non-spatial property: dragging the rim must not shorten the throw.
+    store.set3DLightCone('angle', THREE.MathUtils.radToDeg(Math.atan2(radius, axialDistance)))
+    renderViewport()
+    return
+  }
+
+  const object = selectedScene.value?.objects.find((item) => item.id === drag.objectId)
+  if (!object) return
+
+  if (drag.kind === 'influence') {
+    ;([['centerX', local.x], ['centerY', local.y], ['centerZ', local.z]] as const)
+      .forEach(([key, value]) => store.set3DInfluenceParameter(drag.influenceId, key, value))
+    renderViewport()
+    return
+  }
+
+  const rig = rigs.value.find((item) => item.id === drag.rigId)
+  const bone = rig?.bones.find((item) => item.id === drag.boneId)
+  if (!rig || !bone) return
+  const { halfWidth, halfHeight } = planeHalfExtents(object, assetMap.value)
+  const point = { x: local.x / Math.max(1e-4, halfWidth), y: local.y / Math.max(1e-4, halfHeight) }
+  if (drag.rest && drag.target === 'head') store.setRigBoneRest(rig.id, bone.id, { x: point.x, y: point.y })
+  else if (drag.rest) store.setRigBoneRest(rig.id, bone.id, restAimTowards({ x: bone.x, y: bone.y }, point, bone.angle))
+  else if (drag.target === 'head') {
+    const offset = poseOffsetTowards(rig, bone, currentTime.value, point)
+    store.setRigBonePose(rig.id, bone.id, 'offsetX', offset.x)
+    store.setRigBonePose(rig.id, bone.id, 'offsetY', offset.y)
+  } else store.setRigBonePose(rig.id, bone.id, 'rotation', poseRotationTowards(rig, bone, currentTime.value, point))
+  renderViewport()
+}
+
+function finishGizmoDrag() {
+  if (!gizmoDrag) return
+  gizmoDrag = null
+  store.endInteractiveEdit()
   if (orbit) orbit.enabled = true
   if (transform) transform.enabled = true
   attachSelection()
@@ -599,6 +1197,11 @@ function finishTransformInteraction() {
 }
 
 function onGlobalPointerEnd(event: PointerEvent) {
+  if (gizmoDrag?.pointerId === event.pointerId) {
+    finishGizmoDrag()
+    requestAnimationFrame(() => { skipNextPick = false })
+    return
+  }
   if (pathDrag?.pointerId === event.pointerId) {
     finishPathDrag()
     requestAnimationFrame(() => { skipNextPick = false })
@@ -615,6 +1218,7 @@ function onGlobalPointerEnd(event: PointerEvent) {
 
 function onWindowBlur() {
   navigationPointerId = null
+  finishGizmoDrag()
   finishPathDrag()
   if (transform) transform.enabled = true
   finishTransformInteraction()
@@ -623,9 +1227,46 @@ function onWindowBlur() {
 
 function onKeydown(event: KeyboardEvent) {
   if ((event.target as HTMLElement)?.matches('input, textarea')) return
-  if (event.key.toLowerCase() === 'g') setTransformMode('translate')
-  if (event.key.toLowerCase() === 'r') setTransformMode('rotate')
-  if (event.key.toLowerCase() === 's') setTransformMode('scale')
+  // A running gesture owns the keyboard: axis letters and digits belong to it, not to the shortcuts.
+  if (gesture.value) {
+    const result = applyGestureKey(gesture.value, event.key, event.shiftKey)
+    if (result.outcome) {
+      event.preventDefault()
+      endGesture(result.outcome)
+      return
+    }
+    if (result.handled) {
+      event.preventDefault()
+      gesture.value = { ...result.state, snap: event.ctrlKey }
+      applyGesture()
+      return
+    }
+    return
+  }
+  if (event.ctrlKey && event.altKey && event.key.toLowerCase() === 'c') {
+    event.preventDefault()
+    alignCameraToView()
+    return
+  }
+  if (event.ctrlKey || event.metaKey || event.altKey) return
+  const modes: Record<string, GestureMode> = { g: 'translate', r: 'rotate', s: 'scale' }
+  const mode = modes[event.key.toLowerCase()]
+  if (mode) {
+    setTransformMode(mode)
+    // The gizmo stays available; the gesture is the keyboard-driven path onto the same transform.
+    if (startGesture(mode)) event.preventDefault()
+    return
+  }
+  if (event.key === '.') {
+    event.preventDefault()
+    frameSelected()
+    return
+  }
+  if (event.key.toLowerCase() === 'z') {
+    // Z toggles Solid, the way Blender's Z-then-2 does; any other mode returns to Solid first.
+    shading.mode = shading.mode === 'solid' ? 'rendered' : 'solid'
+    renderViewport()
+  }
 }
 
 onMounted(async () => {
@@ -633,9 +1274,12 @@ onMounted(async () => {
   if (!canvas.value || !viewport.value) return
   renderer = new THREE.WebGLRenderer({ canvas: canvas.value, antialias: true, alpha: false, powerPreference: 'high-performance' })
   renderer.outputColorSpace = THREE.SRGBColorSpace
+  renderer.toneMapping = THREE.ACESFilmicToneMapping
+  renderer.toneMappingExposure = 1
   renderer.setClearColor('#090b10', 1)
   renderer.shadowMap.enabled = true
   renderer.shadowMap.type = THREE.PCFSoftShadowMap
+  scenePipeline = new AuroraSceneRenderPipeline(renderer)
   perspectiveCamera = new THREE.PerspectiveCamera(48, 1, .1, 2000)
   perspectiveCamera.position.set(7, 5, 8)
   orthographicCamera = new THREE.OrthographicCamera(-5.5, 5.5, 5.5, -5.5, .1, 2000)
@@ -647,7 +1291,7 @@ onMounted(async () => {
   orbit.mouseButtons.RIGHT = THREE.MOUSE.PAN
   orbit.target.set(0, 0, 0)
   orbit.addEventListener('change', () => {
-    enforceAxisView()
+    syncAxisViewLabel()
     renderViewport()
   })
   transform = new TransformControls(editorCamera, canvas.value)
@@ -664,6 +1308,8 @@ onMounted(async () => {
   resizeObserver.observe(viewport.value)
   window.addEventListener('keydown', onKeydown)
   window.addEventListener('pointermove', onPathDragMove)
+  window.addEventListener('pointermove', onGizmoDragMove)
+  window.addEventListener('pointermove', onGesturePointerMove)
   window.addEventListener('pointerup', onGlobalPointerEnd, true)
   window.addEventListener('pointercancel', onGlobalPointerEnd, true)
   window.addEventListener('blur', onWindowBlur)
@@ -671,9 +1317,12 @@ onMounted(async () => {
 })
 
 onBeforeUnmount(() => {
+  if (viewportFrame) cancelAnimationFrame(viewportFrame)
   resizeObserver?.disconnect()
   window.removeEventListener('keydown', onKeydown)
+  window.removeEventListener('pointermove', onGesturePointerMove)
   window.removeEventListener('pointermove', onPathDragMove)
+  window.removeEventListener('pointermove', onGizmoDragMove)
   window.removeEventListener('pointerup', onGlobalPointerEnd, true)
   window.removeEventListener('pointercancel', onGlobalPointerEnd, true)
   window.removeEventListener('blur', onWindowBlur)
@@ -684,6 +1333,10 @@ onBeforeUnmount(() => {
   transform?.dispose()
   transform = null
   runtimeRegistry.dispose()
+  scenePipeline?.dispose()
+  scenePipeline = null
+  solidViewport.dispose()
+  viewportModes.dispose()
   renderer?.dispose()
   renderer = null
   editorCamera = null
@@ -691,7 +1344,7 @@ onBeforeUnmount(() => {
   orthographicCamera = null
 })
 
-watch([selectedLayer, selectedScene, currentTime, selectedSceneEntityId, assets], renderViewport, { deep: true })
+watch([selectedLayer, selectedScene, currentTime, selectedSceneEntityId, assets, rigs], renderViewport, { deep: true })
 </script>
 
 <template>
@@ -701,9 +1354,15 @@ watch([selectedLayer, selectedScene, currentTime, selectedSceneEntityId, assets]
         <IconButton :icon="Move3D" label="Move (G)" :active="transformMode === 'translate'" @click="setTransformMode('translate')" />
         <IconButton :icon="Rotate3D" label="Rotate (R)" :active="transformMode === 'rotate'" @click="setTransformMode('rotate')" />
         <IconButton :icon="Scaling" label="Scale (S)" :active="transformMode === 'scale'" @click="setTransformMode('scale')" />
+        <button type="button" class="view-button" :class="{ active: gizmoSpace === 'local' }" :aria-pressed="gizmoSpace === 'local'" :title="gizmoSpace === 'local' ? 'Gizmo follows the entity own axes · click for world axes' : 'Gizmo follows the world axes · click for the entity own axes'" @click="toggleGizmoSpace">{{ gizmoSpace === 'local' ? 'Local' : 'Global' }}</button>
       </div>
       <span class="toolbar-divider" />
-      <button v-for="view in (['Perspective', 'Front', 'Right', 'Top'] as const)" :key="view" type="button" class="view-button" :title="view === 'Perspective' ? 'Switch to perspective view' : `Switch to exact ${view.toLowerCase()} orthographic view`" @click="setCameraView(view)">{{ view }}</button>
+      <IconButton :icon="Camera" :label="cameraAlignLabel" :disabled="!selectedCamera || cameraAlignBlocked" @click="alignCameraToView" />
+      <span class="toolbar-divider" />
+      <button v-for="view in (['Perspective', 'Front', 'Right', 'Top'] as const)" :key="view" type="button" class="view-button" :class="{ active: cameraView === view }" :aria-pressed="cameraView === view" :title="view === 'Perspective' ? 'Switch to perspective view' : `Snap to an exact ${view.toLowerCase()} orthographic view · orbiting from it leaves a free user view`" @click="setCameraView(view)">{{ view }}</button>
+      <span class="toolbar-divider" />
+      <button v-for="shade in shadingModes" :key="shade.id" type="button" class="view-button" :class="{ active: shading.mode === shade.id }" :title="shade.title" :aria-pressed="shading.mode === shade.id" @click="shading.mode = shade.id; renderViewport()">{{ shade.label }}</button>
+      <button type="button" class="view-button" :class="{ active: shading.wireOverlay }" title="Wireframe overlay: draw mesh edges on top of any shading mode" :aria-pressed="shading.wireOverlay" @click="shading.wireOverlay = !shading.wireOverlay; renderViewport()"><Grid3X3 :size="10" /></button>
       <template v-if="selectedPath">
         <span class="toolbar-divider" />
         <span class="path-label"><Spline :size="11" :style="{ color: selectedPath.color }" /> {{ selectedPath.name }}</span>
@@ -725,9 +1384,10 @@ watch([selectedLayer, selectedScene, currentTime, selectedSceneEntityId, assets]
         <small>Create a scene here. It will also be saved in the Library so it can be reused like a cluster.</small>
         <button type="button" @click="store.create3DSceneFromWorkspace()"><Plus :size="12" /> Create 3D scene</button>
       </div>
-      <div class="viewport-badge"><View :size="10" /> {{ cameraView }}{{ cameraView === 'Perspective' ? '' : ' · Orthographic' }}</div>
+      <div class="viewport-badge"><View :size="10" /> {{ cameraView }}{{ cameraView === 'Perspective' ? '' : ' · Orthographic' }} · {{ shadingModes.find((shade) => shade.id === shading.mode)?.label ?? 'Rendered' }}{{ shading.wireOverlay ? ' + Wire' : '' }}</div>
       <div class="viewport-axis"><span class="x">X</span><span class="y">Y</span><span class="z">Z</span></div>
-      <div class="viewport-help">{{ selectedPath ? 'Click an anchor or handle to edit it · drag with the gizmo · G/R/S: transform' : 'Orbit: left-drag · Pan: middle-drag · Zoom: wheel · G/R/S: transform' }}</div>
+      <div v-if="gestureStatus" class="viewport-gesture">{{ gestureStatus }}<small>click or Enter to confirm · Esc to cancel · X/Y/Z axis · Shift+axis plane · Ctrl snap · type a number</small></div>
+      <div class="viewport-help">{{ viewportHelp }}</div>
     </div>
 
     <footer class="three-status">
@@ -749,4 +1409,6 @@ watch([selectedLayer, selectedScene, currentTime, selectedSceneEntityId, assets]
 .three-viewport { position: relative; min-height: 0; flex: 1; overflow: hidden; background: #090b10; }.three-viewport canvas { display: block; width: 100%; height: 100%; outline: none; touch-action: none; }.viewport-badge, .viewport-help { position: absolute; padding: 4px 6px; color: #858b99; background: rgb(12 14 20 / .78); border: 1px solid #292d37; border-radius: 3px; font-size: 7.5px; pointer-events: none; backdrop-filter: blur(4px); }.viewport-badge { top: 8px; left: 9px; display: flex; align-items: center; gap: 4px; }.viewport-help { right: 9px; bottom: 8px; }.viewport-axis { position: absolute; top: 9px; right: 10px; display: flex; gap: 3px; font-size: 7px; font-weight: 700; }.viewport-axis span { display: grid; width: 15px; height: 15px; place-items: center; color: #eef0f8; background: #252a35; border: 1px solid #3a404d; border-radius: 50%; }.viewport-axis .x { color: #ff9ca8; }.viewport-axis .y { color: #8bd5ad; }.viewport-axis .z { color: #91adff; }
 .scene-empty-state { position: absolute; top: 50%; left: 50%; display: flex; width: min(330px, calc(100% - 40px)); flex-direction: column; align-items: center; gap: 7px; padding: 18px; color: var(--text-muted); text-align: center; background: rgb(18 21 29 / .92); border: 1px solid #343948; border-radius: 5px; box-shadow: 0 16px 40px rgb(0 0 0 / .35); transform: translate(-50%, -50%); }.scene-empty-state > span { display: grid; width: 38px; height: 38px; place-items: center; color: #cbd3ff; background: #262d48; border: 1px solid #586593; border-radius: 4px; }.scene-empty-state strong { color: var(--text-primary); font-size: 11px; }.scene-empty-state small { max-width: 260px; font-size: 8.5px; line-height: 1.5; }.scene-empty-state button { display: inline-flex; height: 27px; align-items: center; gap: 5px; margin-top: 2px; padding: 0 9px; color: #11131a; background: var(--button-accent); border: 1px solid #a8b2ff; border-radius: 4px; font: inherit; font-size: 9px; font-weight: 650; cursor: pointer; }.scene-empty-state button:hover { background: var(--button-accent-hover); }
 .three-status { display: flex; height: 27px; flex: 0 0 auto; align-items: center; gap: 10px; padding: 0 8px; color: var(--text-muted); background: #111319; border-top: 1px solid var(--border-subtle); font-size: 7.5px; }.three-status span { display: flex; align-items: center; gap: 4px; white-space: nowrap; }.three-status .status-spacer { flex: 1; }.three-status strong { color: #7eb89f; font-size: 7px; letter-spacing: .08em; }.three-status strong.playing { color: #c3cafd; }
+.viewport-gesture { position: absolute; top: 50%; left: 50%; z-index: 4; display: flex; flex-direction: column; gap: 3px; padding: 6px 10px; color: #f2f5ff; font-size: 10px; font-variant-numeric: tabular-nums; background: rgb(16 20 32 / .92); border: 1px solid var(--accent-border); border-radius: 4px; transform: translate(-50%, -50%); pointer-events: none; }
+.viewport-gesture small { color: var(--text-muted); font-size: 8px; }
 </style>

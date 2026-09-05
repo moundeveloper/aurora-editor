@@ -59,6 +59,46 @@ export const vaultInfoSchema = z.object({
 })
 export type VaultInfo = z.infer<typeof vaultInfoSchema>
 
+/**
+ * Project files deliberately validate the stable envelope here and leave editor entities open.
+ * Their detailed shapes evolve with the project version and are normalised by the editor's
+ * migration layer when loaded. This still rejects malformed project files at the server boundary
+ * without forcing the headless server to duplicate every rendering model.
+ */
+export const editorProjectSchema = z.object({
+  id: z.string().min(1).max(128).regex(/^[a-zA-Z0-9_-]+$/),
+  name: z.string().min(1).max(256),
+  width: z.number().int().positive(),
+  height: z.number().int().positive(),
+  frameRate: z.number().positive(),
+  duration: z.number().positive(),
+  backgroundColor: z.string().min(1).max(64),
+  updatedAt: z.number().int().nonnegative(),
+  version: z.number().int().positive(),
+  markers: z.array(z.object({
+    id: z.string().min(1).max(256),
+    name: z.string().min(1).max(120),
+    time: z.number().nonnegative(),
+    color: z.string().regex(/^#[0-9a-fA-F]{6}$/),
+  })).default([]),
+})
+export type SharedEditorProject = z.infer<typeof editorProjectSchema>
+
+const editorEntitySchema = z.record(z.string(), z.unknown())
+export const serializedProjectSchema = z.object({
+  project: editorProjectSchema,
+  layers: z.array(editorEntitySchema),
+  scenes3D: z.array(editorEntitySchema),
+  assets: z.array(editorEntitySchema),
+  nodes: z.array(editorEntitySchema),
+  nodeConnections: z.array(editorEntitySchema),
+  rigs: z.array(editorEntitySchema).default([]),
+})
+export type SharedSerializedProject = z.infer<typeof serializedProjectSchema>
+
+export const projectListSchema = z.object({ projects: z.array(editorProjectSchema) })
+export type ProjectList = z.infer<typeof projectListSchema>
+
 /** Extensions the importer recognises, and the kind each maps to. */
 export const EXTENSION_KINDS: Readonly<Record<string, MediaKind>> = Object.freeze({
   mp4: 'video', mov: 'video', mkv: 'video', webm: 'video', avi: 'video', m4v: 'video',

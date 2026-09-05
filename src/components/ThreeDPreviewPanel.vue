@@ -6,18 +6,28 @@ import * as THREE from 'three'
 import { useEditorStore } from '@/stores/editor'
 import { ThreeSceneRuntimeRegistry } from '@/engine/scene3d/ThreeSceneRuntime'
 import { cameraIdAtTime } from '@/engine/scene3d/cameraCuts'
+import { cameraLensAtTime } from '@/engine/scene3d/cameraLens'
+import { AuroraSceneRenderPipeline } from '@/engine/rendering/AuroraSceneRenderPipeline'
+import { AuroraSolidViewport } from '@/engine/rendering/AuroraSolidViewport'
+import { AuroraViewportModes, beginViewportShadingPass } from '@/engine/rendering/AuroraViewportModes'
+import { useViewportShading } from '@/composables/useViewportShading'
 import MSelect, { type MSelectOption } from './common/MSelect.vue'
 
 const store = useEditorStore()
-const { selectedLayer, selectedScene, currentTime, assets, project } = storeToRefs(store)
+const { selectedLayer, selectedScene, currentTime, assets, project, rigs } = storeToRefs(store)
 const viewport = ref<HTMLElement>()
 const canvas = ref<HTMLCanvasElement>()
 const renderError = ref(false)
 const cameraChoice = ref('')
 const followCuts = ref(true)
 const runtimeRegistry = new ThreeSceneRuntimeRegistry(() => renderPreview())
+const shading = useViewportShading()
+const solidViewport = new AuroraSolidViewport()
+const viewportModes = new AuroraViewportModes()
 let renderer: THREE.WebGLRenderer | null = null
+let scenePipeline: AuroraSceneRenderPipeline | null = null
 let resizeObserver: ResizeObserver | null = null
+let previewFrame = 0
 
 const previewCamera = computed(() => {
   const scene = selectedScene.value
@@ -48,7 +58,7 @@ function toggleFollowCuts() {
   syncProgramCamera()
 }
 
-function renderPreview() {
+function renderPreviewNow() {
   const sceneDefinition = selectedScene.value
   const cameraDefinition = previewCamera.value
   const host = viewport.value
@@ -59,16 +69,41 @@ function renderPreview() {
     const height = surface.clientHeight
     renderer.setSize(width, height, false)
     renderer.setClearColor(sceneDefinition.settings.backgroundColor ?? '#090b10', 1)
-    renderer.shadowMap.enabled = sceneDefinition.settings.shadows
-    const runtime = runtimeRegistry.get(sceneDefinition, width, height, currentTime.value, assets.value)
+    const runtime = runtimeRegistry.get(sceneDefinition, width, height, currentTime.value, assets.value, rigs.value)
     runtime.root.visible = selectedLayer.value?.visible !== false
     const camera = runtime.cameras.get(cameraDefinition.id)
     if (!camera) return
-    renderer.render(runtime.scene, camera)
+    // Follow the workspace's shading mode so the camera preview matches Solid / Rendered / etc.
+    const pass = beginViewportShadingPass({
+      mode: shading.mode,
+      wireOverlay: shading.wireOverlay,
+      scene: runtime.scene,
+      root: runtime.root,
+      camera,
+      baseSettings: sceneDefinition.settings,
+      solidViewport,
+      viewportModes,
+    })
+    renderer.shadowMap.enabled = pass.shadowsEnabled
+    // Depth of field belongs to the photoreal look; the non-photoreal passes read as design views.
+    const lens = shading.mode === 'rendered' ? cameraLensAtTime(cameraDefinition, currentTime.value) : null
+    try {
+      scenePipeline?.render(runtime.scene, camera, pass.settings, width, height, 'screen', lens)
+    } finally {
+      pass.restore()
+    }
     renderError.value = false
   } catch {
     renderError.value = true
   }
+}
+
+function renderPreview() {
+  if (previewFrame) return
+  previewFrame = requestAnimationFrame(() => {
+    previewFrame = 0
+    renderPreviewNow()
+  })
 }
 
 onMounted(async () => {
@@ -77,8 +112,11 @@ onMounted(async () => {
   try {
     renderer = new THREE.WebGLRenderer({ canvas: canvas.value, antialias: true, alpha: false, powerPreference: 'high-performance' })
     renderer.outputColorSpace = THREE.SRGBColorSpace
+    renderer.toneMapping = THREE.ACESFilmicToneMapping
+    renderer.toneMappingExposure = 1
     renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.5))
     renderer.shadowMap.type = THREE.PCFSoftShadowMap
+    scenePipeline = new AuroraSceneRenderPipeline(renderer)
     resizeObserver = new ResizeObserver(renderPreview)
     resizeObserver.observe(viewport.value)
     renderPreview()
@@ -88,17 +126,23 @@ onMounted(async () => {
 })
 
 onBeforeUnmount(() => {
+  if (previewFrame) cancelAnimationFrame(previewFrame)
   resizeObserver?.disconnect()
   runtimeRegistry.dispose()
+  scenePipeline?.dispose()
+  scenePipeline = null
+  solidViewport.dispose()
+  viewportModes.dispose()
   renderer?.dispose()
   renderer = null
 })
 
-watch([selectedLayer, selectedScene, currentTime, assets, project], () => {
+watch([selectedLayer, selectedScene, currentTime, assets, project, rigs], () => {
   syncProgramCamera()
   renderPreview()
 }, { deep: true, immediate: true })
 watch(cameraChoice, renderPreview)
+watch(() => [shading.mode, shading.wireOverlay], renderPreview)
 watch(() => selectedScene.value?.cameras.map((camera) => camera.id), (cameraIds) => {
   if (!cameraIds?.includes(cameraChoice.value)) {
     followCuts.value = true
