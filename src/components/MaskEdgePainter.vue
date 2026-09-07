@@ -2,6 +2,8 @@
 import { computed, ref } from 'vue'
 import type { EditorLayer } from '@/models/editor'
 import { shapeOutline } from '@/engine/shapes/shapeGeometry'
+import { useEditorStore } from '@/stores/editor'
+const store = useEditorStore()
 
 const props = defineProps<{ shape: EditorLayer; segmentFeather: number[]; selected: number | null }>()
 const emit = defineEmits<{ 'update:selected': [value: number | null]; feather: [segment: number, value: number] }>()
@@ -13,7 +15,7 @@ let dragging: number | null = null
 
 /** Outline in view space, plus the scale used to get there so feather widths can be drawn to size. */
 const outline = computed(() => {
-  const source = shapeOutline(props.shape, 16)
+  const source = shapeOutline(props.shape, 16, store.currentTime)
   if (!source.points.length) return null
   const xs = source.points.map((point) => point[0])
   const ys = source.points.map((point) => point[1])

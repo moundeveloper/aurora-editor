@@ -1,0 +1,80 @@
+<!doctype html><meta charset="utf-8"><title>Renderer regression checks</title>
+<style>body{background:#181b22;color:white;font:14px system-ui}canvas{border:1px solid #555;margin:6px}pre{white-space:pre-wrap}</style>
+<button id="run">Run renderer checks</button><pre id="result">Ready</pre><div id="frames"></div>
+<script type="module">
+import { HybridWebGLRenderBackend } from '/src/engine/rendering/HybridWebGLRenderBackend.ts'
+import { createDemo3DScene, createPrimitiveObject, numericProperty } from '/src/engine/scene3d/sceneFactory.ts'
+const p=(id,value)=>numericProperty(id,value)
+const transform=()=>({x:p('x',160),y:p('y',90),scaleX:p('sx',100),scaleY:p('sy',100),rotation:p('rotation',0),opacity:p('opacity',100)})
+document.querySelector('#run').onclick=async()=>{
+  const results=[],canvas=document.createElement('canvas'),backend=new HybridWebGLRenderBackend(canvas,'')
+  const check=(name,pass)=>{results.push({name,pass});if(!pass)throw new Error(name)}
+  try{
+    const project={id:'browser-check',name:'Renderer checks',width:320,height:180,frameRate:30,duration:3,backgroundColor:'#000000',version:1,updatedAt:0}
+    const scene=createDemo3DScene(),cube=createPrimitiveObject('box',1)
+    for(const axis of ['x','y','z']){cube.transform.position[axis].value=0;cube.transform.rotation[axis].value=0;cube.transform.scale[axis].value=1}
+    cube.material.emissive='#000000';cube.material.baseColor='#ffffff';cube.material.metalness.value=0
+    scene.objects=[cube];scene.environmentIntensity=0;scene.backgroundColor='#000000';scene.settings.motionBlur=false;scene.settings.ambientOcclusion=false
+    const camera=scene.cameras[0];camera.projection='perspective';scene.activeCameraId=camera.id;scene.cameraCuts=[]
+    for(const axis of ['x','y','z']){camera.transform.position[axis].keyframes=[];camera.transform.position[axis].animated=false;camera.transform.position[axis].value=axis==='z'?8:0;camera.transform.rotation[axis].keyframes=[];camera.transform.rotation[axis].animated=false;camera.transform.rotation[axis].value=0}
+    camera.pathConstraint=undefined;camera.objectConstraint=undefined
+    const light=scene.lights.find(item=>item.type==='directional') ?? scene.lights[0]
+    light.type='directional';light.visible=true;light.intensity=p('light-intensity',4);light.color='#ffffff'
+    for(const axis of ['x','y','z']){light.transform.rotation[axis]=p('light-rotation-'+axis,0);light.transform.position[axis]=p('light-position-'+axis,axis==='z'?5:0)}
+    scene.lights=[light]
+    const sceneLayer={id:'scene-layer',name:'Scene',type:'3d-scene',sceneId:scene.id,start:0,duration:3,visible:true,locked:false,color:'#fff',effects:[],transform:transform()}
+    const request={project,layers:[sceneLayer],scenes3D:[scene],assets:[],nodes:[],time:0,width:320,height:180,quality:'full'}
+    const render=async(label)=>{
+      await backend.renderFrame(request)
+      const frame=backend.readPixels(),preview=document.createElement('canvas');preview.width=frame.width;preview.height=frame.height;preview.title=label
+      preview.getContext('2d').putImageData(new ImageData(frame.data,frame.width,frame.height),0,0);document.querySelector('#frames').append(preview)
+      return frame.data.reduce((sum,value,i)=>sum+(i%4===3?0:value),0)
+    }
+    const lit=await render('Lit cube')
+    check('3D image contains visible pixels',lit>10000)
+    cube.lightLink={mode:'include',ids:[]}
+    const unlit=await render('No linked lights')
+    check('Excluded direct light stops illuminating the cube',unlit<lit*.1)
+    cube.lightLink.ids=[light.id]
+    const restored=await render('Linked light restored')
+    check('Including the light restores illumination',Math.abs(restored-lit)<lit*.02)
+    for (const view of ['agx','neutral','standard','aces']) {
+      scene.settings.viewTransform=view;scene.settings.exposureStops=-3
+      const low=await render(view+' low exposure')
+      scene.settings.exposureStops=0
+      const normal=await render(view+' normal exposure')
+      check(view+' display transform responds to exposure',normal>low*1.1 && low>1000)
+    }
+    scene.settings.workingColorSpace='linear-display-p3'
+    const wide=await render('Linear P3 lighting')
+    check('Linear P3 keeps neutral lighting consistent',Math.abs(wide-lit)<lit*.03)
+    scene.settings.workingColorSpace='linear-srgb'
+    const narrow=await render('Return to linear sRGB')
+    check('Working-space switches restore shared renderer state',Math.abs(narrow-lit)<lit*.02)
+    const swatch=document.createElement('canvas');swatch.width=4;swatch.height=4
+    const ctx=swatch.getContext('2d');ctx.fillStyle='#ff8040';ctx.fillRect(0,0,4,4)
+    request.assets=[{id:'color-map',kind:'texture',name:'Color swatch',thumbnail:swatch.toDataURL()}]
+    cube.material.maps={map:'color-map'}
+    const textureSRGB=await render('sRGB color texture')
+    scene.settings.workingColorSpace='linear-display-p3'
+    const textureP3=await render('Color texture converted to linear P3')
+    check('Color textures render in linear P3',textureP3>10000 && Math.abs(textureP3-textureSRGB)<textureSRGB*.08)
+    scene.settings.ambientOcclusion=true;camera.depthOfField=true
+    camera.focusDistance=p('focus',8);camera.fStop=p('fstop',5.6)
+    check('P3 survives AO and depth-of-field post-processing',await render('P3 post-processing')>10000)
+    scene.settings.motionBlur=true;scene.settings.motionBlurSamples=4;sceneLayer.motionBlur=true
+    request.time=.5
+    check('P3 survives motion-blur accumulation',await render('P3 motion blur')>10000)
+    const text={id:'text',name:'Aurora',textContent:'AURORA',type:'text',start:0,duration:3,visible:true,locked:false,color:'#fff',effects:[],transform:transform(),textSize:32}
+    const defaults={start:0,end:100,progress:0,stagger:.1,x:0,y:20,rotation:0,opacity:0}
+    text.textAnimators=[{id:'animator',enabled:true,unit:'character',color:'#ffffff',parameters:Object.fromEntries(Object.entries(defaults).map(([key,value])=>[key,p('text-'+key,value)]))}]
+    request.layers=[text];request.scenes3D=[]
+    const hidden=await render('Text before reveal')
+    text.textAnimators[0].parameters.progress.value=1
+    const revealed=await render('Text revealed')
+    check('Text animator reveals glyphs',revealed>10000 && hidden<revealed*.01)
+    document.querySelector('#result').textContent='PASS\n'+JSON.stringify(results,null,2)
+  }catch(error){document.querySelector('#result').textContent='FAIL\n'+error.stack+'\n'+JSON.stringify(results,null,2)}
+  finally{await backend.dispose()}
+}
+</script>

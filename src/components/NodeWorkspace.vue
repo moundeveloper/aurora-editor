@@ -13,6 +13,7 @@ import {
   socketOffsetY, socketPosition,
 } from '@/engine/nodes/nodeGraph'
 import { contributingNodeIds, evaluateNodeGraph } from '@/engine/nodes/evaluateGraph'
+import {groupNodes,insertReroute,captureNodePreset,instantiateNodePreset,type NodePreset} from '@/engine/nodes/nodeEditing'
 import type { EditorNode, EditorNodeKind, EditorNodeSocket } from '@/models/editor'
 import IconButton from './common/IconButton.vue'
 import NumberField from './common/NumberField.vue'
@@ -26,10 +27,23 @@ const { nodes, nodeConnections, selectedNodeId, selectedConnectionId, renderRoot
 const canvas = ref<HTMLElement>()
 const query = ref('')
 const addMenu = ref(false)
+const selectedNodes = ref<string[]>([]), toolName = ref(''), presets = ref<NodePreset[]>([]), presetId = ref(''), toolMessage = ref('')
+const selectedIds = computed(()=>[...new Set([...selectedNodes.value,...(selectedNodeId.value?[selectedNodeId.value]:[])])].filter(id=>nodes.value.some(node=>node.id===id)))
+const backdrops = computed(()=>nodes.value.filter(node=>node.kind==='backdrop'))
+const ordinaryNodes = computed(()=>nodes.value.filter(node=>node.kind!=='backdrop'))
+function createGroup() {const group=groupNodes(nodes.value,selectedIds.value,toolName.value);if(group){store.markChanged();selectedNodes.value=[group.id];store.selectNode(group.id)}}
+function ungroup() {for(const node of nodes.value)if(selectedIds.value.includes(node.id))delete node.groupId;store.markChanged()}
+function reroute() {const node=insertReroute(nodes.value,nodeConnections.value,selectedConnectionId.value ?? '');if(node){store.markChanged();store.selectNode(node.id)}}
+function savePreset() {
+  try{const preset=captureNodePreset(nodes.value,nodeConnections.value,selectedIds.value,toolName.value);if(!preset.nodes.length)return;presets.value.push(preset);localStorage.setItem('aurora-node-presets',JSON.stringify(presets.value));presetId.value=preset.id;toolMessage.value='Preset saved on this device.'}
+  catch(error){toolMessage.value=String(error)}
+}
+function addPreset() {const preset=presets.value.find(item=>item.id===presetId.value);if(!preset)return;const copy=instantiateNodePreset(preset,100-view.value.x/view.value.zoom,100-view.value.y/view.value.zoom);nodes.value.push(...copy.nodes);nodeConnections.value.push(...copy.connections);selectedNodes.value=copy.nodes.map(node=>node.id);store.markChanged()}
 const view = ref({ x: 60, y: 40, zoom: 1 })
 let resizeObserver: ResizeObserver | null = null
 
 const kindIcons: Record<EditorNodeKind, unknown> = {
+  reroute:Circle,backdrop:Layers,
   image: Image, text: Type, scene3d: Box,
   translate: Move, rotate: RotateCw, scale: Scaling,
   blur: Sparkles, glow: Sun, vignette: Aperture,
@@ -39,7 +53,7 @@ const kindIcons: Record<EditorNodeKind, unknown> = {
   output: Play, viewer: Eye,
 }
 
-interface NodeDragState { pointerId: number; nodeId: string; offsetX: number; offsetY: number }
+interface NodeDragState { pointerId: number; nodeId: string; offsetX: number; offsetY: number; members: {id:string;x:number;y:number}[]; originX:number;originY:number }
 interface PanState { pointerId: number; startX: number; startY: number; originX: number; originY: number }
 interface LinkDragState {
   pointerId: number
@@ -184,11 +198,12 @@ function frameSelected() {
 
 function beginPan(event: PointerEvent) {
   const target = event.target as HTMLElement
-  const onBackground = !target.closest('.graph-node, .node-menu')
+  const onBackground = !target.closest('.graph-node, .graph-backdrop, .node-menu')
   if (event.button !== 1 && !(event.button === 0 && onBackground)) return
   event.preventDefault()
   if (event.button === 0 && onBackground) {
     store.selectNode(null)
+    selectedNodes.value=[]
     store.selectNodeConnection(null)
     addMenu.value = false
   }
@@ -199,9 +214,17 @@ function beginNodeDrag(event: PointerEvent, node: EditorNode) {
   if (event.button !== 0) return
   event.preventDefault()
   event.stopPropagation()
+  if(event.shiftKey || event.ctrlKey || event.metaKey) {
+    const previous=selectedIds.value
+    selectedNodes.value=previous.includes(node.id)?previous.filter(id=>id!==node.id):[...previous,node.id]
+    store.selectNode(selectedNodes.value.at(-1) ?? null);return
+  }
+  if(!selectedIds.value.includes(node.id))selectedNodes.value=[node.id]
   store.selectNode(node.id)
   const point = graphPoint(event.clientX, event.clientY)
-  nodeDrag.value = { pointerId: event.pointerId, nodeId: node.id, offsetX: point.x - node.x, offsetY: point.y - node.y }
+  const ids=new Set(selectedIds.value)
+  for(const item of nodes.value)if(item.groupId && ids.has(item.groupId))ids.add(item.id)
+  nodeDrag.value = { pointerId: event.pointerId, nodeId: node.id, offsetX: point.x - node.x, offsetY: point.y - node.y,originX:node.x,originY:node.y,members:nodes.value.filter(item=>ids.has(item.id)).map(item=>({id:item.id,x:item.x,y:item.y})) }
 }
 
 function beginLinkDrag(event: PointerEvent, node: EditorNode, socket: EditorNodeSocket) {
@@ -250,7 +273,8 @@ function onPointerMove(event: PointerEvent) {
   const drag = nodeDrag.value
   if (drag && drag.pointerId === event.pointerId) {
     const point = graphPoint(event.clientX, event.clientY)
-    store.moveNode(drag.nodeId, point.x - drag.offsetX, point.y - drag.offsetY)
+    const dx=point.x-drag.offsetX-drag.originX,dy=point.y-drag.offsetY-drag.originY
+    for(const member of drag.members){const node=nodeById.value.get(member.id);if(node){node.x=Math.round(member.x+dx);node.y=Math.round(member.y+dy)}}
     return
   }
   const link = linkDrag.value
@@ -264,7 +288,7 @@ function onPointerMove(event: PointerEvent) {
 
 function onPointerUp(event: PointerEvent) {
   if (panState.value?.pointerId === event.pointerId) panState.value = null
-  if (nodeDrag.value?.pointerId === event.pointerId) nodeDrag.value = null
+  if (nodeDrag.value?.pointerId === event.pointerId) {nodeDrag.value = null;store.markChanged()}
   const link = linkDrag.value
   if (link?.pointerId === event.pointerId) {
     if (link.hover) store.connectNodes({ fromNodeId: link.fromNodeId, fromPortId: link.fromPortId, toNodeId: link.hover.nodeId, toPortId: link.hover.portId })
@@ -310,6 +334,7 @@ function toggleViewer(node: EditorNode) {
 }
 
 onMounted(async () => {
+  try{const saved=JSON.parse(localStorage.getItem('aurora-node-presets') ?? '[]');if(Array.isArray(saved))presets.value=saved.filter(preset=>typeof preset.id==='string' && Array.isArray(preset.nodes) && Array.isArray(preset.connections) && preset.nodes.every((node:EditorNode)=>NODE_DEFINITIONS[node.kind]))}catch{/* Storage may be unavailable. */}
   await nextTick()
   if (canvas.value) {
     resizeObserver = new ResizeObserver(() => undefined)
@@ -335,6 +360,13 @@ onBeforeUnmount(() => {
   <section class="node-workspace">
     <div class="node-toolbar">
       <button class="add-node-button" type="button" @click="addMenu = !addMenu"><Plus :size="13" /> Add Node</button>
+      <details class="node-tools"><summary>Groups & presets</summary><div>
+        <small>Shift-click node headers to select several nodes.</small><input v-model="toolName" placeholder="Group or preset name" aria-label="Group or preset name" />
+        <button type="button" :disabled="!selectedIds.length" @click="createGroup">Group selection</button><button type="button" :disabled="!selectedIds.length" @click="ungroup">Ungroup selection</button>
+        <button type="button" :disabled="!selectedConnectionId" @click="reroute">Insert reroute on selected wire</button>
+        <button type="button" :disabled="!selectedIds.length" @click="savePreset">Save selection as preset</button>
+        <MSelect v-model="presetId" :options="presets.map(preset=>({value:preset.id,label:preset.name}))" label="Node preset" /><button type="button" :disabled="!presetId" @click="addPreset">Insert preset</button><span role="status">{{toolMessage}}</span>
+      </div></details>
       <span class="divider" />
       <IconButton :icon="Focus" label="Frame selected" :disabled="!selectedNodeId" @click="frameSelected" />
       <IconButton :icon="Maximize2" label="Fit graph" @click="fitGraph" />
@@ -356,6 +388,10 @@ onBeforeUnmount(() => {
       <div class="node-grid" :style="{ backgroundSize: `${20 * view.zoom}px ${20 * view.zoom}px`, backgroundPosition: `${view.x}px ${view.y}px, ${view.x + 10 * view.zoom}px ${view.y + 10 * view.zoom}px` }" />
 
       <div class="graph-layer" :style="layerStyle">
+        <div v-for="group in backdrops" :key="group.id" class="graph-backdrop" :class="{selected:selectedIds.includes(group.id)}" :style="{left:`${group.x}px`,top:`${group.y}px`,width:`${Math.max(200,Number(group.properties.width)||440)}px`,height:`${Math.max(100,Number(group.properties.height)||300)}px`,borderColor:group.properties.color||'#68729a'}">
+          <header @pointerdown="beginNodeDrag($event,group)"><input v-model="group.title" aria-label="Node group name" @pointerdown.stop @change="store.markChanged()" /><input v-model="group.properties.color" type="color" aria-label="Node group color" @pointerdown.stop @input="store.markChanged()" /><button type="button" @click="store.deleteNode(group.id)">Ungroup</button></header>
+          <textarea v-model="group.properties.note" aria-label="Backdrop note" placeholder="Add a note…" @pointerdown.stop @change="store.markChanged()" />
+        </div>
         <svg class="connections" aria-hidden="true">
           <path
             v-for="wire in wires"
@@ -369,11 +405,11 @@ onBeforeUnmount(() => {
         </svg>
 
         <div
-          v-for="node in nodes"
+          v-for="node in ordinaryNodes"
           :key="node.id"
           class="graph-node"
           :class="{
-            selected: selectedNodeId === node.id,
+            selected: selectedIds.includes(node.id),
             dimmed: matchedNodeIds && !matchedNodeIds.has(node.id),
             inert: !contributing.has(node.id),
             muted: node.muted,
@@ -463,6 +499,7 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
+.node-tools{position:relative;font-size:10px}.node-tools summary{cursor:pointer;white-space:nowrap}.node-tools>div{position:absolute;z-index:100;top:25px;left:0;width:230px;padding:10px;display:grid;gap:7px;background:#20242e;border:1px solid #4c5364;box-shadow:0 8px 30px #0008}.node-tools input,.node-tools button{min-width:0;padding:5px;color:var(--text-secondary);background:var(--bg-input);border:1px solid var(--border-strong);font:inherit}.graph-backdrop{position:absolute;background:#242b3b66;border:2px solid;border-radius:7px}.graph-backdrop.selected{box-shadow:0 0 0 2px #c6d0ff}.graph-backdrop header{display:flex;align-items:center;gap:6px;height:28px;padding:3px 8px;background:#30394c;cursor:grab}.graph-backdrop input:not([type=color]){flex:1;min-width:0;background:transparent;color:#e3e9fa;border:0;font-size:11px}.graph-backdrop input[type=color]{width:23px;height:22px;border:0;padding:0}.graph-backdrop button{font-size:9px;color:#dce3f2;background:#252b39;border:1px solid #69738a}.graph-backdrop textarea{display:block;width:calc(100% - 16px);height:33px;resize:none;margin:5px 8px;background:transparent;border:0;color:#c5cee0;font-size:10px}
 .node-workspace { display: flex; height: 100%; min-height: 0; flex-direction: column; background: #0d0f13; }.node-toolbar { display: flex; height: 34px; flex: 0 0 auto; align-items: center; gap: 3px; padding: 0 7px; background: var(--bg-panel-alt); border-bottom: 1px solid var(--border-subtle); }.add-node-button { display: flex; height: 25px; align-items: center; gap: 4px; padding: 0 7px; color: #dbe1ff; background: var(--bg-selected); border: 1px solid var(--accent-border); border-radius: 4px; font: inherit; font-size: 9.5px; cursor: pointer; }.divider { width: 1px; height: 20px; margin: 0 3px; background: var(--border-subtle); }.toolbar-spacer { flex: 1; }.zoom-label { min-width: 32px; color: var(--text-muted); font-size: 8.5px; text-align: center; font-variant-numeric: tabular-nums; }.node-search { display: flex; width: 116px; height: 24px; align-items: center; gap: 5px; padding: 0 6px; color: var(--text-muted); background: var(--bg-input); border: 1px solid var(--border-strong); border-radius: 3px; }.node-search input { width: 100%; min-width: 0; color: var(--text-primary); background: transparent; border: 0; outline: 0; font: inherit; font-size: 9px; }.render-summary { padding: 0 6px; color: #7ee0c0; font-size: 8px; white-space: nowrap; }.render-summary.empty { color: #c98d8d; }
 .node-canvas { position: relative; min-height: 0; flex: 1; overflow: hidden; cursor: grab; touch-action: none; }.node-canvas.panning { cursor: grabbing; }.node-canvas.linking { cursor: crosshair; }.node-grid { position: absolute; inset: 0; background-color: #0c0e12; background-image: radial-gradient(#272b34 1px, transparent 1px), radial-gradient(#181b21 1px, transparent 1px); }.graph-layer { position: absolute; top: 0; left: 0; transform-origin: 0 0; }.connections { position: absolute; top: 0; left: 0; width: 1px; height: 1px; overflow: visible; }.connections path { fill: none; stroke-width: 2; cursor: pointer; pointer-events: stroke; }.connections path:hover { stroke-width: 3; }.connections path.selected { stroke: #e3ae72 !important; stroke-width: 3; }.connections path.pending { stroke-dasharray: 5 4; pointer-events: none; opacity: .7; }.connections path.pending.valid { stroke-dasharray: none; opacity: 1; }
 .graph-node { --node-color: #7b84b8; position: absolute; z-index: 2; overflow: visible; color: var(--text-secondary); text-align: left; background: #1b1e26; border: 1px solid #3a3e48; border-radius: 5px; box-shadow: 0 4px 12px rgb(0 0 0 / .35); cursor: grab; user-select: none; }.graph-node:hover { border-color: #666c7b; }.graph-node.selected { z-index: 5; border-color: #e0e5ff; box-shadow: 0 0 0 1px #e0e5ff, 0 7px 18px rgb(0 0 0 / .45); }.graph-node.dimmed { opacity: .3; }.graph-node.inert { opacity: .55; border-style: dashed; }.graph-node.muted { filter: grayscale(.7); }.graph-node.muted .node-header { background: #4a4f5c; }

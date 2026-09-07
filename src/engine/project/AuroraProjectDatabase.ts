@@ -70,12 +70,13 @@ export class AuroraProjectDatabase extends Dexie {
         this.nodeConnections.bulkPut(ordered(snapshot.nodeConnections)),
         this.rigs.bulkPut(ordered(snapshot.rigs ?? [])),
         this.settings.put({ key: 'active-project-id', value: projectId }),
+        this.settings.put({ key: `audio-graph:${projectId}`, value: JSON.stringify(snapshot.audioGraph ?? null) }),
       ])
     })
   }
 
   async loadSnapshot(projectId: string): Promise<SerializedEditorState | null> {
-    return this.transaction('r', [this.projects, this.layers, this.scenes3D, this.assets, this.nodes, this.nodeConnections, this.rigs], async () => {
+    return this.transaction('r', [this.projects, this.layers, this.scenes3D, this.assets, this.nodes, this.nodeConnections, this.rigs, this.settings], async () => {
       const project = await this.projects.get(projectId)
       if (!project) return null
       const [layers, scenes3D, assets, nodes, nodeConnections, rigs] = await Promise.all([
@@ -87,6 +88,7 @@ export class AuroraProjectDatabase extends Dexie {
         this.rigs.where('projectId').equals(projectId).sortBy('order'),
       ])
       return {
+        audioGraph: JSON.parse((await this.settings.get(`audio-graph:${projectId}`))?.value ?? 'null') ?? undefined,
         project,
         layers: layers.map((record) => record.value),
         scenes3D: scenes3D.map((record) => record.value),

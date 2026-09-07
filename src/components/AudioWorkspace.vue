@@ -9,33 +9,7 @@ import { useEditorStore } from '@/stores/editor'
 import MSelect, { type MSelectOption } from './common/MSelect.vue'
 import IconButton from './common/IconButton.vue'
 
-type AudioNodeKind = 'source' | 'gain' | 'eq' | 'compressor' | 'reverb' | 'master'
-
-interface AudioNode {
-  id: string
-  kind: AudioNodeKind
-  title: string
-  x: number
-  y: number
-  bypassed: boolean
-  gain: number
-  pan: number
-  mute: boolean
-  solo: boolean
-  sourceId?: string
-  low?: number
-  mid?: number
-  high?: number
-  threshold?: number
-  ratio?: number
-  attack?: number
-  release?: number
-  mix?: number
-  room?: number
-  limiter?: boolean
-}
-
-interface AudioConnection { id: string; from: string; to: string }
+import type { AudioNodeKind, AudioGraphNode as AudioNode } from '@/engine/audio/audioGraph'
 interface DragState { pointerId: number; id: string; offsetX: number; offsetY: number }
 interface PanState { pointerId: number; startX: number; startY: number; originX: number; originY: number }
 
@@ -61,17 +35,8 @@ const processorOptions: MSelectOption[] = [
   { value: 'reverb', label: 'Room Reverb' },
 ]
 
-const nodes = ref<AudioNode[]>([
-  { id: 'audio-source', kind: 'source', title: 'Deep Signal', x: 20, y: 120, bypassed: false, gain: 0, pan: 0, mute: false, solo: false, sourceId: 'layer-audio' },
-  { id: 'audio-eq', kind: 'eq', title: '3-band EQ', x: 275, y: 70, bypassed: false, gain: 0, pan: 0, mute: false, solo: false, low: 1.5, mid: -1, high: 2 },
-  { id: 'audio-compressor', kind: 'compressor', title: 'Compressor', x: 530, y: 105, bypassed: false, gain: 0, pan: 0, mute: false, solo: false, threshold: -18, ratio: 4, attack: 12, release: 180 },
-  { id: 'audio-master', kind: 'master', title: 'Master Output', x: 790, y: 120, bypassed: false, gain: -1, pan: 0, mute: false, solo: false, limiter: true },
-])
-const connections = ref<AudioConnection[]>([
-  { id: 'audio-link-source-eq', from: 'audio-source', to: 'audio-eq' },
-  { id: 'audio-link-eq-compressor', from: 'audio-eq', to: 'audio-compressor' },
-  { id: 'audio-link-compressor-master', from: 'audio-compressor', to: 'audio-master' },
-])
+const nodes = computed({ get: () => store.audioGraph.nodes, set: value => { store.audioGraph.nodes = value } })
+const connections = computed({ get: () => store.audioGraph.connections, set: value => { store.audioGraph.connections = value } })
 
 const nodeById = computed(() => new Map(nodes.value.map((node) => [node.id, node])))
 const layerStyle = computed(() => ({ transform: `translate(${view.value.x}px, ${view.value.y}px) scale(${view.value.zoom})` }))
@@ -195,7 +160,19 @@ function sourceTitle(node: AudioNode) {
   return sourceOptions.value.find((item) => item.value === node.sourceId)?.label ?? 'Audio Source'
 }
 
+function addSource() {
+  const master = nodes.value.find(node => node.kind === 'master')
+  if (!master) return
+  const id = crypto.randomUUID()
+  nodes.value.push({ id, kind: 'source', title: 'Audio Source', x: 20, y: 40 + nodes.value.filter(node => node.kind === 'source').length * 200, bypassed: false, gain: 0, pan: 0, mute: false, solo: false, sourceId: audioLayers.value.find(layer => !nodes.value.some(node => node.sourceId === layer.id))?.id ?? audioLayers.value[0]?.id })
+  connections.value.push({ id: crypto.randomUUID(), from: id, to: master.id })
+}
+
 onMounted(() => {
+  for (const layer of audioLayers.value) {
+    if (!nodes.value.some(node => node.kind === 'source' && node.sourceId === layer.id)) addSource()
+  }
+  void store.prepareAudio()
   window.addEventListener('pointermove', onPointerMove)
   window.addEventListener('pointerup', endPointer)
   resizeObserver = new ResizeObserver(() => fitGraph())
@@ -216,6 +193,9 @@ onBeforeUnmount(() => {
       <span class="toolbar-divider" />
       <MSelect v-model="addKind" :options="processorOptions" label="Processor to add" />
       <button class="add-processor" type="button" @click="addProcessor"><CirclePlus :size="12" /> Add processor</button>
+      <button type="button" @click="addSource">Add source</button>
+      <button type="button" @click="store.togglePlayback">{{ store.audioPreparing ? 'Loading audio…' : store.playing ? 'Pause' : 'Play' }}</button>
+      <button type="button" @click="store.exportAudioMix">Export WAV mix</button>
       <span class="spacer" />
       <IconButton :icon="Focus" label="Frame all audio nodes" @click="fitGraph" />
       <IconButton :icon="ZoomOut" label="Zoom out" @click="setZoom(view.zoom / 1.12)" />
@@ -224,7 +204,7 @@ onBeforeUnmount(() => {
     </div>
 
     <div ref="canvas" class="audio-canvas" :class="{ panning: panning }" @pointerdown="beginPan" @wheel="onWheel">
-      <div class="graph-status"><span><i /> Live graph</span><span>{{ nodes.length }} nodes</span><span>{{ connections.length }} links</span></div>
+      <div class="graph-status"><span><i /> {{ store.audioError || (store.playing ? 'Playing' : 'Ready') }}</span><span>{{ nodes.length }} nodes</span><span>{{ connections.length }} links</span></div>
       <svg class="audio-wires">
         <g :style="layerStyle">
           <path v-for="wire in wires" :key="wire.id" class="wire-shadow" :d="wire.path" />
@@ -265,7 +245,6 @@ onBeforeUnmount(() => {
               <label class="control-row"><span>Ratio</span><input v-model.number="node.ratio" type="range" min="1" max="20" step=".5" /><output>{{ node.ratio }}:1</output></label>
               <label class="control-row"><span>Attack</span><input v-model.number="node.attack" type="range" min="1" max="100" /><output>{{ node.attack }} ms</output></label>
               <label class="control-row"><span>Release</span><input v-model.number="node.release" type="range" min="20" max="500" /><output>{{ node.release }} ms</output></label>
-              <div class="gain-reduction"><span><i style="width: 38%" /></span><small>−3.8 dB GR</small></div>
             </template>
 
             <template v-else-if="node.kind === 'reverb'">
@@ -275,7 +254,6 @@ onBeforeUnmount(() => {
 
             <template v-else>
               <label class="control-row"><span>Output</span><input v-model.number="node.gain" type="range" min="-24" max="6" step=".1" /><output>{{ node.gain.toFixed(1) }} dB</output></label>
-              <div class="master-meter"><i v-for="n in 18" :key="n" :class="{ lit: n < 14, warn: n > 15 }" /></div>
               <button class="toggle-row" :class="{ active: node.limiter }" type="button" @click="node.limiter = !node.limiter"><span>Safety limiter</span><i /></button>
               <button class="toggle-row" :class="{ active: node.mute }" type="button" @click="node.mute = !node.mute"><span>Mute output</span><i /></button>
             </template>

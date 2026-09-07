@@ -7,6 +7,8 @@ import {
 } from '@lucide/vue'
 import { useEditorStore } from '@/stores/editor'
 import { evaluateNumericProperty } from '@/engine/animation/evaluateProperty'
+import { enableTimeRemap } from '@/engine/animation/timeRemap'
+import { setNumericPropertyAtTime } from '@/engine/animation/editNumericProperty'
 import { LAYER_EFFECT_OPTIONS, layerEffectLabel, layerEffectParameters } from '@/engine/nodes/layerEffects'
 import type { EditorLayer, LayerEffectKind } from '@/models/editor'
 import IconButton from './common/IconButton.vue'
@@ -15,6 +17,10 @@ import NumberField from './common/NumberField.vue'
 import PanelHeader from './common/PanelHeader.vue'
 import RigPanel from './common/RigPanel.vue'
 import MSelect from './common/MSelect.vue'
+import TextAuthoring from './common/TextAuthoring.vue'
+import ShapePointControls from './common/ShapePointControls.vue'
+import PointTracker from './common/PointTracker.vue'
+import ClusterParameters from './common/ClusterParameters.vue'
 
 const store = useEditorStore()
 const { selectedLayer, selectedKeyframeId, currentTime, project } = storeToRefs(store)
@@ -71,6 +77,10 @@ function addEffect() { store.addLayerEffect(effectToAdd.value) }
       </div>
 
       <div class="inspector-scroll">
+        <TextAuthoring v-if="selectedLayer.type === 'text'" :layer="selectedLayer" />
+        <ShapePointControls v-if="selectedLayer.shapePath" :layer="selectedLayer" />
+        <PointTracker v-if="selectedLayer.type === 'shape' || selectedLayer.type === 'text' || selectedLayer.type === 'image'" :key="selectedLayer.id" :layer="selectedLayer" />
+        <ClusterParameters v-if="selectedLayer.type === 'cluster'" :layer="selectedLayer" />
         <section class="property-section">
           <button class="section-header" type="button" @click="toggleGroup('transform')"><ChevronDown :size="13" :class="{ closed: collapsed.transform }" /><span>Transform</span><small>2D</small><RotateCcw :size="11" /></button>
           <div v-if="!collapsed.transform" class="property-list">
@@ -99,7 +109,9 @@ function addEffect() { store.addLayerEffect(effectToAdd.value) }
           <div v-if="!collapsed.timing" class="property-list simple">
             <div class="property-row"><span class="row-indent" /><label>Start</label><div class="numeric-field time">{{ selectedLayer.start.toFixed(2) }} s</div></div>
             <div class="property-row"><span class="row-indent" /><label>Duration</label><div class="numeric-field time">{{ selectedLayer.duration.toFixed(2) }} s</div></div>
-            <div class="property-row"><span class="row-indent" /><label>Speed</label><div class="numeric-field time">100 %</div></div>
+            <div class="property-row"><span class="row-indent" /><label>Time remap</label><button type="button" @click="selectedLayer.timeRemap ? delete selectedLayer.timeRemap : enableTimeRemap(selectedLayer); store.markChanged()">{{ selectedLayer.timeRemap ? 'Disable' : 'Enable' }}</button></div>
+            <div v-if="selectedLayer.timeRemap" class="property-row"><label>Source seconds</label><NumberField :model-value="evaluateNumericProperty(selectedLayer.timeRemap, currentTime)" :step=".01" label="Remapped source time" @update:model-value="setNumericPropertyAtTime(selectedLayer.timeRemap!, $event, currentTime, project.frameRate, { autoKey: true }); store.markChanged()" /><KeyframeControl :property="selectedLayer.timeRemap" label="Source time" /></div>
+            <p v-if="selectedLayer.timeRemap" class="section-note">Edit Source time in Graph Editor: flat segments freeze, descending segments reverse, curved segments ramp speed.</p>
           </div>
         </section>
 

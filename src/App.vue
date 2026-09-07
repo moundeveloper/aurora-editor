@@ -16,6 +16,7 @@ import AudioWorkspace from '@/components/AudioWorkspace.vue'
 import ExportWorkspace from '@/components/ExportWorkspace.vue'
 import ProjectBrowser from '@/components/ProjectBrowser.vue'
 import HistoryPanel from '@/components/HistoryPanel.vue'
+import ProjectVersions from '@/components/ProjectVersions.vue'
 import CommandPalette from '@/components/CommandPalette.vue'
 
 const ThreeDWorkspace = defineAsyncComponent(() => import('@/components/ThreeDWorkspace.vue'))
@@ -36,6 +37,7 @@ const leftOpen = ref(true)
 const rightOpen = ref(true)
 const bottomOpen = ref(true)
 const historyOpen = ref(false)
+const versionsOpen = ref(false)
 const commandPaletteOpen = ref(false)
 const nodePreviewHeight = computed(() => Math.round(Math.max(120, (rightWidth.value - 28) * 9 / 16 + 50)))
 const maskEditorOpen = computed(() => workspace.value === 'Nodes' && nodes.value.some((node) => node.id === selectedNodeId.value && node.kind === 'mask'))
@@ -131,6 +133,7 @@ onBeforeUnmount(() => {
     <main v-else class="export-area"><ExportWorkspace /></main>
 
     <HistoryPanel v-if="historyOpen" @close="historyOpen = false" />
+    <ProjectVersions v-if="versionsOpen" @close="versionsOpen = false" />
 
     <footer class="status-bar">
       <div class="panel-toggles">
@@ -138,6 +141,7 @@ onBeforeUnmount(() => {
         <button type="button" :class="{ active: bottomOpen }" title="Toggle timeline" @click="bottomOpen = !bottomOpen"><PanelBottomClose :size="12" /></button>
         <button v-if="inspectorAvailable" type="button" :class="{ active: rightOpen }" title="Toggle inspector" @click="rightOpen = !rightOpen"><PanelRightClose :size="12" /></button>
         <button type="button" :class="{ active: historyOpen }" title="Project history — step back through recent actions (Ctrl+Shift+H)" @click="historyOpen = !historyOpen"><History :size="12" /></button>
+        <button type="button" title="Named project versions and snapshot comparison" @click="versionsOpen = !versionsOpen">Versions</button>
       </div>
       <span class="status-divider" />
       <span><ShieldCheck :size="11" /> Local-first</span>

@@ -21,11 +21,14 @@
   "dependencies": {
     "@lucide/vue": "^1.33.0",
     "@modelcontextprotocol/sdk": "^1.30.0",
+    "cannon-es": "^0.20.0",
     "dexie": "^4.4.5",
     "gifenc": "^1.0.3",
     "pinia": "^4.0.2",
     "pixi.js": "8.20.1",
     "three": "0.185.1",
+    "three-bvh-csg": "^0.0.18",
+    "three-mesh-bvh": "^0.9.14",
     "vue": "^3.5.40",
     "vue-router": "^5.2.0",
     "zod": "^4.4.3"

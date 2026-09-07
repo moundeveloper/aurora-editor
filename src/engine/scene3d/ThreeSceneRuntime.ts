@@ -1,4 +1,6 @@
 import * as THREE from 'three'
+import { syncScattering } from './scattering'
+import { syncLightLinking } from './lightLinking'
 import { RectAreaLightUniformsLib } from 'three/examples/jsm/lights/RectAreaLightUniformsLib.js'
 import { evaluateNumericProperty } from '@/engine/animation/evaluateProperty'
 
@@ -131,7 +133,8 @@ function makeObject(definition: Aurora3DObject, assets: Map<string, MediaAsset>)
     // orbits behind it, including before its texture has finished resolving.
     side: definition.primitive === 'plane' ? THREE.DoubleSide : THREE.FrontSide,
   })
-  const mesh = new THREE.Mesh(makeGeometry(definition, assets), material)
+    const mesh = new THREE.Mesh(makeGeometry(definition, assets), material)
+    mesh.userData.baseGeometry = mesh.geometry
   // Rig and influence deformation can move a card beyond stale CPU bounds. Image planes are cheap
   // enough that testing them in the depth pass is safer than incorrectly dropping the whole card.
   mesh.frustumCulled = definition.primitive !== 'plane'
@@ -242,17 +245,27 @@ function makeRiggedPlaneGeometry(definition: Aurora3DObject, rig: AuroraRig, ass
  * influence stack rather than stacking on top of it: an influence chain expects to reshape the
  * primitive, and there is no primitive left once the rig has replaced it.
  */
-function syncGeometry(mesh: THREE.Mesh, definition: Aurora3DObject, rig: AuroraRig | undefined, assets: Map<string, MediaAsset>, time: number) {
+function syncGeometry(mesh: THREE.Mesh, definition: Aurora3DObject, rig: AuroraRig | undefined, assets: Map<string, MediaAsset>, time: number, runtime: Scene3DRuntime, scene: Aurora3DScene) {
   const rigged = definition.primitive === 'plane' && rigIsActive(rig)
+  const operands = (definition.influences ?? []).filter(item => item.enabled && item.type === 'boolean').map(item => {
+    const target = scene.objects.find(object => object.id === item.targetId)
+    return [item.targetId,target ? influenceSignature(target.influences.filter(influence => influence.type !== 'boolean'),time) : '',runtime.objects.get(item.targetId ?? '')?.matrixWorld.elements,mesh.matrixWorld.elements]
+  })
   const signature = rigged
     ? `rig:${rigRestSignature(rig)}#${rigPoseSignature(rig, time)}`
-    : `influence:${influenceSignature(definition.influences, time)}`
+    : `influence:${influenceSignature(definition.influences, time)}:${JSON.stringify(operands)}`
   if (mesh.userData.geometrySignature === signature) return
   const base = (mesh.userData.baseGeometry as THREE.BufferGeometry | undefined) ?? mesh.geometry
   mesh.userData.baseGeometry = base
   const next = rigged && rig
     ? makeRiggedPlaneGeometry(definition, rig, assets, time)
-    : applyInfluences(base, definition.influences, time)
+    : applyInfluences(base, definition.influences, time, id => {
+      const target = runtime.objects.get(id), targetDefinition = scene.objects.find(item => item.id === id)
+      if (id === definition.id || !(target instanceof THREE.Mesh) || !targetDefinition) return null
+      const original = target.userData.baseGeometry as THREE.BufferGeometry
+      const geometry = applyInfluences(original,targetDefinition.influences.filter(item => item.type !== 'boolean'),time)
+      return {geometry,matrix:mesh.matrixWorld.clone().invert().multiply(target.matrixWorld),dispose:()=>{if(geometry!==original)geometry.dispose()}}
+    })
   if (mesh.geometry !== base && mesh.geometry !== next) mesh.geometry.dispose()
   mesh.geometry = next
   mesh.userData.geometrySignature = signature
@@ -448,7 +461,7 @@ export class ThreeSceneRuntimeRegistry {
     return runtime
   }
 
-  /** Preloads image-plane maps so offline/export renders do not emit a blank first frame. */
+  /** Preloads plane and material maps so offline/export renders include textures on the first frame. */
   async prepareAssets(sceneDefinitions: readonly Aurora3DScene[], assets: readonly MediaAsset[]) {
     const assetMap = new Map(assets.map((asset) => [asset.id, asset]))
     const urls = new Set(sceneDefinitions.flatMap((scene) => scene.objects.flatMap((object) => {
@@ -456,24 +469,31 @@ export class ThreeSceneRuntimeRegistry {
       return object.primitive === 'plane' && url ? [url] : []
     })))
     await Promise.all([...urls].map((url) => this.ensureTexture(url)))
+    await Promise.all(sceneDefinitions.flatMap(scene => scene.objects.flatMap(object =>
+      Object.entries(object.material.maps ?? {}).map(([slot, id]) => {
+        const asset = assets.find(asset => asset.id === id && (asset.kind === 'image' || asset.kind === 'texture'))
+        const url = imageUrl(asset)
+        return url ? this.ensureTexture(url, slot === 'map' || slot === 'emissiveMap') : undefined
+      }))))
   }
 
-  private ensureTexture(url: string) {
-    const existing = this.texturePromises.get(url)
+  private ensureTexture(url: string, color = true) {
+    const key = color ? url : `data:${url}`
+    const existing = this.texturePromises.get(key)
     if (existing) return existing
     const loading = new THREE.TextureLoader().loadAsync(url).then((texture) => {
       if (this.disposed) {
         texture.dispose()
         return null
       }
-      texture.colorSpace = THREE.SRGBColorSpace
+      texture.colorSpace = color ? THREE.SRGBColorSpace : THREE.NoColorSpace
       texture.wrapS = THREE.ClampToEdgeWrapping
       texture.wrapT = THREE.ClampToEdgeWrapping
       texture.needsUpdate = true
-      this.textures.set(url, texture)
+      this.textures.set(key, texture)
       return texture
     }).catch(() => null)
-    this.texturePromises.set(url, loading)
+    this.texturePromises.set(key, loading)
     return loading
   }
 
@@ -625,9 +645,11 @@ export class ThreeSceneRuntimeRegistry {
   }
 
   private syncImageMap(material: THREE.MeshStandardMaterial, definition: Aurora3DObject, assets: Map<string, MediaAsset>) {
-    const url = definition.primitive === 'plane' ? imageUrl(imageAssetFor(definition, assets)) : undefined
+    const mapAsset = definition.material.maps?.map ? assets.get(definition.material.maps.map) : undefined
+    const explicitMap = mapAsset?.kind === 'image' || mapAsset?.kind === 'texture' ? imageUrl(mapAsset) : undefined
+    const url = explicitMap ?? (definition.primitive === 'plane' ? imageUrl(imageAssetFor(definition, assets)) : undefined)
     const nextSide = definition.primitive === 'plane' ? THREE.DoubleSide : THREE.FrontSide
-    const imagePlane = Boolean(url)
+    const imagePlane = definition.primitive === 'plane' && Boolean(url)
     const renderStateChanged = material.side !== nextSide
       || material.depthWrite === imagePlane
       || material.alphaTest !== (imagePlane ? .001 : 0)
@@ -661,6 +683,31 @@ export class ThreeSceneRuntimeRegistry {
       material.needsUpdate = true
       this.onInvalidate?.()
     })
+  }
+
+  private syncMaterialMaps(material: THREE.MeshStandardMaterial, definition: Aurora3DObject, assets: Map<string, MediaAsset>) {
+    for (const slot of ['normalMap', 'roughnessMap', 'metalnessMap', 'emissiveMap'] as const) {
+      const id = definition.material.maps?.[slot]
+      const asset = id ? assets.get(id) : undefined
+      const url = asset?.kind === 'image' || asset?.kind === 'texture' ? imageUrl(asset) : undefined
+      const color = slot === 'emissiveMap'
+      const key = url ? color ? url : `data:${url}` : undefined
+      const marker = `aurora-${slot}`
+      const changed = material.userData[marker] !== key
+      material.userData[marker] = key
+      const ready = key ? this.textures.get(key) ?? null : null
+      if (material[slot] !== ready) {
+        material[slot] = ready
+        material.needsUpdate = true
+      }
+      if (!url || ready || !changed) continue
+      void this.ensureTexture(url, color).then(texture => {
+        if (this.disposed || material.userData[marker] !== key || !texture) return
+        material[slot] = texture
+        material.needsUpdate = true
+        this.onInvalidate?.()
+      })
+    }
   }
 
   private create(definition: Aurora3DScene, aspect: number, assets: Map<string, MediaAsset>, structureKey: string): Scene3DRuntime {
@@ -710,19 +757,26 @@ export class ThreeSceneRuntimeRegistry {
   private update(runtime: Scene3DRuntime, definition: Aurora3DScene, aspect: number, time: number, assets: Map<string, MediaAsset>, rigs: Map<string, AuroraRig> = new Map()) {
     runtime.revision = definition.revision
     this.syncEnvironment(runtime, definition, assets)
+    // Resolve every operand's current world transform before evaluating Boolean stacks.
+    for (const item of definition.objects) {
+      const object = runtime.objects.get(item.id)
+      if (object) applyTransform(object,item.transform,time)
+    }
+    runtime.root.updateMatrixWorld(true)
     definition.objects.forEach((item) => {
       const object = runtime.objects.get(item.id)
       if (!object) return
       object.visible = item.visible
       applyTransform(object, item.transform, time)
       if (item.primitive === 'model') this.syncModel(object, item, assets, definition.environmentIntensity)
-      if (object instanceof THREE.Mesh) syncGeometry(object, item, item.rigId ? rigs.get(item.rigId) : undefined, assets, time)
+      if (object instanceof THREE.Mesh) syncGeometry(object, item, item.rigId ? rigs.get(item.rigId) : undefined, assets, time, runtime, definition)
       if (object instanceof THREE.Mesh) {
         object.castShadow = item.castShadow
         object.receiveShadow = item.receiveShadow
       }
       if (object instanceof THREE.Mesh && object.material instanceof THREE.MeshStandardMaterial) {
         this.syncImageMap(object.material, item, assets)
+        this.syncMaterialMaps(object.material, item, assets)
         object.material.color.set(item.material.baseColor)
         object.material.emissive.set(item.material.emissive)
         object.material.opacity = evaluateNumericProperty(item.material.opacity, time)
@@ -733,6 +787,8 @@ export class ThreeSceneRuntimeRegistry {
       }
     })
     syncGroupArrays(runtime, definition, time)
+    runtime.root.updateMatrixWorld(true)
+    syncScattering(runtime.root, runtime.objects, definition, time)
     runtime.root.updateMatrixWorld(true)
     const sceneBounds = new THREE.Box3().setFromObject(runtime.root)
     definition.cameras.forEach((item) => {
@@ -783,6 +839,11 @@ export class ThreeSceneRuntimeRegistry {
         light.target.updateMatrixWorld(true)
       }
     })
+    const lights = [...runtime.lights.values()]
+    for (const item of definition.objects) {
+      const object = runtime.objects.get(item.id)
+      if (object instanceof THREE.Mesh && object.material instanceof THREE.MeshStandardMaterial) syncLightLinking(object.material,item,lights)
+    }
   }
 
   disposeScene(sceneId: string) {
@@ -822,6 +883,7 @@ export class ThreeSceneRuntimeRegistry {
         candidate = candidate.parent
       }
       if (!(object instanceof THREE.Mesh)) return
+      if (object.userData.auroraScatter) { (object as THREE.InstancedMesh).dispose(); return }
       if (object.userData.auroraGroupArrayClone) return
       if (object.userData.auroraModelClone) return
       const base = object.userData.baseGeometry as THREE.BufferGeometry | undefined

@@ -15,22 +15,49 @@ seams in Aurora rather than generic wish-list entries.
 | ID | Status | Landed work |
 | --- | --- | --- |
 | P1 | Implemented | Deterministic VP9/AV1 WebM export through WebCodecs and Aurora's own WebM muxer. |
-| P2 | Partial | The persistent node-audio mixer UI exists; Web Audio playback, render mixing, and amplitude drivers remain. |
+| P2 | Implemented | Persistent Web Audio source/effect/master graph, decoded waveforms, audio-clock playback, mute/solo, offline WAV mixing, and pre-fader RMS amplitude drivers. Video export remains video-only. |
 | P3 | Implemented | glTF/GLB assets load as hierarchy-preserving, skeleton-safe model objects. |
 | P4 | Implemented | HDR/EXR radiance maps drive scene lighting and optional environment backgrounds. |
 | P5 | Implemented | Typed, ordered layer effects share the node evaluator and have live inspector controls plus legacy migration. |
+| P6 | Implemented | Safe arithmetic expressions and property/audio links, bounded dependency evaluation, validation, and driver controls in the curve editor. |
 | P7 | Implemented | 3D scenes use shutter-based subframe accumulation, scene and layer toggles, and quality-aware sample counts. |
+| P8 | Implemented | Keyframeable source-time channels for freeze, reverse, and speed ramps; rendered transforms, video seeking, and audio resampling honor remapping. |
+| P9 | Implemented | Ordered cycle, seeded noise, offset, and limit curve modifiers, with bypass/reorder controls and evaluated graph curves. |
 | P10 | Removed | Onion skinning was implemented for Motion and 3D, then removed at the user's request: on photographic/rendered composites the ghosts read as a muddy wash rather than a legible pose, so it was not useful here. |
 | P11 | Implemented | Named, coloured project markers persist, render on the ruler, snap timeline edits, and support previous/next navigation. |
 | P12 | Implemented | Modal G/R/S gestures support axes, typed values, snapping, framing, and local/global orientation. |
-| P15 | Partial | Spot lights, soft shadows, and keyframeable rect **area lights** exist. Per-object light linking remains: Three 0.185 collects lights per scene (a light's layers are tested against the camera, not each object), so real include/exclude lists need a multi-pass or custom-shader path, not the M-effort the proposal assumed. |
+| P13 | Implemented | Library-backed base-color, normal, roughness, metalness, and emissive texture slots on authored PBR meshes. Color/data maps use separate color spaces and exports preload them. Imported models retain their own materials. |
+| P14 | Implemented with limits | Solidify with boundary closure, screw sweeps of open profiles, chamfer bevels for low-poly convex solids, and closed-mesh Boolean operations. Influence headers support drag reordering. Boolean targets use their non-Boolean stacks to avoid dependency cycles. |
+| P15 | Implemented with limits | Spot and rectangular area lights, soft shadows, and per-authored-mesh include/exclude illumination lists implemented in the lighting shader. Environment lighting, shadow casting, imported model materials, and disc emitters remain separate from this feature. |
 | P16 | Implemented | Keyframeable camera focus distance and f-stop drive the bokeh render pass, in the viewport playback path as well as when paused. |
+| P17 | Implemented | Deterministic runtime instances along paths and across evaluated mesh surfaces, with seed, positional jitter, scale variation, alignment, and shared resources. Authored meshes are supported; imported hierarchies are not flattened into scatter sources. |
 | P18 | Implemented | Solid, Rendered, Wireframe, Matcap, and X-ray shading modes, plus a wireframe overlay that rides on top of any mode. |
+| P19 | Implemented with limits | Fixed-step cannon-es simulation for root cubes and spheres, static/dynamic bodies, gravity, ground collision, velocity/spin, friction, bounce, cancellation, and undoable position/rotation keyframes. Collision shapes use the starting primitive pose, not influence-deformed geometry. |
+| P20 | Implemented with limits | Selectable linear-sRGB / linear-Display-P3 shading, converted material/light/vertex colors and decoded color/HDR textures, plus ACES/AgX/Neutral/Standard view transforms and exposure shared by 3D preview, Motion, and export. Working-space state is restored after every render. Output remains SDR sRGB; HDR delivery and compressed color textures in P3 are not supported. |
+| P21 | Implemented | Luma waveform, RGB parade, and vectorscope sampled from the rendered Motion composition. GPU readback is throttled and only enabled while Scopes is open. |
+| P22 | Implemented with limits | Keyframeable path anchors and Bézier handles drive visible shapes and masks. A cancellable video point tracker applies translation as editable X/Y keys. Planar, scale, and rotation tracking are not included. |
+| P23 | Implemented with limits | Multi-selection, named movable groups/backdrop notes, local reusable subgraph presets, image/value reroutes, pinned node preview, and live A/B wipe. Groups organize the existing flat graph rather than creating nested socket interfaces. |
+| P24 | Implemented with limits | Character/word range animators for position, rotation, opacity, and color; stagger, multiline layout, Unicode grapheme segmentation, and embedded WOFF/WOFF2/TTF/OTF fonts. Complex-script shaping across independently animated glyphs is not a full typography engine. |
+| P25 | Implemented | Published numeric controls on reusable cluster templates. Instances renew property IDs and preserve internal driver/control links while keeping edits independent. |
+| P26 | Implemented | Text follows animated shape outlines and their transforms, with keyframeable path offset and tangent alignment. |
 | P27 | Implemented | Revision-safe persistent RGBA frames, background range caching, replay, cancellation, and a timeline cache bar. |
 | P28 | Implemented | Searchable commands, portable global shortcuts, and a persisted in-app shortcut recorder. |
+| P29 | Implemented | Named immutable local project snapshots, structural comparisons between versions/current state, and undoable restoration. |
 | P30 | Implemented | Named, workspace-aware undo states are visible in a compact panel and support non-destructive backward/forward jumps. |
 
-All proposals not listed here remain unimplemented.
+The original proposal text below is retained as design context; the status table above
+describes the current implementation and its limits. P10 remains intentionally removed.
+
+The Motion viewport regression was a shared WebGL-state handoff between Three's
+post-processing and Pixi's compositing, rather than missing merge content. The outgoing
+Three state is now reset before Pixi draws, and the persistent-frame cache version was
+bumped so older blank frames cannot be replayed.
+
+Browser verification harnesses live in `tests/browser/renderer.html` and
+`tests/browser/audio.html`; run the Vite app and open those routes to repeat the GPU
+and OfflineAudioContext checks. Geometry and physics implementations use
+[three-bvh-csg](https://github.com/gkjohnson/three-bvh-csg) and
+[cannon-es](https://github.com/pmndrs/cannon-es).
 
 ---
 

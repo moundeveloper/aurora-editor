@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import ScopesPanel from './ScopesPanel.vue'
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { storeToRefs } from 'pinia'
 import {
@@ -1382,7 +1383,7 @@ onBeforeUnmount(() => {
                 <button v-if="!segment.isPlaceholder" class="timeline-clip" :class="[segment.type, { 'selected-clip': selectedLayerIds.includes(segment.id), 'clip-drag-source': draggingClipId === segment.id }]" type="button" :data-layer-id="segment.id" :aria-pressed="selectedLayerIds.includes(segment.id)" :style="clipStyle(segment)" @pointerdown="onClipPointerDown($event, segment)" @click.stop @dblclick.stop="store.enterCluster(segment.id)">
                   <span class="clip-grip left" @pointerdown="beginClipDrag($event, segment, 'trim-start')" />
                   <span v-if="segment.type === 'video'" class="filmstrip"><i v-for="n in 14" :key="n" :style="{ backgroundImage: 'url(/demo/aurora-ridge.png)' }" /></span>
-                  <span v-if="segment.type === 'audio'" class="waveform"><i v-for="n in 72" :key="n" :style="{ height: `${6 + ((n * 13) % 18)}px` }" /></span>
+                  <span v-if="segment.type === 'audio'" class="waveform"><i v-for="(peak, index) in store.audioWaveforms[segment.assetId ?? ''] ?? []" :key="index" :style="{ height: `${Math.max(1, peak * 24)}px`, flex: '1 1 0' }" /></span>
                   <span class="clip-label"><component :is="layerIcon(segment.type)" :size="9" />{{ segment.name }}</span>
                   <span v-if="segment.effects.length" class="fx-badge">fx</span>
                   <span v-if="layerKeyframes(segment).length" class="clip-keyframes" aria-label="Animation keyframes">
@@ -1484,7 +1485,8 @@ onBeforeUnmount(() => {
     </template>
 
     <CurveEditor v-else-if="activeBottomTab === 'Graph Editor'" />
-    <div v-else class="panel-placeholder"><component :is="activeBottomTab === 'Scopes' ? Gauge : AudioLines" :size="28" /><strong>{{ activeBottomTab }}</strong><span>{{ activeBottomTab === 'Scopes' ? 'Histogram follows the current composition output.' : 'Track and master controls share the same audio graph.' }}</span></div>
+    <ScopesPanel v-else-if="activeBottomTab === 'Scopes'" />
+    <div v-else class="panel-placeholder"><AudioLines :size="28" /><strong>Audio Mixer</strong><button type="button" @click="store.setWorkspace('Audio')">Open audio graph</button></div>
   </section>
 </template>
 

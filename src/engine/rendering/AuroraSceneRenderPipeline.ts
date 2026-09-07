@@ -6,6 +6,8 @@ import { OutputPass } from 'three/addons/postprocessing/OutputPass.js'
 import { RenderPass } from 'three/addons/postprocessing/RenderPass.js'
 import type { Scene3DSettings } from '@/models/editor'
 import type { CameraLens } from '@/engine/scene3d/cameraLens'
+import { configureSceneColor } from './colorManagement'
+import { SceneWorkingSpace, sceneWorkingSpace, workingToDisplayMatrix } from './sceneWorkingSpace'
 
 export type AuroraScenePipelineOutput = 'screen' | 'texture'
 
@@ -29,6 +31,7 @@ export interface AuroraMotionBlurSample {
  * scene/camera and render targets; only dimensions or camera projection rebuild GPU resources.
  */
 export class AuroraSceneRenderPipeline {
+  private readonly workingSpace = new SceneWorkingSpace()
   private state: PipelineState | null = null
   private width = 0
   private height = 0
@@ -85,6 +88,7 @@ export class AuroraSceneRenderPipeline {
     output: AuroraScenePipelineOutput,
     lens: CameraLens | null = null,
   ): THREE.Texture | null {
+    configureSceneColor(this.renderer,settings)
     const state = this.ensureState(scene, camera, width, height)
     state.renderPass.scene = scene
     state.renderPass.camera = camera
@@ -94,8 +98,10 @@ export class AuroraSceneRenderPipeline {
     state.bokehPass.camera = camera
     // Intermediate passes stay linear. Texture output is tagged only after the final OutputPass so
     // the hybrid compositor decodes it exactly once on the way back to the sRGB drawing buffer.
-    state.composer.renderTarget1.texture.colorSpace = THREE.NoColorSpace
-    state.composer.renderTarget2.texture.colorSpace = THREE.NoColorSpace
+    const workingSpace = sceneWorkingSpace(settings)
+    state.composer.renderTarget1.texture.colorSpace = workingSpace
+    state.composer.renderTarget2.texture.colorSpace = workingSpace
+    state.outputPass.uniforms.auroraWorkingToSRGB!.value.copy(workingToDisplayMatrix(workingSpace))
 
     const aoEnabled = settings.ambientOcclusion && settings.quality !== 'draft'
     state.gtaoPass.enabled = aoEnabled
@@ -124,7 +130,7 @@ export class AuroraSceneRenderPipeline {
     }
 
     state.composer.renderToScreen = output === 'screen'
-    state.composer.render()
+    this.workingSpace.render(scene, settings, () => state.composer.render())
     if (output !== 'texture') return null
     state.composer.readBuffer.texture.colorSpace = THREE.SRGBColorSpace
     return state.composer.readBuffer.texture
@@ -205,6 +211,10 @@ export class AuroraSceneRenderPipeline {
       const gtaoPass = new GTAOPass(scene, camera, width, height)
       const bokehPass = new BokehPass(scene, camera, {})
       const outputPass = new OutputPass()
+      outputPass.uniforms.auroraWorkingToSRGB = { value: new THREE.Matrix3() }
+      outputPass.material.fragmentShader = outputPass.material.fragmentShader
+        .replace('uniform sampler2D tDiffuse;', 'uniform sampler2D tDiffuse;\nuniform mat3 auroraWorkingToSRGB;')
+        .replace('gl_FragColor = texture2D( tDiffuse, vUv );', 'gl_FragColor = texture2D( tDiffuse, vUv );\ngl_FragColor.rgb = auroraWorkingToSRGB * gl_FragColor.rgb;')
       composer.addPass(renderPass)
       composer.addPass(gtaoPass)
       composer.addPass(bokehPass)
@@ -223,6 +233,7 @@ export class AuroraSceneRenderPipeline {
   }
 
   dispose() {
+    this.workingSpace.dispose()
     this.disposeComposer()
     this.accumulationTarget?.dispose()
     this.accumulationTarget = null

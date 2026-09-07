@@ -1,3 +1,14 @@
+export type AudioNodeKind = 'source' | 'gain' | 'eq' | 'compressor' | 'reverb' | 'master'
+export interface AudioGraphNode {
+  id: string; kind: AudioNodeKind; title: string; x: number; y: number
+  bypassed: boolean; gain: number; pan: number; mute: boolean; solo: boolean
+  sourceId?: string; low?: number; mid?: number; high?: number
+  threshold?: number; ratio?: number; attack?: number; release?: number
+  mix?: number; room?: number; limiter?: boolean
+}
+export interface AudioConnection { id: string; from: string; to: string }
+export interface AudioGraph { nodes: AudioGraphNode[]; connections: AudioConnection[] }
+
 export type WorkspaceId = 'Motion' | 'Nodes' | '3D' | 'Audio' | 'Export'
 
 export type LayerType = 'video' | 'image' | 'text' | 'shape' | 'audio' | 'adjustment' | 'cluster' | '3d-scene'
@@ -20,6 +31,19 @@ export interface AnimatableProperty<T> {
   value: T
   animated: boolean
   keyframes: Keyframe<T>[]
+  modifiers?: CurveModifier[]
+  driver?: { enabled: boolean; sourceId: string; expression: string }
+}
+
+export interface CurveModifier {
+  id: string
+  kind: 'cycle' | 'noise' | 'offset' | 'limit'
+  enabled: boolean
+  amount: number
+  frequency: number
+  seed: number
+  min: number
+  max: number
 }
 
 export interface LayerTransform {
@@ -44,6 +68,8 @@ export interface Transform3D {
 }
 
 export interface AuroraPBRMaterial {
+  /** Library image ids; omitted slots retain the scalar material values. */
+  maps?: Partial<Record<'map' | 'normalMap' | 'roughnessMap' | 'metalnessMap' | 'emissiveMap', string>>
   baseColor: string
   opacity: AnimatableProperty<number>
   metalness: AnimatableProperty<number>
@@ -54,10 +80,11 @@ export interface AuroraPBRMaterial {
 
 export type Aurora3DPrimitive = 'box' | 'sphere' | 'plane' | 'model'
 
-export type AuroraInfluenceType = 'array' | 'radial-array' | 'mirror' | 'subdivide' | 'displace' | 'twist'
+export type AuroraInfluenceType = 'array' | 'radial-array' | 'mirror' | 'subdivide' | 'displace' | 'twist' | 'solidify' | 'screw' | 'bevel' | 'boolean'
 
 /** A non-destructive geometry operation, evaluated in stack order on top of the primitive. */
 export interface AuroraInfluence {
+  targetId?: string
   id: string
   type: AuroraInfluenceType
   name: string
@@ -104,6 +131,7 @@ export interface AuroraRig {
 }
 
 export interface Aurora3DObject {
+  lightLink?: {mode:'all'|'include'|'exclude';ids:string[]}
   id: string
   name: string
   type: 'mesh' | 'group' | 'null'
@@ -117,6 +145,8 @@ export interface Aurora3DObject {
   transform: Transform3D
   material: AuroraPBRMaterial
   influences: AuroraInfluence[]
+  scatter?: { enabled: boolean; targetId: string; mode: 'surface' | 'path'; count: number; seed: number; jitter: number; scaleVariation: number; align: boolean }
+  rigidBody?: { enabled: boolean; mode: 'dynamic' | 'static'; mass: number; restitution: number; friction: number; velocity: [number, number, number]; angularVelocity: [number, number, number] }
   /** Deformation rig bending this object's surface. Only image planes are rigged today. */
   rigId?: string
 }
@@ -215,6 +245,9 @@ export interface AuroraLight {
 }
 
 export interface Scene3DSettings {
+  workingColorSpace?: 'linear-srgb' | 'linear-display-p3'
+  viewTransform?: 'aces' | 'agx' | 'neutral' | 'standard'
+  exposureStops?: number
   shadows: boolean
   shadowMapSize: number
   ambientOcclusion: boolean
@@ -248,6 +281,7 @@ export interface Aurora3DScene {
 }
 
 export interface ShapePathPoint {
+  channels?: Partial<Record<'positionX'|'positionY'|'handleInX'|'handleInY'|'handleOutX'|'handleOutY',AnimatableProperty<number>>>
   id: string
   position: [number, number]
   handleIn: [number, number]
@@ -284,11 +318,20 @@ export interface EditorLayer {
   start: number
   duration: number
   sourceOffset?: number
+  /** Source seconds relative to the clip's start, evaluated at project time. */
+  timeRemap?: AnimatableProperty<number>
   shapeKind?: 'rectangle' | 'ellipse' | 'path'
   shapeWidth?: number
   shapeHeight?: number
   shapePath?: ShapePath
   textContent?: string
+  textFont?: string
+  textFontSource?: string
+  textSize?: number
+  textColor?: string
+  textPathId?: string
+  textPathOffset?: AnimatableProperty<number>
+  textAnimators?: TextAnimator[]
   sceneId?: string
   /** A 3D scene can opt this layer out of its scene-level motion-blur pass. Defaults to true. */
   motionBlur?: boolean
@@ -300,6 +343,7 @@ export interface EditorLayer {
   width?: number
   height?: number
   children?: EditorLayer[]
+  publicParameters?: Array<{ id: string; label: string; propertyId: string }>
   isPlaceholder?: boolean
   /** Deformation rig bending this layer. Only image layers are rigged today. */
   rigId?: string
@@ -310,6 +354,14 @@ export interface EditorLayer {
   expanded: boolean
   transform: LayerTransform
   effects: LayerEffect[]
+}
+
+export interface TextAnimator {
+  id: string
+  enabled: boolean
+  unit: 'character' | 'word'
+  color: string
+  parameters: Record<'start' | 'end' | 'progress' | 'stagger' | 'x' | 'y' | 'rotation' | 'opacity', AnimatableProperty<number>>
 }
 
 export interface MediaAsset {
@@ -341,7 +393,7 @@ export type EditorNodeKind =
   | 'blur' | 'glow' | 'vignette'
   | 'invert' | 'brightnessContrast' | 'colorMatrix' | 'hueSaturation' | 'rgbToBw'
   | 'mix' | 'stack' | 'mask' | 'math'
-  | 'output' | 'viewer'
+  | 'output' | 'viewer' | 'reroute' | 'backdrop'
 
 /** Sockets are typed like Blender's: an image stream, or a single number. */
 export type EditorNodeSocketType = 'image' | 'value'
@@ -355,6 +407,7 @@ export interface EditorNodeSocket {
 }
 
 export interface EditorNode {
+  groupId?: string
   id: string
   kind: EditorNodeKind
   title: string
@@ -407,6 +460,7 @@ export interface TimelineMarker {
 }
 
 export interface SerializedEditorState {
+  audioGraph?: AudioGraph
   project: EditorProject
   layers: EditorLayer[]
   scenes3D: Aurora3DScene[]

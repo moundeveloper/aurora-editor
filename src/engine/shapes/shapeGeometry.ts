@@ -1,4 +1,5 @@
 import type { EditorLayer, ShapePathPoint } from '@/models/editor'
+import { evaluatedShapePoint } from './shapeAnimation'
 
 export type ShapePoint = [number, number]
 
@@ -50,9 +51,9 @@ function spanSteps(start: ShapePathPoint, end: ShapePathPoint, maximum: number) 
 }
 
 /** Flattened in stable clockwise/path order so rendering and edge painting address identical regions. */
-export function shapeOutline(layer: EditorLayer, curveSteps = 16): ShapeOutline {
+export function shapeOutline(layer: EditorLayer, curveSteps = 16, time = 0): ShapeOutline {
   if (layer.shapeKind === 'path') {
-    const path = layer.shapePath
+    const path = layer.shapePath ? {...layer.shapePath,points:layer.shapePath.points.map(point=>evaluatedShapePoint(point,time))} : undefined
     if (!path?.points.length) return { points: [], closed: false, segmentIndex: [], segmentCount: 0 }
     const flattened: ShapePoint[] = []
     const segmentIndex: number[] = []

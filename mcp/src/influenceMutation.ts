@@ -1,9 +1,11 @@
 import { randomUUID } from 'node:crypto'
 import type { AuroraInfluence, AuroraInfluenceType, SerializedEditorState } from '../../src/models/editor.ts'
 
-export const MCP_INFLUENCE_TYPES = ['array', 'radial-array', 'mirror', 'subdivide', 'displace', 'twist'] as const satisfies readonly AuroraInfluenceType[]
+export const MCP_INFLUENCE_TYPES = ['array', 'radial-array', 'mirror', 'subdivide', 'displace', 'twist', 'solidify', 'screw', 'bevel', 'boolean'] as const satisfies readonly AuroraInfluenceType[]
 
 const DEFAULTS: Record<AuroraInfluenceType, Record<string, number>> = {
+  bevel:{width:.1},boolean:{operation:0},
+  solidify: {thickness:.1}, screw: {angle:360,pitch:0,steps:32},
   array: { count: 3, offsetX: 2.4, offsetY: 0, offsetZ: 0, rotationStep: 0, scaleStep: 1 },
   'radial-array': { count: 6, centerX: 0, centerY: 0, centerZ: 2.5, axis: 1, angle: 360, orient: 1 },
   mirror: { axisX: 1, axisY: 0, axisZ: 0 },
@@ -13,6 +15,8 @@ const DEFAULTS: Record<AuroraInfluenceType, Record<string, number>> = {
 }
 
 const LABELS: Record<AuroraInfluenceType, string> = {
+  bevel:'Bevel',boolean:'Boolean',
+  solidify:'Solidify',screw:'Screw',
   array: 'Array', 'radial-array': 'Radial Array', mirror: 'Mirror', subdivide: 'Subdivide', displace: 'Displace', twist: 'Twist',
 }
 
@@ -24,6 +28,7 @@ export interface InfluenceMutation {
   influenceId?: string
   name?: string
   enabled?: boolean
+  targetId?: string
   parameters?: Record<string, number>
 }
 
@@ -35,6 +40,10 @@ export function upsertProjectInfluence(snapshot: SerializedEditorState, mutation
   if (!object) throw new Error(`Unknown 3D object: ${mutation.objectId}`)
   object.influences ??= []
   const existing = mutation.influenceId ? object.influences.find((item) => item.id === mutation.influenceId) : undefined
+  const targetId = mutation.type === 'boolean' ? mutation.targetId ?? (existing?.type === 'boolean' ? existing.targetId : undefined) : undefined
+  if (targetId && (targetId === object.id || !scene.objects.some(item => item.id === targetId && item.type === 'mesh'))) {
+    throw new Error('Boolean target must be another mesh in the same scene')
+  }
   const influenceId = existing?.id ?? mutation.influenceId ?? randomUUID()
   const values = { ...DEFAULTS[mutation.type], ...(mutation.parameters ?? {}) }
   const parameters = Object.fromEntries(Object.entries(values).map(([key, value]) => {
@@ -48,6 +57,7 @@ export function upsertProjectInfluence(snapshot: SerializedEditorState, mutation
     name: mutation.name?.trim() || existing?.name || LABELS[mutation.type],
     enabled: mutation.enabled ?? existing?.enabled ?? true,
     parameters,
+    ...(targetId ? { targetId } : {}),
   }
   if (existing) object.influences.splice(object.influences.indexOf(existing), 1, influence)
   else object.influences.push(influence)

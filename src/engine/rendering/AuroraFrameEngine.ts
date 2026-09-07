@@ -16,6 +16,7 @@ export interface AuroraFrameEngineOptions {
   /** False disables persistent frame caching; a custom store keeps tests and embedded renderers isolated. */
   frameCache?: FrameCacheStore | false
   onFrameCached?: (event: AuroraFrameCacheEvent) => void
+  onFrameRendered?: (read: () => import('./contracts').CachedFramePixels | null) => void
 }
 
 export interface AuroraEngineStats extends HybridRendererStats {
@@ -53,6 +54,7 @@ export class AuroraFrameEngine {
   private readonly adaptiveQuality: boolean
   private readonly frameCache: FrameCacheStore | null
   private readonly onFrameCached?: (event: AuroraFrameCacheEvent) => void
+  private readonly onFrameRendered?: AuroraFrameEngineOptions['onFrameRendered']
   private pending: PendingFrame | null = null
   private running = false
   private draining: Promise<void> | null = null
@@ -73,6 +75,7 @@ export class AuroraFrameEngine {
       ? null
       : options.frameCache ?? (typeof indexedDB === 'undefined' ? null : auroraFrameCache)
     this.onFrameCached = options.onFrameCached
+    this.onFrameRendered = options.onFrameRendered
     this.stats = {
       ...emptyBackendStats(canvas.width, canvas.height), cpuFrameMs: 0, averageFrameMs: 0,
       droppedRequests: 0, graphCacheHit: false, graphPasses: 0, uniqueSources: 0,
@@ -155,6 +158,7 @@ export class AuroraFrameEngine {
       }
     }
     if (frameCacheHit || request.cacheWrite) this.onFrameCached?.({ ...address, hit: frameCacheHit })
+    this.onFrameRendered?.(() => this.backend.readPixels?.() ?? null)
     const elapsed = performance.now() - started
     this.averageFrameMs = this.averageFrameMs ? this.averageFrameMs * .88 + elapsed * .12 : elapsed
     if (interactive && this.adaptiveQuality && request.quality === 'preview') this.updateAdaptiveQuality()

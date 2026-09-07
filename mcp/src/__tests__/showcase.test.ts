@@ -114,4 +114,15 @@ describe('MCP Pillar Run authoring', () => {
     expect(result.influence.parameters.scaleStep?.value).toBe(1)
     expect(result.scene.revision).toBe(2)
   })
+  it('preserves Boolean operands across updates and rejects self or missing targets', () => {
+    const snapshot = createPillarRunProject('Boolean Test', 'boolean-test')
+    const scene = snapshot.scenes3D[0]!
+    const meshes = scene.objects.filter(object => object.type === 'mesh')
+    const mutation = { projectId: snapshot.project.id, sceneId: scene.id, objectId: meshes[0]!.id, type: 'boolean' as const, influenceId: 'cut' }
+    const result = upsertProjectInfluence(snapshot, { ...mutation, targetId: meshes[1]!.id })
+    expect(result.influence.targetId).toBe(meshes[1]!.id)
+    expect(upsertProjectInfluence(snapshot, { ...mutation, parameters: { operation: 1 } }).influence.targetId).toBe(meshes[1]!.id)
+    expect(() => upsertProjectInfluence(snapshot, { ...mutation, targetId: meshes[0]!.id })).toThrow('another mesh')
+    expect(() => upsertProjectInfluence(snapshot, { ...mutation, targetId: 'missing' })).toThrow('another mesh')
+  })
 })

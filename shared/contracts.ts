@@ -93,6 +93,7 @@ export const serializedProjectSchema = z.object({
   nodes: z.array(editorEntitySchema),
   nodeConnections: z.array(editorEntitySchema),
   rigs: z.array(editorEntitySchema).default([]),
+  audioGraph: z.object({ nodes: z.array(editorEntitySchema), connections: z.array(editorEntitySchema) }).optional(),
 })
 export type SharedSerializedProject = z.infer<typeof serializedProjectSchema>
 

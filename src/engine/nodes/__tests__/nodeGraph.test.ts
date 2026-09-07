@@ -306,7 +306,8 @@ describe('node graph', () => {
   it('gives every registered kind usable sockets', () => {
     NODE_KINDS.forEach((kind) => {
       const node = createNode(kind, 0, 0)
-      expect(node.inputs.length + node.outputs.length).toBeGreaterThan(0)
+      if (kind === 'backdrop') expect(node.inputs.length + node.outputs.length).toBe(0)
+      else expect(node.inputs.length + node.outputs.length).toBeGreaterThan(0)
       expect(nodeHeight(node)).toBeGreaterThan(30)
       node.outputs.forEach((socket) => expect(socketPosition(node, socket.id, 'output')).not.toBeNull())
     })

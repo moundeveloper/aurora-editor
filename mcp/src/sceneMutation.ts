@@ -102,7 +102,7 @@ export interface LightMutation {
 }
 
 const LIGHT_INTENSITY_DEFAULTS: Record<AuroraLight['type'], number> = {
-  ambient: 1.5, directional: 1.5, point: 18, spot: 80,
+  ambient: 1.5, directional: 1.5, point: 18, spot: 80, area: 5,
 }
 
 function vectorProperties(id: string, values: Vector3Input | undefined, existing: AuroraLight['transform']['position'] | undefined, fallback: [number, number, number]) {

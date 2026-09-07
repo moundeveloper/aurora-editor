@@ -37,6 +37,7 @@ export function frameCacheAddress(request: RenderFrameRequest, quality: RenderQu
   const scope = request.cacheScope ?? `layers:${request.layers.map((layer) => layer.id).join(',')}`
   const version = request.cacheVersion ?? revision
   const parts = [
+    'renderer-4', // Invalidate earlier shared-GL, text, material, and working-gamut results.
     request.project.id, request.project.updatedAt, version, scope, request.renderRootNodeId ?? 'composite',
     frame, frameRate, size.width, size.height, quality,
   ]

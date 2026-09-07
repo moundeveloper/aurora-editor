@@ -8,6 +8,7 @@ import {
 } from '@lucide/vue'
 import { useEditorStore } from '@/stores/editor'
 import type { AuroraFrameEngine } from '@/engine/rendering/AuroraFrameEngine'
+import { publishScopeFrame } from '@/engine/rendering/scopes'
 import { evaluateNumericProperty } from '@/engine/animation/evaluateProperty'
 import { setNumericPropertyAtTime } from '@/engine/animation/editNumericProperty'
 import type { AuroraRig, EditorLayer, ShapePathPoint } from '@/models/editor'
@@ -28,7 +29,7 @@ const transformBox = ref<HTMLElement>()
 type MotionTool = 'Select' | 'Hand' | 'Zoom' | 'Text' | 'Rectangle' | 'Ellipse' | 'Pen' | 'Rig' | 'Transform'
 const activeTool = ref<MotionTool>('Select')
 const activeTransformMode = ref<'move' | 'scale' | 'rotate' | null>(null)
-const audioEnabled = ref(true)
+const audioEnabled = computed({ get: () => store.audioEnabled, set: value => { store.audioEnabled = value } })
 const showGrid = ref(false)
 const showGuides = ref(true)
 const viewportSize = ref({ width: 0, height: 0 })
@@ -806,7 +807,7 @@ onMounted(async () => {
   await nextTick()
   if (!canvas.value) return
   const { AuroraFrameEngine } = await import('@/engine/rendering/AuroraFrameEngine')
-  renderer = new AuroraFrameEngine(canvas.value, '/demo/aurora-ridge.png', { onFrameCached: store.recordFrameCached })
+  renderer = new AuroraFrameEngine(canvas.value, '/demo/aurora-ridge.png', { onFrameCached: store.recordFrameCached, onFrameRendered: publishScopeFrame })
   await renderer.initialize({ ...previewRenderSize.value, pixelRatio: 1 })
   if (canvasWrap.value) {
     resizeObserver = new ResizeObserver(([entry]) => {

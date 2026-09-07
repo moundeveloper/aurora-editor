@@ -17,6 +17,13 @@ import { MediaTextureCache } from '@/engine/rendering/mediaTextures'
 import { AuroraSceneRenderPipeline } from '@/engine/rendering/AuroraSceneRenderPipeline'
 import { effectiveMotionBlurSamples, motionBlurSampleTimes } from '@/engine/rendering/motionBlur'
 import { mediaUrl } from '../../../shared/contracts.ts'
+import { bindNumericScope } from '@/engine/animation/propertyScope'
+import { sharedAudioEngine } from '@/engine/audio/AudioEngine'
+import { layerSampleTime, sourceTime } from '@/engine/animation/timeRemap'
+import { textUnits, textAnimatorWeight, pointAlongOutline, layoutTextLines } from '@/engine/animation/textAnimation'
+import { shapeOutline } from '@/engine/shapes/shapeGeometry'
+import { evaluatedShapePoint } from '@/engine/shapes/shapeAnimation'
+import {prepareTextFont,textFontFamily} from '@/engine/animation/textFonts'
 
 /** Colour nodes fold into one matrix so a chain of them still costs a single filter pass. */
 function colorFilterFor(effects: GraphEffects) {
@@ -167,6 +174,8 @@ export class HybridWebGLRenderBackend implements RenderBackend {
   private readonly frameTextures = new Map<string, Texture>()
   /** Rigs this frame's passes may be attached to, resolved once instead of per layer. */
   private readonly frameRigs = new Map<string, AuroraRig>()
+  private frameLayers = new Map<string, EditorLayer>()
+  private frameTime = 0
   /** Static display objects and filters survive frames; only their evaluated transform is updated. */
   private readonly pixiPassCache = new Map<string, PixiPassCacheEntry>()
   private readonly activePixiPasses = new Set<string>()
@@ -174,6 +183,8 @@ export class HybridWebGLRenderBackend implements RenderBackend {
   private initialized = false
   private initialization: Promise<void> | null = null
   private contextLost = false
+  private propertyScopeRevision: number | undefined
+  private propertyScopeLayers: EditorLayer[] | null = null
   private lastStats: HybridRendererStats = {
     backend: 'WebGL2', pixiPasses: 0, pixiBatches: 0, threePasses: 0, threeDrawCalls: 0, triangles: 0, width: 1, height: 1,
   }
@@ -218,6 +229,8 @@ export class HybridWebGLRenderBackend implements RenderBackend {
 
     this.pixiRenderer = new WebGLRenderer()
     await this.pixiRenderer.init({
+      // Sharing a context also requires sharing its canvas (size and context-loss events).
+      canvas: this.canvas,
       context: this.threeRenderer.getContext() as WebGL2RenderingContext,
       width: options.width,
       height: options.height,
@@ -255,6 +268,15 @@ export class HybridWebGLRenderBackend implements RenderBackend {
   }
 
   async renderFrame(request: RenderFrameRequest): Promise<RenderSurface> {
+    if (this.propertyScopeLayers !== request.layers || this.propertyScopeRevision !== request.revision || request.revision === undefined) {
+      bindNumericScope({ layers: request.layers, scenes: request.scenes3D, rigs: request.rigs }, (id, time) => {
+        const layer = request.layers.find(layer => layer.id === id)
+        if (!layer || layer.muted || time < layer.start || time >= layer.start + layer.duration) return 0
+        return sharedAudioEngine.amplitude(request.assets?.find(asset => asset.id === layer.assetId), time - layer.start + (layer.sourceOffset ?? 0))
+      })
+      this.propertyScopeLayers = request.layers
+      this.propertyScopeRevision = request.revision
+    }
     if (!this.initialized) await this.initialize({ width: request.width, height: request.height, pixelRatio: this.pixelRatio })
     if (!this.threeRenderer || !this.pixiRenderer || this.contextLost) return this.surface(request.width, request.height)
     const size = resolveRenderSize(request.width, request.height, request.quality)
@@ -262,7 +284,11 @@ export class HybridWebGLRenderBackend implements RenderBackend {
     const plan = request.compiledPlan
       ? { ...request.compiledPlan, width: size.width, height: size.height, quality: request.quality }
       : createRenderPlan({ ...request, width: size.width, height: size.height })
-    const layerMap = new Map(request.layers.map((layer) => [layer.id, layer]))
+    const layerMap = new Map<string,EditorLayer>()
+    const indexLayer=(layer:EditorLayer)=>{layerMap.set(layer.id,layer);layer.children?.forEach(indexLayer)}
+    request.layers.forEach(indexLayer)
+    this.frameTime=request.time
+    this.frameLayers = layerMap
     this.frameRigs.clear()
     ;(request.rigs ?? []).forEach((rig) => this.frameRigs.set(rig.id, rig))
     const sceneMap = new Map(request.scenes3D.map((scene) => [scene.id, scene]))
@@ -286,12 +312,12 @@ export class HybridWebGLRenderBackend implements RenderBackend {
       const ephemeral: Container[] = []
       pixiBatch.forEach(({ pass, layer }) => {
         const appended = this.appendPixiLayer(
-          stage, pass.id, request.revision, layer, request.time, size.width, size.height,
+          stage, pass.id, request.revision, layer, layerSampleTime(layer, request.time), size.width, size.height,
           request.project.width, request.project.height, pass.effects, pass.blendMode, layerMap,
         )
         if (appended && !appended.cached) ephemeral.push(appended.container)
       })
-      this.pixiRenderer!.resetState()
+      this.preparePixiRender()
       this.pixiRenderer!.render({ container: stage, clear: false })
       pixiBatches += 1
       stage.removeChildren()
@@ -308,7 +334,7 @@ export class HybridWebGLRenderBackend implements RenderBackend {
         const scene = pass.sceneId ? sceneMap.get(pass.sceneId) : undefined
         if (!scene) return
         this.renderThreeLayer(
-          layer, scene, request.time, size.width, size.height, request.project.width, request.project.height,
+          layer, scene, layerSampleTime(layer, request.time), size.width, size.height, request.project.width, request.project.height,
           request.project.frameRate, request.project.duration, request.quality, pass.effects, layerMap,
           request.assets ?? [], request.rigs ?? [], request.transparentBackground === true,
           request.playback === true,
@@ -382,7 +408,6 @@ export class HybridWebGLRenderBackend implements RenderBackend {
     this.threeRenderer.setClearColor(0x000000, 1)
     this.threeRenderer.clear(true, true, true)
     this.threeRenderer.render(this.cachePresentScene, this.cachePresentCamera)
-    this.pixiRenderer.resetState()
     this.cachePresentMaterial.map = null
     texture.dispose()
     this.lastStats = { ...this.lastStats, pixiPasses: 0, pixiBatches: 0, threePasses: 0, width: frame.width, height: frame.height }
@@ -399,20 +424,26 @@ export class HybridWebGLRenderBackend implements RenderBackend {
   private async resolveFrameTextures(plan: RenderPlan, layerMap: Map<string, EditorLayer>, assets: MediaAsset[], time: number, playback: boolean) {
     this.frameTextures.clear()
     const assetMap = new Map(assets.map((asset) => [asset.id, asset]))
-    await Promise.all(plan.passes.map(async (pass) => {
-      const layer = layerMap.get(pass.layerId)
+    const resolve = async (layer: EditorLayer | undefined, at: number, sequential: boolean): Promise<void> => {
+      if (layer?.type === 'text') {await prepareTextFont(layer);return}
+      if (layer?.type === 'cluster') {
+        await Promise.all((layer.children ?? []).map(child => resolve(child, layerSampleTime(layer, at), sequential && !layer.timeRemap)))
+        return
+      }
       if (!layer || (layer.type !== 'video' && layer.type !== 'image')) return
       const asset = layer.assetId ? assetMap.get(layer.assetId) : undefined
       if (!asset?.hash) return
       const url = mediaUrl(asset.hash)
       const texture = layer.type === 'video'
-        ? await this.mediaTextures.videoFrame(url, Math.max(0, time - layer.start), playback)
+        ? await this.mediaTextures.videoFrame(url, Math.max(0, sourceTime(layer, at)), sequential && !layer.timeRemap)
         : await this.mediaTextures.image(url)
       if (texture) this.frameTextures.set(layer.id, texture)
-    }))
+    }
+    await Promise.all(plan.passes.map(pass => resolve(layerMap.get(pass.layerId), time, playback)))
   }
 
   private maskRasterFor(layer: EditorLayer, effect: MaskEffect, time: number, width: number, height: number, projectWidth: number, projectHeight: number) {
+    time=layerSampleTime(layer,this.frameTime)
     const geometryKey = maskGeometryKey(layer, time, width, height, projectWidth, projectHeight)
     let geometryEntry = this.maskGeometryCache.get(layer.id)
     if (geometryEntry?.key !== geometryKey) {
@@ -458,7 +489,7 @@ export class HybridWebGLRenderBackend implements RenderBackend {
     layerMap: Map<string, EditorLayer>,
   ): AppendedPixiLayer | null {
     if (!this.pixiRenderer || !this.threeRenderer) return null
-    const cacheable = (layer.type === 'text' || layer.type === 'shape') && !effects.mask && effects.vignetteAmount <= 0
+    const cacheable = (layer.type === 'text' || layer.type === 'shape') && !layer.shapePath?.points.some(point=>point.channels) && !layer.textAnimators?.length && !layer.textPathId && !effects.mask && effects.vignetteAmount <= 0
     const fallbackRevision = revision === undefined ? JSON.stringify({ layer, effects, blendMode }) : revision
     const cacheKey = `${fallbackRevision}|${width}x${height}|${projectWidth}x${projectHeight}`
     const cached = cacheable ? this.pixiPassCache.get(passId) : undefined
@@ -571,7 +602,8 @@ export class HybridWebGLRenderBackend implements RenderBackend {
 
     if (layer.type === 'cluster') {
       ;[...(layer.children ?? [])].reverse().forEach((child) => {
-        const childContainer = this.createPixiLayer(child, time, width, height, projectWidth, projectHeight)
+        if (!child.visible || child.isPlaceholder || time < child.start || time >= child.start + child.duration) return
+        const childContainer = this.createPixiLayer(child, layerSampleTime(child, time), width, height, projectWidth, projectHeight)
         if (childContainer) {
           childContainer.position.x -= width / 2
           childContainer.position.y -= height / 2
@@ -611,14 +643,58 @@ export class HybridWebGLRenderBackend implements RenderBackend {
       return container
     }
     if (layer.type === 'text') {
+      const style = {
+        fill: layer.textColor ?? '#f3eee6', fontFamily: textFontFamily(layer),
+        fontSize: Math.max(1, (layer.textSize ?? 42) * scaleX), fontWeight: '600' as const, letterSpacing: 4 * scaleX,
+      }
+      if (layer.textAnimators?.length || layer.textPathId) {
+        const content = layer.textContent ?? layer.name
+        const glyphs = textUnits(content, 'character')
+        const words = textUnits(content, 'word')
+        const path = layer.textPathId ? this.frameLayers.get(layer.textPathId) : undefined
+        const pathTime=path ? layerSampleTime(path,this.frameTime) : time
+        const outline = path ? shapeOutline(path, 64, pathTime) : null
+        if(outline && path) {
+          const at=(key:keyof EditorLayer['transform'])=>evaluateNumericProperty(path.transform[key],pathTime)
+          const rotation=at('rotation')*Math.PI/180,cos=Math.cos(rotation),sin=Math.sin(rotation)
+          outline.points=outline.points.map(([x,y])=>{
+            const sx=x*at('scaleX')/100,sy=y*at('scaleY')/100
+            return [at('x')-projectWidth/2+sx*cos-sy*sin,at('y')-projectHeight/2+sx*sin+sy*cos]
+          })
+        }
+        const texts = glyphs.map(glyph => new Text({ text: /^\r?\n$/.test(glyph.text) ? '' : glyph.text, style: { ...style, fill: '#ffffff',letterSpacing:0 } }))
+        const positions=layoutTextLines(glyphs.map(glyph=>glyph.text),texts.map(text=>text.width),style.letterSpacing,style.fontSize*1.25)
+        const widthTotal = texts.reduce((sum, text) => sum + text.width + style.letterSpacing, 0)
+        let cursor = -widthTotal / 2
+        for (let i = 0; i < texts.length; i++) {
+          const text = texts[i]!, advance = text.width + style.letterSpacing
+          text.anchor.set(.5)
+          text.tint = style.fill
+          text.position.set(positions[i]!.x,positions[i]!.y)
+          if (outline) {
+            const at = pointAlongOutline(outline.points, outline.closed, (cursor + widthTotal / 2 + advance / 2) / scaleX + (layer.textPathOffset ? evaluateNumericProperty(layer.textPathOffset, time) : 0))
+            text.position.set(at.x * scaleX, at.y * scaleY); text.rotation = at.rotation
+          }
+          for (const animator of layer.textAnimators ?? []) {
+            const index = animator.unit === 'word' ? words[i]!.index : i
+            const count = animator.unit === 'word' ? (words.at(-1)?.index ?? 0) + 1 : texts.length
+            const weight = textAnimatorWeight(animator, index, count, time)
+            const at = (key: keyof typeof animator.parameters) => evaluateNumericProperty(animator.parameters[key], time)
+            text.x += at('x') * scaleX * weight; text.y += at('y') * scaleY * weight
+            text.rotation += THREE.MathUtils.degToRad(at('rotation')) * weight
+            text.alpha *= 1 + (at('opacity') / 100 - 1) * weight
+            const base = new THREE.Color(text.tint), tint = new THREE.Color(animator.color)
+            text.tint = `#${base.lerp(tint, weight).getHexString()}`
+          }
+          container.addChild(text)
+          cursor += advance
+        }
+        return container
+      }
       const text = new Text({
         text: layer.textContent ?? layer.name,
         style: {
-          fill: '#f3eee6',
-          fontFamily: 'Inter, system-ui, sans-serif',
-          fontSize: Math.max(18, 42 * scaleX),
-          fontWeight: '600',
-          letterSpacing: Math.max(1, 4 * scaleX),
+          ...style,
           dropShadow: { color: '#7684dc', alpha: .6, blur: 8, distance: 0 },
         },
       })
@@ -636,7 +712,7 @@ export class HybridWebGLRenderBackend implements RenderBackend {
       const shapeHeight = (layer.shapeHeight ?? 180) * scaleY
       if (layer.shapeKind === 'ellipse') graphics.ellipse(0, 0, shapeWidth / 2, shapeHeight / 2)
       else if (layer.shapeKind === 'path' && layer.shapePath?.points.length) {
-        const points = layer.shapePath.points
+        const points = layer.shapePath.points.map(point=>evaluatedShapePoint(point,time))
         const first = points[0]!
         graphics.moveTo(first.position[0] * scaleX, first.position[1] * scaleY)
         for (let index = 1; index < points.length; index += 1) {
@@ -782,7 +858,6 @@ export class HybridWebGLRenderBackend implements RenderBackend {
       this.threeRenderer.autoClear = false
       this.threeRenderer.clearDepth()
       this.threeRenderer.render(this.maskCompositeScene, this.maskCompositeCamera)
-      this.pixiRenderer?.resetState()
     } else {
       // An unmasked 3D scene can still take the direct path and avoid allocating an intermediate pass.
       const opacityRestore: Array<{ material: THREE.Material & { opacity: number }; opacity: number }> = []
@@ -807,14 +882,21 @@ export class HybridWebGLRenderBackend implements RenderBackend {
         runtime.scene.background = background
       }
       opacityRestore.forEach(({ material, opacity }) => { material.opacity = opacity })
-      this.pixiRenderer?.resetState()
     }
     const vignette = vignetteOverlay(effects, width, height)
     if (vignette && this.pixiRenderer) {
+      this.preparePixiRender()
       this.pixiRenderer.render({ container: vignette, clear: false })
       vignette.destroy()
       this.threeRenderer.resetState()
     }
+  }
+
+  private preparePixiRender() {
+    // Post-processing leaves GL state outside Pixi's cache. Reset the outgoing renderer first:
+    // resetting only Pixi can make the next filtered layer erase the composite underneath it.
+    this.threeRenderer!.resetState()
+    this.pixiRenderer!.resetState()
   }
 
   private surface(width: number, height: number): RenderSurface {

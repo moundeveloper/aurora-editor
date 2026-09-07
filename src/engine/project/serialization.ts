@@ -12,6 +12,7 @@ import { createLayerEffect, layerEffectParameters, normalizeLayerEffectStacks } 
 export const CURRENT_PROJECT_VERSION = 14
 
 export interface EditorStateFallback {
+  audioGraph?: SerializedEditorState['audioGraph']
   project: EditorProject
   layers: EditorLayer[]
   scenes3D: Aurora3DScene[]
@@ -168,7 +169,10 @@ function normalizeScene(scene: Aurora3DScene): Aurora3DScene {
     motionBlur: false, motionBlurShutter: 180, motionBlurSamples: 8,
     quality: 'preview', backgroundColor: null,
   }
-  scene.settings.shadows = scene.settings.shadows !== false
+    scene.settings.shadows = scene.settings.shadows !== false
+    if (!['linear-srgb', 'linear-display-p3'].includes(scene.settings.workingColorSpace ?? '')) scene.settings.workingColorSpace = 'linear-srgb'
+    if (!['aces','agx','neutral','standard'].includes(scene.settings.viewTransform ?? '')) scene.settings.viewTransform = 'aces'
+    scene.settings.exposureStops = Math.max(-10,Math.min(10,finiteOr(scene.settings.exposureStops,0)))
   scene.settings.shadowMapSize = Math.max(256, Math.min(4096, finiteOr(scene.settings.shadowMapSize, 1024)))
   scene.settings.ambientOcclusion = scene.settings.ambientOcclusion !== false
   scene.settings.ambientOcclusionIntensity = Math.max(0, Math.min(3, finiteOr(scene.settings.ambientOcclusionIntensity, 1)))
@@ -351,7 +355,8 @@ export function serializeEditorState(state: SerializedEditorState): string {
     assets: state.assets.map((asset) => ({ ...asset, thumbnail: asset.thumbnail?.startsWith('blob:') ? undefined : asset.thumbnail })),
     nodes: state.nodes,
     nodeConnections: state.nodeConnections,
-    rigs: state.rigs,
+      rigs: state.rigs,
+      audioGraph: state.audioGraph,
   })
 }
 
@@ -419,6 +424,7 @@ export function deserializeEditorState(raw: string | null, fallback: EditorState
       scenes3D: normalizedScenes,
       assets,
       rigs,
+      audioGraph: parsed.audioGraph ? clone(parsed.audioGraph) : undefined,
     }
   } catch {
     return cloneFallback(fallback)

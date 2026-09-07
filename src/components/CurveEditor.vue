@@ -5,6 +5,9 @@ import { Activity, ChevronDown, Focus, Move, Spline, TimerReset, ZoomIn, ZoomOut
 import { useEditorStore } from '@/stores/editor'
 import { influenceParameters } from '@/engine/scene3d/influences'
 import { rigBoneChannels } from '@/engine/rig/rigFactory'
+import { evaluateNumericProperty } from '@/engine/animation/evaluateProperty'
+import CurveModifiers from './common/CurveModifiers.vue'
+import PropertyDriver from './common/PropertyDriver.vue'
 import type { AnimatableProperty, EditorLayer, Keyframe } from '@/models/editor'
 
 type TransformKey = keyof EditorLayer['transform']
@@ -73,6 +76,10 @@ const channelDefinitions = computed<ChannelOption[]>(() => {
     return [
       ...motionChannelDefinitions.map((definition) => ({ ...definition, key: transform[definition.key].id, property: transform[definition.key] })),
       ...rigChannels(selectedLayer.value?.rigId),
+      ...(selectedLayer.value?.shapePath?.points ?? []).flatMap((point,index)=>Object.entries(point.channels ?? {}).map(([name,property])=>({key:property!.id,label:`Point ${index+1} · ${name}`,color:'#8fd3b6',suffix:'px',property:property!}))),
+      ...(selectedLayer.value?.timeRemap ? [{ key: selectedLayer.value.timeRemap.id, label: 'Source time', color: '#d39ae8', suffix: 's', property: selectedLayer.value.timeRemap }] : []),
+      ...(selectedLayer.value?.textPathOffset ? [{ key: selectedLayer.value.textPathOffset.id, label: 'Text path offset', color: '#d39ae8', suffix: 'px', property: selectedLayer.value.textPathOffset }] : []),
+      ...(selectedLayer.value?.textAnimators ?? []).flatMap((animator, index) => Object.entries(animator.parameters).map(([key, property]) => ({ key: property.id, label: `Text ${index + 1} · ${key}`, color: '#d39ae8', suffix: '', property }))),
     ]
   }
   const selected = selectedSceneEntity.value
@@ -145,7 +152,15 @@ const timeBounds = computed(() => ({
   max: props.mode === '3d' ? project.value.duration : (selectedLayer.value?.start ?? 0) + (selectedLayer.value?.duration ?? project.value.duration),
 }))
 const automaticValueBounds = computed(() => {
-  const values = displayedValues.value
+  const values = [...displayedValues.value]
+  const channel = activeChannel.value
+  if (channel?.driver?.enabled || channel?.modifiers?.some(modifier => modifier.enabled)) {
+    for (let index = 0; index <= 320; index++) {
+      const time = timeBounds.value.min + index / 320 * (timeBounds.value.max - timeBounds.value.min)
+      values.push(graphMode.value === 'value' ? evaluateNumericProperty(channel, time)
+        : (evaluateNumericProperty(channel, time + .001) - evaluateNumericProperty(channel, time - .001)) / .002)
+    }
+  }
   const rawMin = values.length ? Math.min(...values) : 0
   const rawMax = values.length ? Math.max(...values) : 100
   const spread = Math.max(10, rawMax - rawMin)
@@ -182,6 +197,15 @@ function easingFor(keyframe: Keyframe<number>) {
 }
 
 const curvePath = computed(() => {
+  if (activeChannel.value?.driver?.enabled || activeChannel.value?.modifiers?.some(modifier => modifier.enabled)) {
+    const channel = activeChannel.value
+    return Array.from({ length: 321 }, (_, index) => {
+      const time = timeBounds.value.min + (timeBounds.value.max - timeBounds.value.min) * index / 320
+      const value = graphMode.value === 'value' ? evaluateNumericProperty(channel, time)
+        : (evaluateNumericProperty(channel, time + .001) - evaluateNumericProperty(channel, time - .001)) / .002
+      return `${index ? 'L' : 'M'} ${toX(time)} ${toY(value)}`
+    }).join(' ')
+  }
   const graphPoints = points.value
   if (!graphPoints.length) return ''
   let path = `M ${graphPoints[0]!.x} ${graphPoints[0]!.y}`
@@ -496,10 +520,12 @@ onBeforeUnmount(() => {
       <button class="zoom-button" type="button" title="Zoom in" @click="zoomGraph(graphZoom.x * 1.25)"><ZoomIn :size="12" /></button>
       <span class="zoom-level">{{ zoomPercent }}%</span>
       <div v-if="showPropertyMenu" class="property-menu">
-        <button v-for="channel in animatedChannels" :key="channel.key" type="button" :class="{ active: activeProperty === channel.key }" @click="activeProperty = channel.key; showPropertyMenu = false"><i :style="{ background: channel.color }" />{{ channel.label }}<small>{{ channel.property.keyframes.length }} keys</small></button>
+        <button v-for="channel in channelDefinitions" :key="channel.key" type="button" :class="{ active: activeProperty === channel.key }" @click="activeProperty = channel.key; showPropertyMenu = false"><i :style="{ background: channel.color }" />{{ channel.label }}<small>{{ channel.property.keyframes.length }} keys</small></button>
       </div>
     </div>
 
+    <CurveModifiers v-if="activeChannel" :property="activeChannel" @change="mode === '3d' ? store.markSceneChanged() : store.markChanged()" />
+    <PropertyDriver v-if="activeChannel" :property="activeChannel" @change="mode === '3d' ? store.markSceneChanged() : store.markChanged()" />
     <div ref="graphRef" class="graph-surface" :class="{ panning: isPanning }" @wheel="onWheel">
       <svg :viewBox="`0 0 ${graphSize.width} ${graphSize.height}`" preserveAspectRatio="none" aria-label="Animation curve editor" @pointerdown="beginSurfaceInteraction" @auxclick.prevent>
         <g class="grid-lines">
@@ -525,7 +551,7 @@ onBeforeUnmount(() => {
         </g>
       </svg>
       <div v-if="marqueeRect" class="selection-marquee" :style="{ left: `${marqueeRect.left}px`, top: `${marqueeRect.top}px`, width: `${marqueeRect.width}px`, height: `${marqueeRect.height}px` }" />
-      <div v-if="!sortedKeys.length" class="empty-graph"><Move :size="20" /><strong>No animated keys</strong><span>{{ mode === '3d' ? 'Select an animated 3D property or add keyframes in the Inspector.' : 'Enable animation and add keyframes in the Inspector.' }}</span></div>
+      <div v-if="!sortedKeys.length && !activeChannel?.driver?.enabled && !activeChannel?.modifiers?.some(modifier => modifier.enabled)" class="empty-graph"><Move :size="20" /><strong>No animated keys</strong><span>Add keyframes, a driver, or a curve modifier to animate this property.</span></div>
       <div v-if="activeDefinition" class="graph-legend"><span><i :style="{ background: activeDefinition.color }" />{{ activeDefinition.label }}</span><small>{{ sortedKeys.length }} keyframes · {{ graphMode === 'value' ? 'Value over time' : 'Speed preview' }}</small><em>Drag empty space to select · Ctrl/Shift add</em></div>
     </div>
   </section>

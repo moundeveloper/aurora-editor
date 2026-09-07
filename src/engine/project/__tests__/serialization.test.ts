@@ -10,6 +10,7 @@ import { CURRENT_PROJECT_VERSION, deserializeEditorState, serializeEditorState }
 import { createDemoNodeGraph } from '@/engine/nodes/nodeGraph'
 import { createRig, createRigBone } from '@/engine/rig/rigFactory'
 import { AuroraProjectDatabase } from '@/engine/project/AuroraProjectDatabase'
+import { defaultAudioGraph } from '@/engine/audio/audioGraph'
 import type { EditorLayer, EditorProject, Scene3DSettings, SerializedEditorState } from '@/models/editor'
 
 const project: EditorProject = {
@@ -36,6 +37,33 @@ const layers: EditorLayer[] = [
 ]
 
 describe('hybrid project architecture', () => {
+  it('preserves audio routes in JSON and the offline database', async () => {
+    const audioGraph = defaultAudioGraph()
+    audioGraph.nodes[0]!.gain = -9
+    const state: SerializedEditorState = { project, layers, scenes3D: [], assets: [], rigs: [], ...createDemoNodeGraph2(), audioGraph }
+    expect(deserializeEditorState(serializeEditorState(state), state).audioGraph).toEqual(audioGraph)
+    const database = new AuroraProjectDatabase(`audio-${crypto.randomUUID()}`)
+    try {
+      await database.saveSnapshot(state)
+      expect((await database.loadSnapshot(project.id))?.audioGraph).toEqual(audioGraph)
+    } finally { await database.delete() }
+  })
+  it('round-trips library references in PBR texture slots', () => {
+    const scene = createDemo3DScene()
+    const maps = { map: 'color', normalMap: 'normal', roughnessMap: 'roughness', metalnessMap: 'metal', emissiveMap: 'emission' }
+    scene.objects[0]!.material.maps = maps
+    const state: SerializedEditorState = { project, layers, scenes3D: [scene], assets: [], ...createDemoNodeGraph2() }
+    expect(deserializeEditorState(serializeEditorState(state), state).scenes3D[0]!.objects[0]!.material.maps).toEqual(maps)
+  })
+
+  it('persists working gamut and display settings while keeping legacy scenes in linear sRGB', () => {
+    const scene = createDemo3DScene()
+    const state: SerializedEditorState = { project, layers, scenes3D: [scene], assets: [], ...createDemoNodeGraph2() }
+    expect(deserializeEditorState(serializeEditorState(state), state).scenes3D[0]!.settings.workingColorSpace).toBe('linear-srgb')
+    Object.assign(scene.settings, { workingColorSpace: 'linear-display-p3', viewTransform: 'agx', exposureStops: -1.5 })
+    expect(deserializeEditorState(serializeEditorState(state), state).scenes3D[0]!.settings).toMatchObject({ workingColorSpace: 'linear-display-p3', viewTransform: 'agx', exposureStops: -1.5 })
+  })
+
   it('round-trips serialized 3D metadata without runtime Three objects', () => {
     const state: SerializedEditorState = { project, layers, scenes3D: [createDemo3DScene()], assets: [], ...createDemoNodeGraph2() }
     const json = serializeEditorState(state)

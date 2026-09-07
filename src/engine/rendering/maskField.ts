@@ -1,4 +1,5 @@
 import { evaluateNumericProperty } from '@/engine/animation/evaluateProperty'
+import { evaluatedShapePoint } from '@/engine/shapes/shapeAnimation'
 import { shapeOutline, shapeSegmentCount, type ShapePoint } from '@/engine/shapes/shapeGeometry'
 import type { EditorLayer } from '@/models/editor'
 
@@ -62,7 +63,7 @@ export function transformPerimeter(layer: EditorLayer, time: number, width: numb
    * the wider the feather, the further from the outline those corners sit and the more obvious they
    * get. The field is cached per shape and transform, so the cost lands once per edit, not per frame.
    */
-  const outline = shapeOutline(layer, 24)
+  const outline = shapeOutline(layer, 24, time)
   if (!outline.closed) return null
   return {
     segmentIndex: outline.segmentIndex,
@@ -439,6 +440,7 @@ export function maskGeometryKey(layer: EditorLayer, time: number, width: number,
   return [
     width, height, projectWidth, projectHeight,
     layer.shapeKind, layer.shapeWidth, layer.shapeHeight, shapeSegmentCount(layer), JSON.stringify(layer.shapePath ?? null),
+    JSON.stringify(layer.shapePath?.points.map(point=>evaluatedShapePoint(point,time))),
     evaluateNumericProperty(layer.transform.x, time), evaluateNumericProperty(layer.transform.y, time),
     evaluateNumericProperty(layer.transform.scaleX, time), evaluateNumericProperty(layer.transform.scaleY, time),
     evaluateNumericProperty(layer.transform.rotation, time),

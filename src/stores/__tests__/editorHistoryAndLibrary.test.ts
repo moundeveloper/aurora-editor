@@ -6,6 +6,18 @@ import { useEditorStore } from '../editor'
 describe('editor history and Library management', () => {
   beforeEach(() => setActivePinia(createPinia()))
 
+  it('restores persisted audio graph edits through undo and redo', () => {
+    const store = useEditorStore()
+    store.setWorkspace('Audio')
+    store.audioGraph.nodes[0]!.gain = -12
+    expect(store.canUndo).toBe(true)
+    store.undo()
+    expect(store.audioGraph.nodes[0]!.gain).toBe(0)
+    expect(store.canRedo).toBe(true)
+    store.redo()
+    expect(store.audioGraph.nodes[0]!.gain).toBe(-12)
+  })
+
   it('undoes and redoes project edits globally and restores their workspace context', () => {
     const store = useEditorStore()
     const initialLayerCount = store.layers.length
@@ -58,6 +70,24 @@ describe('editor history and Library management', () => {
     expect(store.updateClusterSettings(asset.id, { name: 'Square Cards', width: 1200, height: 1200 })).toBe(true)
     expect(cluster).toMatchObject({ name: 'Square Cards', width: 1200, height: 1200 })
     expect(asset).toMatchObject({ name: 'Square Cards', dimensions: '1200 × 1200' })
+  })
+
+  it('preserves public controls and internal drivers when instantiating a cluster', () => {
+    const store = useEditorStore()
+    const child = store.addTimelineLayer('text')
+    const cluster = store.createEmptyCluster({name:'Driven title',width:800,height:600})!
+    cluster.children = [JSON.parse(JSON.stringify(child))]
+    const original = cluster.children[0]!
+    original.transform.y.driver = {enabled:true,sourceId:original.transform.x.id,expression:'source + 10'}
+    cluster.publicParameters = [{id:'control',label:'Title X',propertyId:original.transform.x.id}]
+    store.markChanged()
+    const copy = store.addAssetToTimeline(cluster.assetId!,3)!
+    const copied = copy.children![0]!
+    expect(copied.transform.x.id).not.toBe(original.transform.x.id)
+    expect(copy.publicParameters![0]!.propertyId).toBe(copied.transform.x.id)
+    expect(copied.transform.y.driver!.sourceId).toBe(copied.transform.x.id)
+    copied.transform.x.value = 42
+    expect(original.transform.x.value).not.toBe(42)
   })
 
   it('deletes reusable Library assets without deleting their authored layers and can undo it', () => {

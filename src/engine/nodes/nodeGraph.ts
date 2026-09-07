@@ -75,6 +75,8 @@ export const MATH_OPERATIONS = [
 ]
 
 export const NODE_DEFINITIONS: Record<EditorNodeKind, NodeKindDefinition> = {
+  reroute: {kind:'reroute',label:'Reroute',category:'Composite',color:'#8792a9',inputs:[IMAGE_IN],outputs:[IMAGE_OUT],properties:[]},
+  backdrop: {kind:'backdrop',label:'Group / note',category:'Composite',color:'#68729a',inputs:[],outputs:[],properties:[]},
   image: {
     kind: 'image', label: 'Image', category: 'Input', color: '#5d80b6',
     inputs: [], outputs: [IMAGE_OUT], properties: [],

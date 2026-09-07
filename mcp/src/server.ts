@@ -100,6 +100,7 @@ export async function createAuroraMcpServer(root?: string) {
       influenceId: z.string().min(1).optional().describe('Existing influence id to update, or a stable id for a new influence'),
       name: z.string().min(1).max(128).optional(),
       enabled: z.boolean().optional(),
+      targetId: z.string().min(1).optional().describe('Another mesh in the same scene to use as the Boolean operand'),
       parameters: z.record(z.string(), z.number()).optional().describe('Influence parameter values; omitted parameters use editor defaults'),
     }),
     annotations: { destructiveHint: false, idempotentHint: false },

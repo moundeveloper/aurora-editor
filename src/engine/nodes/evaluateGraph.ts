@@ -60,6 +60,7 @@ function resolveValue(context: EvaluationContext, node: EditorNode, socketId: st
 }
 
 function evaluateValueNode(context: EvaluationContext, node: EditorNode, visiting: Set<string>): number {
+  if (node.kind === 'reroute') return node.inputs[0] ? resolveValue(context,node,node.inputs[0].id,visiting) : 0
   if (node.kind !== 'math') return 0
   const a = resolveValue(context, node, node.inputs[0]!.id, visiting)
   const b = resolveValue(context, node, node.inputs[1]!.id, visiting)

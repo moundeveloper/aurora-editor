@@ -1,4 +1,7 @@
 import * as THREE from 'three'
+import { solidifyGeometry, screwGeometry } from './shellGeometry'
+import { bevelGeometry } from './bevelGeometry'
+import { booleanGeometry } from './booleanGeometry'
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js'
 import { evaluateNumericProperty } from '@/engine/animation/evaluateProperty'
 import type { AnimatableProperty, AuroraInfluence, AuroraInfluenceType } from '@/models/editor'
@@ -24,6 +27,10 @@ export interface InfluenceDefinition {
 }
 
 export const INFLUENCE_DEFINITIONS: Record<AuroraInfluenceType, InfluenceDefinition> = {
+  bevel: {type:'bevel',label:'Bevel',description:'Chamfers low-poly convex solids (up to 32 planar faces). Concave and dense meshes retain their geometry.',parameters:[{key:'width',label:'Width',value:.1,min:0,step:.01}]},
+  boolean: {type:'boolean',label:'Boolean',description:'Subtract, union or intersect a closed manifold target. Uses the target’s non-boolean influences.',parameters:[{key:'operation',label:'Operation (0=subtract 1=union 2=intersect)',value:0,min:0,max:2,step:1}]},
+  solidify: {type:'solidify',label:'Solidify',description:'Adds a shell and closes open boundary edges.',parameters:[{key:'thickness',label:'Thickness',value:.1,step:.01}]},
+  screw: {type:'screw',label:'Screw',description:'Sweeps an open surface boundary around local Y. Closed meshes have no boundary to sweep.',parameters:[{key:'angle',label:'Angle',value:360,step:5},{key:'pitch',label:'Axial travel',value:0,step:.1},{key:'steps',label:'Steps',value:32,min:1,max:128,step:1}]},
   array: {
     type: 'array',
     label: 'Array',
@@ -150,7 +157,7 @@ export function influenceSignature(influences: AuroraInfluence[] | undefined, ti
       const values = influenceParameters(influence)
         .map((entry) => evaluateNumericProperty(entry.property, time).toFixed(4))
         .join(',')
-      return `${influence.id}:${influence.type}:${values}`
+        return `${influence.id}:${influence.type}:${influence.targetId ?? ''}:${values}`
     })
     .join('|')
 }
@@ -376,6 +383,10 @@ function applyTwist(geometry: THREE.BufferGeometry, influence: AuroraInfluence, 
 }
 
 const APPLIERS: Record<AuroraInfluenceType, (geometry: THREE.BufferGeometry, influence: AuroraInfluence, time: number) => THREE.BufferGeometry> = {
+  bevel: (geometry,influence,time) => bevelGeometry(geometry,parameterValue(influence,'width',time)),
+  boolean: geometry => geometry,
+  solidify: (geometry,influence,time) => solidifyGeometry(geometry,parameterValue(influence,'thickness',time)),
+  screw: (geometry,influence,time) => screwGeometry(geometry,parameterValue(influence,'angle',time),parameterValue(influence,'pitch',time),parameterValue(influence,'steps',time)),
   array: applyArray,
   'radial-array': applyRadialArray,
   mirror: applyMirror,
@@ -388,12 +399,15 @@ const APPLIERS: Record<AuroraInfluenceType, (geometry: THREE.BufferGeometry, inf
  * Evaluates the stack in order on top of the untouched primitive geometry. The source is never
  * mutated; the caller owns the returned geometry unless it is the source itself.
  */
-export function applyInfluences(source: THREE.BufferGeometry, influences: AuroraInfluence[] | undefined, time: number) {
+export function applyInfluences(source: THREE.BufferGeometry, influences: AuroraInfluence[] | undefined, time: number, resolveTarget?: (id:string) => {geometry:THREE.BufferGeometry;matrix:THREE.Matrix4;dispose:()=>void} | null) {
   const active = influences?.filter((influence) => influence.enabled) ?? []
   if (!active.length) return source
   let result = source
   active.forEach((influence) => {
-    const next = APPLIERS[influence.type]?.(result, influence, time) ?? result
+    const target = influence.type === 'boolean' && influence.targetId ? resolveTarget?.(influence.targetId) : null
+    let next:THREE.BufferGeometry
+    try { next = target ? booleanGeometry(result,target.geometry,target.matrix,parameterValue(influence,'operation',time)) : APPLIERS[influence.type]?.(result, influence, time) ?? result }
+    finally {target?.dispose()}
     if (next !== result && result !== source) result.dispose()
     result = next
   })

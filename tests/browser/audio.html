@@ -1,0 +1,27 @@
+<!doctype html><title>Audio engine verification</title><button id="run">Run audio checks</button><pre id="result">Ready</pre>
+<script type="module">
+import { buildAudioGraph, defaultAudioGraph } from '/src/engine/audio/audioGraph.ts'
+document.querySelector('#run').onclick = async () => {
+  const render = async (gain, mute, reverb = false) => {
+    const context = new OfflineAudioContext(2, 48000, 48000)
+    const graph = defaultAudioGraph()
+    graph.nodes[0].limiter = false
+    graph.nodes.push({ ...graph.nodes[0], id: 'source', kind: 'source', gain, mute })
+    if (reverb) {
+      graph.nodes.push({ ...graph.nodes[0], id: 'room', kind: 'reverb', mix: 100, room: 50 })
+      graph.connections.push({ id: 'a', from: 'source', to: 'room' }, { id: 'b', from: 'room', to: 'audio-master' })
+    } else graph.connections.push({ id: 'a', from: 'source', to: 'audio-master' })
+    const built = buildAudioGraph(context, graph, context.destination)
+    const source = context.createOscillator(); source.frequency.value = 440
+    source.connect(built.ports.get('source').input); source.start(); source.stop(.2)
+    const buffer = await context.startRendering(); built.dispose()
+    const data = buffer.getChannelData(0)
+    return { rms: Math.sqrt(data.slice(0, 9600).reduce((sum, value) => sum + value * value, 0) / 9600), tail: data.slice(15000).some(value => Math.abs(value) > .00001) }
+  }
+  try {
+    const normal = await render(0, false), quiet = await render(-6, false), muted = await render(0, true), room = await render(0, false, true)
+    const checks = { signal: Math.abs(normal.rms - .5) < .001, gain: Math.abs(quiet.rms / normal.rms - Math.pow(10, -.3)) < .001, mute: muted.rms === 0, reverbTail: room.tail }
+    document.querySelector('#result').textContent = JSON.stringify({ passed: Object.values(checks).every(Boolean), checks, normal, quiet, muted, room }, null, 2)
+  } catch (error) { document.querySelector('#result').textContent = error.stack }
+}
+</script>

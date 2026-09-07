@@ -1,4 +1,7 @@
 <script setup lang="ts">
+import ScatterControls from './common/ScatterControls.vue'
+import PhysicsControls from './common/PhysicsControls.vue'
+import LightLinkControls from './common/LightLinkControls.vue'
 import { computed, ref } from 'vue'
 import { storeToRefs } from 'pinia'
 import { Box, Camera, ChevronDown, ChevronUp, CircleDot, Image as ImageIcon, Layers3, Lock, Plus, RotateCcw, SlidersHorizontal, Spline, Sun, Target, Trash2 } from '@lucide/vue'
@@ -18,6 +21,16 @@ const store = useEditorStore()
 const { selectedLayer, selectedScene, selectedSceneEntity, currentTime, assets } = storeToRefs(store)
 const collapsed = ref<Record<string, boolean>>({})
 const expandedPoints = ref<Record<string, boolean>>({})
+const draggedInfluence = ref<string | null>(null)
+function dropInfluence(targetId: string) {
+  const selected = selectedSceneEntity.value
+  if (selected?.kind !== 'object' || !draggedInfluence.value) return
+  const stack = selected.value.influences, from = stack.findIndex(item => item.id === draggedInfluence.value), to = stack.findIndex(item => item.id === targetId)
+  draggedInfluence.value = null
+  if (from < 0 || to < 0 || from === to) return
+  const item = stack.splice(from,1)[0]!
+  stack.splice(to,0,item); store.markSceneChanged()
+}
 const entity = computed(() => selectedSceneEntity.value?.value)
 const transform = computed(() => entity.value?.transform)
 const scenePaths = computed(() => selectedScene.value?.paths ?? [])
@@ -28,6 +41,22 @@ const imageAssetOptions = computed<MSelectOption[]>(() => [
     .filter((asset) => asset.kind === 'image' || asset.kind === 'texture')
     .map((asset) => ({ value: asset.id, label: asset.name })),
 ])
+const materialSlots = [
+  { key: 'map', label: 'Base color map' },
+  { key: 'normalMap', label: 'Normal map' },
+  { key: 'roughnessMap', label: 'Roughness map' },
+  { key: 'metalnessMap', label: 'Metalness map' },
+  { key: 'emissiveMap', label: 'Emissive map' },
+] as const
+function setMaterialMap(slot: typeof materialSlots[number]['key'], value: string | number) {
+  const entity = selectedSceneEntity.value
+  if (entity?.kind !== 'object') return
+  const maps = { ...entity.value.material.maps }
+  if (value) maps[slot] = String(value)
+  else delete maps[slot]
+  entity.value.material.maps = maps
+  store.markSceneChanged()
+}
 const environmentOptions = computed<MSelectOption[]>(() => [
   { value: '', label: 'No environment' },
   ...assets.value.filter((asset) => asset.kind === 'hdr').map((asset) => ({ value: asset.id, label: asset.name })),
@@ -133,11 +162,17 @@ function pointModeLabel(mode: AuroraPathPointMode) {
         <button class="section-header" type="button" @click="toggle('material')"><ChevronDown :size="12" :class="{ closed: collapsed.material }" /><span>PBR Material</span><small>Standard</small></button>
         <div v-if="!collapsed.material" class="property-list">
           <label><span>Base color</span><input class="color-field" :value="selectedSceneEntity.value.material.baseColor" type="color" @input="selectedSceneEntity.value.material.baseColor = ($event.target as HTMLInputElement).value; store.markSceneChanged()" /></label>
+          <label><span>Emissive color</span><input class="color-field" :value="selectedSceneEntity.value.material.emissive" type="color" @input="selectedSceneEntity.value.material.emissive = ($event.target as HTMLInputElement).value; store.markSceneChanged()" /></label>
           <label v-for="property in (['metalness', 'roughness', 'opacity', 'emissiveIntensity'] as const)" :key="property" class="keyable">
             <span>{{ property === 'emissiveIntensity' ? 'Emissive intensity' : property }}</span>
             <NumberField :model-value="propertyValue(selectedSceneEntity.value.material[property])" :min="0" :max="property === 'emissiveIntensity' ? 10 : 1" :step=".05" :label="property" @update:model-value="store.set3DObjectMaterial(property, $event)" />
             <KeyframeControl :property="selectedSceneEntity.value.material[property]" :label="property" />
           </label>
+          <label v-for="slot in materialSlots" :key="slot.key">
+            <span>{{ slot.label }}</span>
+            <MSelect :model-value="selectedSceneEntity.value.material.maps?.[slot.key] ?? ''" :options="imageAssetOptions" :label="slot.label" @update:model-value="setMaterialMap(slot.key, $event)" />
+          </label>
+          <p class="section-note">Maps multiply material values. Roughness uses green; metalness uses blue. Set a light emissive color to reveal an emissive map.</p>
           <label class="check-row"><span>Cast shadows</span><button type="button" :class="{ checked: selectedSceneEntity.value.castShadow }" @click="selectedSceneEntity.value.castShadow = !selectedSceneEntity.value.castShadow; store.markSceneChanged()"><CircleDot :size="10" /></button></label>
           <label class="check-row"><span>Receive shadows</span><button type="button" :class="{ checked: selectedSceneEntity.value.receiveShadow }" @click="selectedSceneEntity.value.receiveShadow = !selectedSceneEntity.value.receiveShadow; store.markSceneChanged()"><CircleDot :size="10" /></button></label>
         </div>
@@ -150,17 +185,21 @@ function pointModeLabel(mode: AuroraPathPointMode) {
         :unavailable="selectedSceneEntity.value.primitive === 'plane' ? undefined : 'Rigs bend a flat card, so they attach to image planes.'"
       />
 
+      <ScatterControls v-if="selectedSceneEntity.kind === 'object' && selectedScene && selectedSceneEntity.value.type === 'mesh' && selectedSceneEntity.value.primitive !== 'model'" :object="selectedSceneEntity.value" :scene="selectedScene" />
+      <LightLinkControls v-if="selectedSceneEntity.kind === 'object' && selectedScene && selectedSceneEntity.value.type === 'mesh' && selectedSceneEntity.value.primitive !== 'model'" :object="selectedSceneEntity.value" :scene="selectedScene" />
+      <PhysicsControls v-if="selectedSceneEntity.kind === 'object' && selectedScene && !selectedSceneEntity.value.parentId && ['box','sphere'].includes(selectedSceneEntity.value.primitive) && selectedSceneEntity.value.type === 'mesh'" :object="selectedSceneEntity.value" :scene="selectedScene" />
       <section v-if="selectedSceneEntity.kind === 'object'" class="property-section">
         <button class="section-header" type="button" @click="toggle('influences')"><ChevronDown :size="12" :class="{ closed: collapsed.influences }" /><span>Influences</span><small>{{ selectedSceneEntity.value.influences?.length ?? 0 }} in stack</small></button>
         <div v-if="!collapsed.influences" class="influence-stack">
-          <article v-for="(influence, index) in selectedSceneEntity.value.influences ?? []" :key="influence.id" class="influence-block" :class="{ disabled: !influence.enabled }">
-            <header>
+          <article v-for="(influence, index) in selectedSceneEntity.value.influences ?? []" :key="influence.id" class="influence-block" :class="{ disabled: !influence.enabled }" @dragover.prevent @drop.prevent="dropInfluence(influence.id)">
+            <header draggable="true" @dragstart="draggedInfluence = influence.id" @dragend="draggedInfluence = null">
               <button type="button" :title="influence.enabled ? 'Disable influence' : 'Enable influence'" :class="{ checked: influence.enabled }" @click="store.toggle3DInfluence(influence.id)"><CircleDot :size="10" /></button>
               <strong :title="INFLUENCE_DEFINITIONS[influence.type].description">{{ influence.name }}</strong>
               <button type="button" title="Move earlier in the stack" :disabled="index === 0" @click="store.move3DInfluence(influence.id, -1)"><ChevronUp :size="10" /></button>
               <button type="button" title="Move later in the stack" :disabled="index === (selectedSceneEntity.value.influences?.length ?? 0) - 1" @click="store.move3DInfluence(influence.id, 1)"><ChevronDown :size="10" /></button>
               <button type="button" title="Remove influence" @click="store.remove3DInfluence(influence.id)"><Trash2 :size="10" /></button>
             </header>
+            <label v-if="influence.type === 'boolean'"><span>Target</span><MSelect :model-value="influence.targetId ?? ''" :options="[{value:'',label:'Choose mesh'}, ...(selectedScene?.objects ?? []).filter(item => item.id !== selectedSceneEntity!.value.id && item.type === 'mesh' && item.primitive !== 'model').map(item => ({value:item.id,label:item.name}))]" label="Boolean target" @update:model-value="influence.targetId = $event; store.markSceneChanged()" /></label>
             <label v-for="parameter in influenceParameters(influence)" :key="parameter.definition.key" class="keyable">
               <span>{{ parameter.definition.label }}</span>
               <NumberField :model-value="propertyValue(parameter.property)" :min="parameter.definition.min" :max="parameter.definition.max" :step="parameter.definition.step ?? .1" :label="parameter.definition.key" @update:model-value="store.set3DInfluenceParameter(influence.id, parameter.definition.key, $event)" />
@@ -367,12 +406,16 @@ function pointModeLabel(mode: AuroraPathPointMode) {
             <label><span>Full samples</span><NumberField :model-value="selectedScene.settings.motionBlurSamples" :min="2" :max="16" :step="1" label="full quality motion blur samples" @update:model-value="selectedScene.settings.motionBlurSamples = Math.round($event); store.markSceneChanged()" /></label>
             <p class="section-note">Preview uses up to 8 samples. Draft disables blur; full quality uses the authored count.</p>
           </template>
+          <label><span>View transform</span><MSelect :model-value="selectedScene.settings.viewTransform ?? 'aces'" :options="[{value:'aces',label:'ACES filmic'},{value:'agx',label:'AgX'},{value:'neutral',label:'Neutral'},{value:'standard',label:'Standard'}]" label="Scene view transform" @update:model-value="selectedScene.settings.viewTransform = $event as 'aces'|'agx'|'neutral'|'standard'; store.markSceneChanged()" /></label>
+          <label><span>Exposure (stops)</span><NumberField :model-value="selectedScene.settings.exposureStops ?? 0" :min="-10" :max="10" :step=".1" label="Scene exposure stops" @update:model-value="selectedScene.settings.exposureStops = $event; store.markSceneChanged()" /></label>
+          <label><span>Working space</span><MSelect :model-value="selectedScene.settings.workingColorSpace ?? 'linear-srgb'" :options="[{value:'linear-srgb',label:'Linear sRGB'},{value:'linear-display-p3',label:'Linear Display P3'}]" label="Scene working color space" @update:model-value="selectedScene.settings.workingColorSpace = $event as 'linear-srgb'|'linear-display-p3'; store.markSceneChanged()" /></label>
+          <p class="section-note">Lighting uses the selected linear working gamut. The view transform produces sRGB output for compositing, scopes, and export.</p>
           <label><span>Environment light</span><NumberField :model-value="selectedScene.environmentIntensity" :min="0" :max="4" :step=".05" label="environment light intensity" @update:model-value="selectedScene.environmentIntensity = $event; store.markSceneChanged()" /></label>
           <label><span>Environment map</span><MSelect :model-value="selectedScene.environmentAssetId ?? ''" :options="environmentOptions" label="Environment radiance map" @update:model-value="store.set3DEnvironmentMap($event || null)" /></label>
           <label v-if="selectedScene.environmentAssetId" class="check-row"><span>Map as background</span><button type="button" :class="{ checked: selectedScene.environmentBackground }" @click="store.set3DEnvironmentBackground(!selectedScene.environmentBackground)"><CircleDot :size="10" /></button></label>
           <p v-if="!environmentOptions.length || environmentOptions.length === 1" class="section-note">Import an .hdr or .exr file to light the scene from a radiance map.</p>
         </div>
-        <div class="metadata"><span>Color space</span><strong>sRGB + ACES</strong><span>AO</span><strong>Ground-truth approximation</strong><span>Full samples</span><strong>{{ selectedScene?.settings.motionBlur && selectedLayer?.motionBlur !== false ? selectedScene.settings.motionBlurSamples : 'Off' }}</strong><span>Scene revision</span><strong>{{ selectedScene?.revision }}</strong></div>
+        <div class="metadata"><span>Display</span><strong>sRGB · {{ selectedScene?.settings.viewTransform ?? 'aces' }}</strong><span>AO</span><strong>Ground-truth approximation</strong><span>Full samples</span><strong>{{ selectedScene?.settings.motionBlur && selectedLayer?.motionBlur !== false ? selectedScene.settings.motionBlurSamples : 'Off' }}</strong><span>Scene revision</span><strong>{{ selectedScene?.revision }}</strong></div>
       </section>
     </div>
     <div v-else class="empty-state"><Box :size="25" /><strong>No 3D selection</strong><span>Select an object, camera, light, or path in the scene hierarchy.</span></div>

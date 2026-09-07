@@ -1,4 +1,7 @@
-import { computed, ref, toRaw } from 'vue'
+import { computed, ref, toRaw, watch } from 'vue'
+import { defaultAudioGraph, type AudioGraph } from '@/engine/audio/audioGraph'
+import { sharedAudioEngine, audioWav } from '@/engine/audio/AudioEngine'
+import { bindNumericScope, collectNumericProperties, renewNumericPropertyIds } from '@/engine/animation/propertyScope'
 import { defineStore } from 'pinia'
 import * as THREE from 'three'
 import type {
@@ -168,6 +171,13 @@ export const useEditorStore = defineStore('editor', () => {
     ]
   }
 
+  const audioGraph = ref<AudioGraph>(defaultAudioGraph())
+  const audioEngine = sharedAudioEngine
+  const audioError = ref('')
+  const audioPreparing = ref(false)
+  const audioEnabled = ref(true)
+  const audioWaveforms = ref<Record<string, number[]>>({})
+  let playbackAttempt = 0
   const defaultState = deserializeEditorState(null, currentState())
   let persistenceReady = false
   let saveTimer: number | null = null
@@ -240,6 +250,7 @@ export const useEditorStore = defineStore('editor', () => {
   }
 
   function applyLoadedState(state: SerializedEditorState) {
+    cancelAudioPlayback()
     const addedStarterTracks = state.layers.length === 0
     project.value = state.project
     layers.value = state.layers
@@ -248,6 +259,7 @@ export const useEditorStore = defineStore('editor', () => {
     nodes.value = state.nodes
     nodeConnections.value = state.nodeConnections
     rigs.value = state.rigs ?? []
+    audioGraph.value = state.audioGraph ?? defaultAudioGraph()
     selectedRigBoneId.value = null
     if (!layers.value.length) layers.value = [makeEmptyTrack('visual'), makeEmptyTrack('audio')]
     // Repair before filling gaps, or a duplicate about to be folded away could be re-published.
@@ -300,6 +312,7 @@ export const useEditorStore = defineStore('editor', () => {
       nodes: nodes.value,
       nodeConnections: nodeConnections.value,
       rigs: rigs.value,
+      audioGraph: audioGraph.value,
     }
   }
 
@@ -458,6 +471,7 @@ export const useEditorStore = defineStore('editor', () => {
   }
 
   function resetEditorHistory() {
+    bindProperties()
     undoStack.value = []
     redoStack.value = []
     historyPresent = captureHistorySnapshot('Project opened')
@@ -537,8 +551,10 @@ export const useEditorStore = defineStore('editor', () => {
   }
 
   function restoreHistorySnapshot(snapshot: EditorHistorySnapshot) {
+    cancelAudioPlayback()
     restoringHistory = true
     const state = JSON.parse(JSON.stringify(snapshot.state)) as SerializedEditorState
+    audioGraph.value = state.audioGraph ?? defaultAudioGraph()
     project.value = state.project
     layers.value = state.layers
     scenes3D.value = state.scenes3D
@@ -547,6 +563,7 @@ export const useEditorStore = defineStore('editor', () => {
     nodeConnections.value = state.nodeConnections
     rigs.value = state.rigs ?? []
     if (!rigs.value.some((rig) => rig.bones.some((bone) => bone.id === selectedRigBoneId.value))) selectedRigBoneId.value = null
+    bindProperties()
     workspace.value = snapshot.workspace
     currentTime.value = Math.max(0, Math.min(project.value.duration, snapshot.currentTime))
     selectedLayerId.value = findLayerDeep(layers.value, snapshot.selectedLayerId ?? '')?.id ?? layers.value[0]?.id ?? null
@@ -565,6 +582,14 @@ export const useEditorStore = defineStore('editor', () => {
     playing.value = false
     selectedMaskSegment.value = null
     restoringHistory = false
+  }
+
+  function restoreProjectVersion(state: SerializedEditorState) {
+    if (state.project.id !== project.value.id) throw new Error('This snapshot belongs to another project')
+    const snapshot = captureHistorySnapshot('Restore snapshot')
+    snapshot.state = deserializeEditorState(serializeEditorState(state), currentState())
+    restoreHistorySnapshot(snapshot)
+    markChanged()
   }
 
   function undo() {
@@ -771,20 +796,33 @@ export const useEditorStore = defineStore('editor', () => {
   let playbackFrame = 0
   let lastTick = 0
   const tick = (timestamp: number) => {
-    if (!playing.value) return
+    if (!playing.value) { audioEngine.stop(); return }
     if (!lastTick) lastTick = timestamp
     const elapsed = (timestamp - lastTick) / 1000
     lastTick = timestamp
-    currentTime.value += elapsed
+    currentTime.value = audioEngine.time ?? currentTime.value + elapsed
     if (currentTime.value >= project.value.duration) {
       currentTime.value = loop.value ? 0 : project.value.duration
-      if (!loop.value) playing.value = false
+      playing.value = false
+      audioEngine.stop()
+      if (loop.value) void startAudioPlayback()
     }
-    playbackFrame = requestAnimationFrame(tick)
+    if (playing.value) playbackFrame = requestAnimationFrame(tick)
+  }
+
+  function bindProperties() {
+    bindNumericScope({ layers: layers.value, scenes: scenes3D.value, rigs: rigs.value }, (id, time) => {
+      const layer = findLayerDeep(layers.value, id)
+      if (!layer || layer.muted || time < layer.start || time >= layer.start + layer.duration) return 0
+      return audioEngine.amplitude(assets.value.find(asset => asset.id === layer.assetId), time - layer.start + (layer.sourceOffset ?? 0))
+    })
   }
 
   function togglePlayback() {
+    if (audioPreparing.value) { cancelAudioPlayback(); return }
+    if (!playing.value) { void startAudioPlayback(); return }
     playing.value = !playing.value
+    audioEngine.stop()
     if (playing.value) selectedKeyframeId.value = null
     lastTick = 0
     if (playing.value) playbackFrame = requestAnimationFrame(tick)
@@ -794,7 +832,66 @@ export const useEditorStore = defineStore('editor', () => {
   function setTime(value: number) {
     selectedKeyframeId.value = null
     currentTime.value = Math.max(0, Math.min(project.value.duration, value))
+    if (playing.value) { playing.value = false; cancelAnimationFrame(playbackFrame); void startAudioPlayback() }
   }
+
+  async function prepareAudio() {
+    try {
+      await audioEngine.prepare(layers.value, assets.value)
+      renderRevision.value++
+      audioWaveforms.value = Object.fromEntries(assets.value.filter(asset => asset.kind === 'audio').map(asset => [asset.id, audioEngine.peaks(asset)]))
+      audioError.value = ''
+    } catch (error) { audioError.value = error instanceof Error ? error.message : 'Audio could not be decoded' }
+  }
+
+  async function startAudioPlayback() {
+    if (audioPreparing.value) return
+    const attempt = ++playbackAttempt
+    audioPreparing.value = true
+    try {
+      const started = await audioEngine.play(audioGraph.value, layers.value, assets.value, currentTime.value >= project.value.duration ? 0 : currentTime.value)
+      if (!started || attempt !== playbackAttempt) return
+      audioError.value = ''
+      audioWaveforms.value = Object.fromEntries(assets.value.filter(asset => asset.kind === 'audio').map(asset => [asset.id, audioEngine.peaks(asset)]))
+    } catch (error) {
+      if (attempt !== playbackAttempt) return
+      audioError.value = error instanceof Error ? error.message : 'Audio playback unavailable'
+      audioEngine.stop()
+    } finally { if (attempt === playbackAttempt) audioPreparing.value = false }
+    playing.value = true
+    selectedKeyframeId.value = null
+    lastTick = 0
+    cancelAnimationFrame(playbackFrame)
+    playbackFrame = requestAnimationFrame(tick)
+  }
+
+  function cancelAudioPlayback() {
+    playbackAttempt++
+    audioEngine.stop()
+    audioPreparing.value = false
+    playing.value = false
+  }
+
+  async function exportAudioMix() {
+    audioError.value = ''
+    try {
+      const buffer = await audioEngine.mix(audioGraph.value, layers.value, assets.value, project.value.duration)
+      const url = URL.createObjectURL(audioWav(buffer))
+      const link = document.createElement('a'); link.href = url; link.download = `${project.value.name}.wav`; link.click()
+      setTimeout(() => URL.revokeObjectURL(url), 1000)
+    } catch (error) { audioError.value = error instanceof Error ? error.message : 'Audio export failed' }
+  }
+
+  watch(audioEnabled, enabled => audioEngine.setMuted(!enabled))
+  watch(() => assets.value.filter(asset => asset.kind === 'audio').map(asset => asset.hash).join('|'), () => {
+    if (typeof AudioContext !== 'undefined') void prepareAudio()
+  })
+  watch(playing, value => { if (!value) audioEngine.stop() }, { flush: 'sync' })
+  watch(audioGraph, (next, previous) => {
+    if (restoringHistory || next !== previous) return
+    markChanged()
+    if (playing.value) { playing.value = false; void startAudioPlayback() }
+  }, { deep: true, flush: 'sync' })
 
   function addTimelineMarker(name?: string, color = DEFAULT_TIMELINE_MARKER_COLOR, time = currentTime.value) {
     const marker: TimelineMarker = {
@@ -1019,22 +1116,37 @@ export const useEditorStore = defineStore('editor', () => {
     const dropTime = Math.max(0, Math.min(project.value.duration, atTime ?? currentTime.value))
     const reusableTemplate = asset.kind === 'scene3d' ? asset.sceneLayerTemplate : asset.layerTemplate
     if (reusableTemplate) {
-      const layer = structuredClone(rawLayerTree(reusableTemplate))
+      const layer = JSON.parse(JSON.stringify(reusableTemplate)) as EditorLayer
       const delta = dropTime - layer.start
+      const layerIds = new Map<string, string>()
       const renewLayer = (item: EditorLayer) => {
+        const oldId = item.id
         item.id = crypto.randomUUID()
+        layerIds.set(oldId, item.id)
         delete item.trackId
         item.start += delta
-        ;(Object.keys(item.transform) as Array<keyof EditorLayer['transform']>).forEach((key) => {
-          item.transform[key].id = `${item.id}-${key}`
-          item.transform[key].keyframes.forEach((keyframe) => {
-            keyframe.id = crypto.randomUUID()
-            keyframe.time += delta
-          })
-        })
         item.children?.forEach(renewLayer)
       }
       renewLayer(layer)
+      const properties = collectNumericProperties(layer)
+      const propertyIds = new Map<string, string>()
+      for (const property of properties.values()) {
+        const oldId = property.id
+        property.id = crypto.randomUUID()
+        propertyIds.set(oldId, property.id)
+        for (const key of property.keyframes) { key.id = crypto.randomUUID(); key.time += delta }
+      }
+      for (const property of properties.values()) if (property.driver) {
+        const source = property.driver.sourceId
+        property.driver.sourceId = source.startsWith('audio:') && layerIds.has(source.slice(6))
+          ? `audio:${layerIds.get(source.slice(6))}` : propertyIds.get(source) ?? source
+      }
+      const relink = (item: EditorLayer) => {
+        if (item.textPathId) item.textPathId = layerIds.get(item.textPathId) ?? item.textPathId
+        for (const parameter of item.publicParameters ?? []) { parameter.id = crypto.randomUUID(); parameter.propertyId = propertyIds.get(parameter.propertyId) ?? parameter.propertyId }
+        item.children?.forEach(relink)
+      }
+      relink(layer)
       // Templates snapshotted before the link existed carry no assetId; without one the copy reads
       // as a brand new cluster and earns a duplicate Library entry.
       layer.assetId = asset.id
@@ -1043,6 +1155,7 @@ export const useEditorStore = defineStore('editor', () => {
       if (asset.kind === 'scene3d') {
         if (!asset.sceneTemplate) return
         const scene = raw3DScene(asset.sceneTemplate)
+        renewNumericPropertyIds(scene)
         scene.id = crypto.randomUUID()
         scene.name = asset.name
         scene.revision += 1
@@ -1071,6 +1184,7 @@ export const useEditorStore = defineStore('editor', () => {
     const droppedScene = asset.kind === 'scene3d' && asset.sceneTemplate ? raw3DScene(asset.sceneTemplate) : null
     if (asset.kind === 'scene3d' && !droppedScene) return
     if (droppedScene) {
+      renewNumericPropertyIds(droppedScene)
       droppedScene.id = crypto.randomUUID()
       droppedScene.name = asset.name
       droppedScene.revision += 1
@@ -1376,9 +1490,11 @@ export const useEditorStore = defineStore('editor', () => {
   function shiftLayerTiming(layer: EditorLayer, delta: number) {
     if (!delta) return
     layer.start = Math.max(0, layer.start + delta)
-    ;(Object.keys(layer.transform) as Array<keyof EditorLayer['transform']>).forEach((key) => {
-      layer.transform[key].keyframes.forEach((keyframe) => { keyframe.time = Math.max(0, keyframe.time + delta) })
-    })
+    // Children shift recursively below; collect only this clip's channels here.
+    const { children: _children, ...ownChannels } = layer
+    for (const property of collectNumericProperties(ownChannels).values()) {
+      property.keyframes.forEach((keyframe) => { keyframe.time = Math.max(0, keyframe.time + delta) })
+    }
     layer.children?.forEach((child) => shiftLayerTiming(child, delta))
   }
 
@@ -1772,6 +1888,7 @@ export const useEditorStore = defineStore('editor', () => {
   }
 
   function markChanged() {
+    bindProperties()
     ensureClusterAssets()
     ensure3DSceneAssets()
     syncOpenClusterAssets()
@@ -1844,6 +1961,7 @@ export const useEditorStore = defineStore('editor', () => {
   }
 
   function markSceneChanged(scene: Aurora3DScene = selectedScene.value!) {
+    bindProperties()
     if (!scene) return
     scene.revision += 1
     flattenLayers().filter((layer) => layer.type === '3d-scene' && layer.sceneId === scene.id)
@@ -2716,6 +2834,7 @@ export const useEditorStore = defineStore('editor', () => {
   function deleteNode(nodeId: string) {
     if (!nodes.value.some((node) => node.id === nodeId)) return
     nodes.value = nodes.value.filter((node) => node.id !== nodeId)
+    for (const node of nodes.value) if (node.groupId === nodeId) delete node.groupId
     nodeConnections.value = nodeConnections.value.filter((connection) => connection.fromNodeId !== nodeId && connection.toNodeId !== nodeId)
     if (selectedNodeId.value === nodeId) selectedNodeId.value = ''
     if (renderRootNodeId.value === nodeId) renderRootNodeId.value = null
@@ -3020,6 +3139,10 @@ export const useEditorStore = defineStore('editor', () => {
     exportMessage.value = ''
     exportProgress.value = 1
     try {
+      if ([...collectNumericProperties(currentState()).values()].some(property => property.driver?.enabled && property.driver.sourceId.startsWith('audio:'))) {
+        await audioEngine.prepare(layers.value, assets.value)
+        controller.signal.throwIfAborted()
+      }
       const blob = await render(
         (frame, total) => { exportProgress.value = Math.max(1, Math.round((frame / total) * 100)) },
         controller.signal,
@@ -3082,6 +3205,8 @@ export const useEditorStore = defineStore('editor', () => {
   resetEditorHistory()
 
   return {
+    audioGraph, audioError, audioPreparing, audioEnabled, audioWaveforms, prepareAudio, exportAudioMix,
+    projectSnapshot, restoreProjectVersion,
     project, availableProjects, projectBrowserBusy, projectBrowserError, renderRevision,
     frameCacheStatus, frameCacheFrames, frameCacheProjectId, frameCacheRevision, frameCacheScope,
     frameCacheProgress, frameCacheRange, frameCacheRequestId, frameCacheCancelId, frameCacheClearId,
