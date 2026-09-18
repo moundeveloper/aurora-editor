@@ -2,7 +2,8 @@
 
 
 
-Implemented: a usable first modeling slice, not the full roadmap in `3d-modeling-workspace-plan.md`.
+Implemented: a usable first modeling slice, not the full roadmap in
+`../3d-modeling-workspace-plan.md`.
 
 
 

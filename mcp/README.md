@@ -32,7 +32,7 @@ The server currently provides:
 - `aurora_model_operations_apply` — atomically draw knife paths, loop-cut, edge-slide, extrude-region, inset-region, delete selected topology, translate, scale, or recolor a native model using the same kernel as the Modeling workspace.
 - `aurora_model_publish` — publish an immutable native revision; `aurora_scene_model_add` also places these native models.
 
-See [the modeling implementation notes](../docs/3d-modeling-implementation.md) for the human workflow,
+See [the modeling implementation notes](../docs/explained/3d-modeling-implementation.md) for the human workflow,
 operation examples, current limits, and conflict handling. Restart the MCP process to discover new tools.
 
 For a protocol-level smoke test that launches the server and calls its authoring tool through an MCP
