@@ -3,6 +3,8 @@ import { extrudeRegion } from './extrudeRegion.ts'
 import { edgeSlideVertices } from './edgeLoops.ts'
 import { z } from 'zod'
 import { insertQuadLoop } from './loopCut.ts'
+import { knifeCut } from './knife.ts'
+import { deleteMeshElements } from './deleteMesh.ts'
 
 export type Vec3 = [number, number, number]
 export interface ModelVertex { id: string; position: Vec3 }
@@ -19,9 +21,11 @@ export const modelOperationSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('inset'), faceId: z.string(), fraction: z.number().min(.001).max(.95) }),
   z.object({ type: z.literal('translate'), vertexIds: z.array(z.string()).min(1), offset: vector }),
   z.object({ type: z.literal('set-positions'), vertices: z.array(z.object({id:z.string(),position:vector})).min(1).max(12000) }),
+  z.object({type:z.literal('delete'),mode:z.enum(['vertex','edge','face']),ids:z.array(z.string()).min(1).max(24000)}),
   z.object({ type: z.literal('scale'), factors: vector }),
   z.object({ type: z.literal('color'), color: z.string().regex(/^#[0-9a-fA-F]{6}$/) }),
   z.object({type:z.literal('edge-slide'),edgeIds:z.array(z.string()).min(1).max(24000),factor:z.number().min(-.99).max(.99)}),
+  z.object({type:z.literal('knife'),faceId:z.string().optional(),start:z.object({edge:z.tuple([z.string(),z.string()]),t:z.number().min(.001).max(.999)}).optional(),end:z.object({edge:z.tuple([z.string(),z.string()]),t:z.number().min(.001).max(.999)}).optional(),segments:z.array(z.object({faceId:z.string(),start:z.object({edge:z.tuple([z.string(),z.string()]),t:z.number().min(.001).max(.999)}),end:z.object({edge:z.tuple([z.string(),z.string()]),t:z.number().min(.001).max(.999)})})).min(1).max(12000).optional(),through:z.boolean().optional()}),
   z.object({ type:z.literal('loop-cut'),edge:z.tuple([z.string(),z.string()]),cuts:z.number().int().min(1).max(16),position:z.number().min(.01).max(.99) }),
 ])
 export type ModelOperation = z.infer<typeof modelOperationSchema>
@@ -111,6 +115,8 @@ export function applyModelOperation(draft: ModelDraft, expectedRevision: number,
     const moved=new Map(edgeSlideVertices(mesh,op.edgeIds,op.factor).map(v=>[v.id,v.position]))
     for(const v of mesh.vertices)if(moved.has(v.id))v.position=moved.get(v.id)!
   }
+  else if (op.type === 'knife') knifeCut(mesh,op)
+  else if (op.type === 'delete') deleteMeshElements(mesh,op.mode,op.ids)
   else if (op.type === 'loop-cut') insertQuadLoop(mesh,op)
   else if (op.type === 'scale') {
     if (op.factors.some(n => n<.001 || n>1000)) throw new Error('Scale factors must be between 0.001 and 1000')

@@ -77,6 +77,22 @@ it('authors, inspects, publishes and places native source through MCP; rejects s
     const inset=await call('aurora_model_operations_apply',{projectId:'native-test',assetId:regionId,expectedRevision:2,operations:[{type:'inset-region',faceIds:['f1','f5'],thickness:.1}]})
     expect(inset.isError).not.toBe(true)
     expect(JSON.parse((inset.content as Array<{text:string}>)[0]!.text)).toMatchObject({revision:3,statistics:{faces:18,boundaryEdges:0}})
+    const knifeAsset=await call('aurora_model_create',{projectId:'native-test',name:'Knife test'})
+    const knifeId=JSON.parse((knifeAsset.content as Array<{text:string}>)[0]!.text).assetId
+    const knife=await call('aurora_model_operations_apply',{projectId:'native-test',assetId:knifeId,expectedRevision:1,operations:[{type:'knife',faceId:'f5',start:{edge:['v3','v2'],t:.25},end:{edge:['v7','v6'],t:.75}}]})
+    expect(knife.isError).not.toBe(true)
+    expect(JSON.parse((knife.content as Array<{text:string}>)[0]!.text)).toMatchObject({revision:2,statistics:{vertices:10,faces:7,boundaryEdges:0}})
+    const deleted=await call('aurora_model_operations_apply',{projectId:'native-test',assetId:knifeId,expectedRevision:2,operations:[{type:'delete',mode:'face',ids:['f5']}]})
+    expect(deleted.isError).not.toBe(true)
+    expect(JSON.parse((deleted.content as Array<{text:string}>)[0]!.text)).toMatchObject({revision:3,statistics:{faces:6}})
+    const throughAsset=await call('aurora_model_create',{projectId:'native-test',name:'Through knife test'})
+    const throughId=JSON.parse((throughAsset.content as Array<{text:string}>)[0]!.text).assetId
+    const through=await call('aurora_model_operations_apply',{projectId:'native-test',assetId:throughId,expectedRevision:1,operations:[{type:'knife',through:true,segments:[
+      {faceId:'f5',start:{edge:['v3','v2'],t:.25},end:{edge:['v7','v6'],t:.75}},
+      {faceId:'f0',start:{edge:['v3','v2'],t:.25},end:{edge:['v0','v1'],t:.75}},
+    ]}]})
+    expect(through.isError).not.toBe(true)
+    expect(JSON.parse((through.content as Array<{text:string}>)[0]!.text)).toMatchObject({revision:2,statistics:{vertices:11,faces:8,boundaryEdges:0}})
     const snapshot=await projects.load('native-test')
 
     const scene=snapshot!.scenes3D[0] as {objects:Array<{id:string;primitive:string;modelRevision:number}>}

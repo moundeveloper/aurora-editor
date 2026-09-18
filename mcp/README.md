@@ -29,7 +29,7 @@ The server currently provides:
 - `aurora_scene_model_add` — place an imported `.glb` or `.gltf` mesh in a scene.
 - `aurora_model_create` — create an editable native cube or plane in Project Assets.
 - `aurora_model_get` — inspect draft revision and paginated polygon/vertex IDs.
-- `aurora_model_operations_apply` — atomically extrude, inset, translate, scale, or recolor a native model using the same kernel as the Modeling workspace.
+- `aurora_model_operations_apply` — atomically draw knife paths, loop-cut, edge-slide, extrude-region, inset-region, delete selected topology, translate, scale, or recolor a native model using the same kernel as the Modeling workspace.
 - `aurora_model_publish` — publish an immutable native revision; `aurora_scene_model_add` also places these native models.
 
 See [the modeling implementation notes](../docs/3d-modeling-implementation.md) for the human workflow,

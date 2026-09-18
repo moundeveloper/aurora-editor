@@ -33,14 +33,14 @@ export function transformedVertices(mesh:ModelMesh,ids:readonly string[],matrix:
 }
 
 /** All thresholds are pixels: selection remains usable at any zoom or model scale. */
-export function pickMeshElement(mesh:ModelMesh,body:THREE.Mesh,camera:THREE.Camera,mode:SelectionMode,
-  point:{x:number;y:number},viewport:{width:number;height:number},xray=false):string|null {
+export function pickMeshElements(mesh:ModelMesh,body:THREE.Mesh,camera:THREE.Camera,mode:SelectionMode,
+  point:{x:number;y:number},viewport:{width:number;height:number},xray=false):string[] {
   camera.updateMatrixWorld(); body.updateMatrixWorld(true)
   const ray=new THREE.Raycaster(), ndc=new THREE.Vector2(point.x/viewport.width*2-1,1-point.y/viewport.height*2)
   ray.setFromCamera(ndc,camera)
   if(mode==='face') {
-    const hit=ray.intersectObject(body,false)[0]
-    return hit?.faceIndex!=null ? body.geometry.userData.faceIds[hit.faceIndex] ?? null : null
+    const hits=ray.intersectObject(body,false),ids=hits.map(hit=>hit.faceIndex!=null?body.geometry.userData.faceIds[hit.faceIndex]:null).filter((id):id is string=>Boolean(id))
+    return [...new Set(xray?ids:ids.slice(0,1))]
   }
   const project=(position:Vec3)=>{
     const p=new THREE.Vector3(...position).project(camera)
@@ -53,11 +53,11 @@ export function pickMeshElement(mesh:ModelMesh,body:THREE.Mesh,camera:THREE.Came
     const hit=ray.intersectObject(body,false)[0]
     return !hit || hit.distance+Math.max(1e-5,hit.distance*1e-5)>=ray.ray.origin.distanceTo(position)
   }
-  let nearest:string|null=null, best=11
+  const candidates:Array<{id:string;distance:number}>=[]
   const positions=new Map(mesh.vertices.map(v=>[v.id,v.position]))
   if(mode==='vertex') for(const vertex of mesh.vertices) {
     const p=project(vertex.position), distance=Math.hypot(p.x-point.x,p.y-point.y)
-    if(p.z>=-1 && p.z<=1 && distance<best && visible(new THREE.Vector3(...vertex.position))) {best=distance; nearest=vertex.id}
+    if(p.z>=-1 && p.z<=1 && distance<11 && visible(new THREE.Vector3(...vertex.position))) candidates.push({id:vertex.id,distance})
   }
   if(mode==='edge') for(const edge of meshEdges(mesh)) {
     const a=positions.get(edge.vertices[0])!,b=positions.get(edge.vertices[1])!,pa=project(a),pb=project(b)
@@ -69,7 +69,13 @@ export function pickMeshElement(mesh:ModelMesh,body:THREE.Mesh,camera:THREE.Came
     const va=new THREE.Vector3(...a).applyMatrix4(camera.matrixWorldInverse),vb=new THREE.Vector3(...b).applyMatrix4(camera.matrixWorldInverse)
     const perspective=camera instanceof THREE.PerspectiveCamera
     const u=perspective ? (t/-vb.z)/((1-t)/-va.z+t/-vb.z) : t
-    if(distance<best && visible(new THREE.Vector3(...a).lerp(new THREE.Vector3(...b),u))) {best=distance; nearest=edge.id}
+    if(distance<11 && visible(new THREE.Vector3(...a).lerp(new THREE.Vector3(...b),u))) candidates.push({id:edge.id,distance})
   }
-  return nearest
+  candidates.sort((left,right)=>left.distance-right.distance)
+  return [...new Set((xray?candidates:candidates.slice(0,1)).map(candidate=>candidate.id))]
+}
+
+export function pickMeshElement(mesh:ModelMesh,body:THREE.Mesh,camera:THREE.Camera,mode:SelectionMode,
+  point:{x:number;y:number},viewport:{width:number;height:number},xray=false):string|null {
+  return pickMeshElements(mesh,body,camera,mode,point,viewport,xray)[0]??null
 }

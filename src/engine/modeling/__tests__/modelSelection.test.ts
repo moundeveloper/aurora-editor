@@ -1,7 +1,7 @@
 import { describe,it,expect } from 'vitest'
 import * as THREE from 'three'
 import { createModel,applyModelOperation,validateMesh } from '../../../../shared/modeling'
-import { meshEdges,convertSelection,selectionVertices,pickMeshElement,transformedVertices,selectionCenter } from '../modelSelection'
+import { meshEdges,convertSelection,selectionVertices,pickMeshElement,pickMeshElements,transformedVertices,selectionCenter } from '../modelSelection'
 import { modelGeometry } from '../modelGeometry'
 
 const viewport={width:800,height:600}
@@ -41,6 +41,15 @@ describe('quad mesh selection',()=>{
     const f=fixture(),point=f.screen(new THREE.Vector3(-1,-1,-1))
     expect(pickMeshElement(f.draft.mesh,f.body,f.camera,'vertex',point,viewport)).not.toBe('v0')
     expect(pickMeshElement(f.draft.mesh,f.body,f.camera,'vertex',point,viewport,true)).toBe('v0')
+    f.dispose()
+  })
+  it('returns every face under the cursor when X-ray is enabled',()=>{
+    const f=fixture()
+    f.camera.position.set(0,0,5);f.camera.lookAt(0,0,0);f.camera.updateMatrixWorld()
+    const point=f.screen(new THREE.Vector3(0,0,1))
+    expect(pickMeshElements(f.draft.mesh,f.body,f.camera,'face',point,viewport)).toEqual(['f1'])
+    expect(pickMeshElements(f.draft.mesh,f.body,f.camera,'face',point,viewport,true)).toEqual(expect.arrayContaining(['f1','f0']))
+    expect(pickMeshElements(f.draft.mesh,f.body,f.camera,'face',point,viewport,true).length).toBeGreaterThan(1)
     f.dispose()
   })
   it('converts face selection to its four vertices and four edges',()=>{

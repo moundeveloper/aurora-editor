@@ -30,7 +30,7 @@ Drafts participate in existing project autosave and undo/redo. Double-click a na
 
 
 
-Viewport navigation matches 3D Scene through a shared configuration: left-drag orbits, middle/right-drag pans, and the wheel zooms. Stationary left-click selects; gizmo drags transform the selection. Tab switches Object/Edit Mode. Z toggles quad wire display; Alt+Z toggles X-Ray selection. Period frames the model. Front/Top/Right reposition the perspective editor camera; orthographic projection is not implemented in this workspace yet.
+Viewport navigation matches 3D Scene through a shared configuration: left-drag orbits, middle/right-drag pans, and the wheel zooms. Stationary left-click selects; gizmo drags transform the selection. Tab switches Object/Edit Mode. Z toggles quad wire display; Alt+Z toggles X-Ray selection. Period frames the model. Perspective, Front, Right, Left, and Top are available; the four axis presets use the orthographic editor camera. Orbiting an axis view returns to Perspective at the same angle, and holding Alt while orbiting snaps the perspective camera to the nearest world axis. Debug and validation output is a collapsible overlay console with a draggable top edge, so it never changes the viewport's layout height.
 
 
 
@@ -140,7 +140,7 @@ Tests cover extrusion/inset topology and winding, immutable publication, stale r
 
 
 
-Automated selection tests now exercise screen-space vertex/edge picking, quad-face picking, occlusion/X-Ray, selection conversion, and quad-preserving transformations. Windows Computer Use attempted visual verification but stopped because it could not confidently determine the current browser URL; interactive visual QA remains outstanding. The production build and automated suite are the completed checks; they do not substitute for that visual review.
+Automated selection tests now exercise screen-space vertex/edge picking, quad-face picking, occlusion/X-Ray, through-mesh multi-picking, selection conversion, deletion, and quad-preserving transformations. Windows Computer Use attempted visual verification but stopped because it could not confidently determine the current browser URL; interactive visual QA remains outstanding. The production build and automated suite are the completed checks; they do not substitute for that visual review.
 
 
 
@@ -179,6 +179,20 @@ MCP `aurora_model_operations_apply` accepts `{ "type": "loop-cut", "edge": ["v0"
 
 
 Interaction reference: [Blender Loop Cut](https://docs.blender.org/manual/en/latest/modeling/meshes/tools/loop.html). Navigation deliberately follows Aurora 3D Scene.
+
+## Orthographic axis views and Knife
+
+Modeling's Perspective, Front, Right, Left, and Top buttons now use the same camera convention as 3D Scene: Perspective uses the perspective camera; the four axis presets use an orthographic camera and remain orbitable afterward. Left is the reverse of Right along world X. Frame preserves the active projection. The camera target is the model bounds center, so axis presets stay centered on the edited asset.
+
+Press **K** or choose **Knife** in Edit Mode; a face does not need to be preselected. Drag a stroke anywhere in the viewport, including outside the model, and release or press Enter to commit. The editor projects the stroke onto every intersected face, creates shared edge points, and splits each crossed face. With X-Ray enabled, hidden and backside faces are included, so the same stroke cuts through the complete projected geometry. Escape cancels it. The kernel still preserves the existing mesh winding and validates every resulting polygon; quads remain quads when the stroke crosses opposite sides, while a corner crossing can create a triangle as Blender's Knife tool does.
+
+### X-Ray selection and deletion
+
+**Alt+Z** toggles X-Ray. In Edit Mode, a click with X-Ray enabled returns every vertex, edge, or face under the cursor, including geometry behind the front surface. **Ctrl/Cmd+click** toggles individual items in the selection; **Shift+click** follows the same additive behavior. **X** or **Delete** removes the current vertex, edge, or face selection. Vertex deletion removes incident faces, face deletion removes those faces, and edge deletion removes the faces that own the selected topology edge; unused vertices are pruned. The operation is atomic and is also available through MCP as `{type:"delete",mode:"vertex"|"edge"|"face",ids:[...]}`.
+
+Blender separates the X-Ray display toggle from Knife's **Occlude Geometry** setting: X-Ray reveals hidden cut points, while disabling occlusion makes the cut continue through backside faces. Here X-Ray is the through-cut switch for the modeling workspace, and the MCP form exposes the same choice with `through:true` plus a resolved `segments` array. See Blender's [Knife Topology Tool documentation](https://docs.blender.org/manual/en/5.2/modeling/meshes/editing/mesh/knife_topology_tool.html), [selection introduction](https://docs.blender.org/manual/en/latest/modeling/meshes/selecting/introduction.html), and [Delete documentation](https://docs.blender.org/manual/en/5.2/modeling/meshes/editing/mesh/delete.html).
+
+MCP `aurora_model_operations_apply` accepts the legacy single-face form `{"type":"knife","faceId":"f5","start":{"edge":["v3","v2"],"t":0.25},"end":{"edge":["v7","v6"],"t":0.75}}` or a resolved through path such as `{"type":"knife","through":true,"segments":[{"faceId":"f5","start":{"edge":["v3","v2"],"t":0.25},"end":{"edge":["v7","v6"],"t":0.75}}]}`.
 
 
 
