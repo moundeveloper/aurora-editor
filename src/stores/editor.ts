@@ -1,3 +1,4 @@
+import { createModel, applyModelOperation, publishModel, type ModelOperation } from '../../shared/modeling'
 import { computed, ref, toRaw, watch } from 'vue'
 import { defaultAudioGraph, type AudioGraph } from '@/engine/audio/audioGraph'
 import { sharedAudioEngine, audioWav } from '@/engine/audio/AudioEngine'
@@ -119,6 +120,7 @@ export const useEditorStore = defineStore('editor', () => {
   const selectedSceneId = ref('scene-aurora-3d')
   const selectedSceneEntityId = ref('object-aurora-cube')
   const zoom = ref(100)
+  const projectSaveError = ref('')
   const saveStatus = ref<'Saved' | 'Saving…' | 'Save failed'>('Saved')
   const exportProgress = ref(0)
   const exportStatus = ref<'idle' | 'rendering' | 'done' | 'error'>('idle')
@@ -1075,13 +1077,15 @@ export const useEditorStore = defineStore('editor', () => {
     const sceneReferences = scenes3D.value.reduce((count, scene) => count
       + (scene.environmentAssetId === assetId ? 1 : 0)
       + scene.objects.filter((object) => object.assetId === assetId).length, 0)
-    return layerReferences + sceneReferences
+    const templateReferences = assets.value.reduce((count, asset) => count + (asset.sceneTemplate?.objects.filter(object => object.assetId === assetId).length ?? 0), 0)
+    return layerReferences + sceneReferences + templateReferences
   }
 
   /** Removes a Library entry while leaving authored layers/scenes in place and explicitly unlinked. */
   function deleteMediaAsset(assetId: string) {
     const asset = assets.value.find((item) => item.id === assetId)
     if (!asset) return false
+    if (asset.nativeModel && mediaAssetReferenceCount(assetId)) return false
     flattenLayers().forEach((layer) => {
       if (layer.assetId !== assetId) return
       delete layer.assetId
@@ -1882,6 +1886,7 @@ export const useEditorStore = defineStore('editor', () => {
     changeRevision += 1
     renderRevision.value += 1
     saveStatus.value = 'Saving…'
+    projectSaveError.value = ''
     if (typeof window === 'undefined') return
     if (saveTimer !== null) window.clearTimeout(saveTimer)
     saveTimer = window.setTimeout(() => { void saveProjectNow() }, 250)
@@ -1901,6 +1906,7 @@ export const useEditorStore = defineStore('editor', () => {
     saveTimer = null
     if (!persistenceReady) return Promise.resolve()
     saveStatus.value = 'Saving…'
+    projectSaveError.value = ''
     const revisionToSave = changeRevision
     const save = async () => {
       project.value.updatedAt = Date.now()
@@ -1910,6 +1916,7 @@ export const useEditorStore = defineStore('editor', () => {
         if (revisionToSave === changeRevision) saveStatus.value = 'Saved'
       } catch (error) {
         saveStatus.value = 'Save failed'
+        projectSaveError.value = error instanceof Error ? error.message : String(error)
         console.error('Aurora project save failed', error)
       }
     }
@@ -2109,13 +2116,62 @@ export const useEditorStore = defineStore('editor', () => {
    * The file keeps its own materials and internal hierarchy, so the object is a host rather than a
    * primitive: Aurora's PBR sliders and influences do not apply to it.
    */
+  const selectedModelAssetId = ref('')
+  function openModelAsset(assetId: string) {
+    if (!assets.value.some(a => a.id === assetId && a.nativeModel)) return
+    selectedModelAssetId.value = assetId
+    setWorkspace('Modeling')
+  }
+  function createNativeModel(name = 'Untitled Model', primitive: 'cube' | 'plane' = 'cube') {
+    const asset: MediaAsset = { id: crypto.randomUUID(), name: name.trim() || 'Untitled Model', kind: 'model3d', nativeModel: createModel(primitive) }
+    assets.value.push(asset)
+    selectedModelAssetId.value = asset.id
+    markChanged()
+    return asset
+  }
+  function editNativeModel(assetId: string, expectedRevision: number, operation: ModelOperation) {
+    const asset = assets.value.find(a => a.id === assetId)
+    if (!asset?.nativeModel) throw new Error('Unknown native model')
+    asset.nativeModel.draft = applyModelOperation(asset.nativeModel.draft, expectedRevision, operation)
+    markChanged()
+  }
+  function publishNativeModel(assetId: string, thumbnail?: string) {
+    const asset = assets.value.find(a => a.id === assetId)
+    if (!asset?.nativeModel) throw new Error('Unknown native model')
+    const revision = publishModel(asset.nativeModel, asset.nativeModel.draft.revision)
+    if (thumbnail) asset.thumbnail = thumbnail
+    markChanged()
+    return revision
+  }
+  function makeNativeModelUnique(objectId: string) {
+    const object = selectedScene.value?.objects.find(o => o.id === objectId)
+    const source = assets.value.find(a => a.id === object?.assetId)
+    const revision = source?.nativeModel?.revisions.find(r => r.revision === object?.modelRevision)
+    if (!object || !source || !revision) throw new Error('Select a native model instance')
+    const draft = JSON.parse(JSON.stringify(revision))
+    const asset: MediaAsset = { id: crypto.randomUUID(), kind: 'model3d', name: `${source.name} Copy`, nativeModel: { draft, revisions: [JSON.parse(JSON.stringify(draft))] } }
+    assets.value.push(asset); object.assetId = asset.id
+    markSceneChanged()
+    return asset
+  }
+  function updateNativeModelInstance(objectId: string) {
+    const object = selectedScene.value?.objects.find(o => o.id === objectId)
+    const revision = assets.value.find(a => a.id === object?.assetId)?.nativeModel?.revisions.at(-1)
+    if (!object || !revision) throw new Error('No published revision')
+    object.modelRevision = revision.revision
+    markSceneChanged()
+  }
+
   function add3DModel(assetId?: string) {
     const scene = selectedScene.value
     if (!scene) return null
     const asset = assets.value.find((item) => item.id === assetId && item.kind === 'model3d')
       ?? assets.value.find((item) => item.kind === 'model3d')
     if (!asset) return null
-    const object = createPrimitiveObject('model', scene.objects.length + 1)
+    const published = asset.nativeModel?.revisions.at(-1)
+    if (asset.nativeModel && !published) throw new Error('Publish this model before placing it in a scene')
+    const object = createPrimitiveObject(asset.nativeModel ? 'native' : 'model', scene.objects.length + 1)
+    if (published) { object.modelRevision = published.revision; object.material.baseColor = published.color }
     object.name = asset.name.replace(/\.[^.]+$/, '')
     object.assetId = asset.id
     scene.objects.push(object)
@@ -3212,7 +3268,8 @@ export const useEditorStore = defineStore('editor', () => {
     frameCacheProgress, frameCacheRange, frameCacheRequestId, frameCacheCancelId, frameCacheClearId,
     workspace, currentTime, playing, loop, autoKey, snap, ripple, selectedLayerId, selectedKeyframeId, timelineMarkers,
     canUndo, canRedo, historyEntries, undo, redo, jumpToHistory, beginInteractiveEdit, endInteractiveEdit,
-    selectedNodeId, selectedSceneId, selectedSceneEntityId, zoom, saveStatus, exportProgress, exportStatus, exportMessage, assets, layers, scenes3D,
+    selectedModelAssetId, openModelAsset, createNativeModel, editNativeModel, publishNativeModel, makeNativeModelUnique, updateNativeModelInstance,
+    selectedNodeId, selectedSceneId, selectedSceneEntityId, zoom, saveStatus, projectSaveError, exportProgress, exportStatus, exportMessage, assets, layers, scenes3D,
     nodes, nodeConnections, selectedConnectionId, renderRootNodeId,
     rigs, selectedRigBoneId, selectedLayerRig, selected3DObjectRig, selectedRigBone,
     addRig, renameRig, deleteRig, setRigGrid, attachRigToLayer, attachRigToObject,

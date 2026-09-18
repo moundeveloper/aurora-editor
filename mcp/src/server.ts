@@ -1,3 +1,4 @@
+import { registerModelingTools } from './modelingTools.ts'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { z } from 'zod'
@@ -214,8 +215,8 @@ export async function createAuroraMcpServer(root?: string) {
   }))
 
   server.registerTool('aurora_scene_model_add', {
-    title: 'Place an imported glTF mesh',
-    description: 'Adds an imported .glb or .gltf asset to a 3D scene as a model object. The file keeps its own materials and node hierarchy, so Aurora material and influence edits do not apply to it; its transform and shadow flags do.',
+    title: 'Place an imported or native model',
+    description: 'Places an imported .glb/.gltf or the latest published native model revision into a scene. Native geometry supports Aurora materials and influences. The file keeps its own materials and node hierarchy, so Aurora material and influence edits do not apply to it; its transform and shadow flags do.',
     inputSchema: z.object({
       projectId: z.string().min(1).describe('Aurora project id'),
       sceneId: z.string().min(1).describe('3D scene id from aurora_project_get'),
@@ -238,6 +239,7 @@ export async function createAuroraMcpServer(root?: string) {
     }
   }))
 
+  registerModelingTools(server, projects)
   return { server, projects, layout }
 }
 

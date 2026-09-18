@@ -3,6 +3,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { storeToRefs } from 'pinia'
 import { ArrowLeftToLine, ArrowRightToLine, Box, Camera, Crosshair, Grid3X3, Move3D, Plus, Rotate3D, Scaling, Spline, Sun, Trash2, View } from '@lucide/vue'
 import * as THREE from 'three'
+import { configureViewportNavigation } from '@/engine/scene3d/viewportNavigation'
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js'
 import { TransformControls, type TransformControlsMode } from 'three/addons/controls/TransformControls.js'
 import { useEditorStore } from '@/stores/editor'
@@ -1286,9 +1287,7 @@ onMounted(async () => {
   editorCamera = perspectiveCamera
   orbit = new OrbitControls(editorCamera, canvas.value)
   orbit.enableDamping = false
-  orbit.mouseButtons.LEFT = THREE.MOUSE.ROTATE
-  orbit.mouseButtons.MIDDLE = THREE.MOUSE.PAN
-  orbit.mouseButtons.RIGHT = THREE.MOUSE.PAN
+  configureViewportNavigation(orbit)
   orbit.target.set(0, 0, 0)
   orbit.addEventListener('change', () => {
     syncAxisViewLabel()

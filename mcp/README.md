@@ -27,6 +27,13 @@ The server currently provides:
 - `aurora_scene_light_upsert` — add or update an ambient, directional, point, or spot light, including a spot's cone angle, range, and edge softness.
 - `aurora_scene_environment_set` — light a scene from an imported `.hdr` or `.exr` radiance map, optionally drawing it as the background.
 - `aurora_scene_model_add` — place an imported `.glb` or `.gltf` mesh in a scene.
+- `aurora_model_create` — create an editable native cube or plane in Project Assets.
+- `aurora_model_get` — inspect draft revision and paginated polygon/vertex IDs.
+- `aurora_model_operations_apply` — atomically extrude, inset, translate, scale, or recolor a native model using the same kernel as the Modeling workspace.
+- `aurora_model_publish` — publish an immutable native revision; `aurora_scene_model_add` also places these native models.
+
+See [the modeling implementation notes](../docs/3d-modeling-implementation.md) for the human workflow,
+operation examples, current limits, and conflict handling. Restart the MCP process to discover new tools.
 
 For a protocol-level smoke test that launches the server and calls its authoring tool through an MCP
 client:

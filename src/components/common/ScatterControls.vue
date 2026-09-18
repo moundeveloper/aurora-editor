@@ -33,5 +33,5 @@ function enable() {
   </section>
 </template>
 <style scoped>
-.scatter-controls{display:flex;flex-direction:column;gap:7px;padding:9px;border-bottom:1px solid var(--border-subtle);font-size:10px;color:var(--text-secondary)}label{display:flex;justify-content:space-between;gap:8px}button{padding:5px;color:inherit;background:var(--bg-input);border:1px solid var(--border-strong)}small{color:var(--text-muted)}
+.scatter-controls { display: flex; flex-direction: column; gap: 7px; padding: 9px; color: var(--text-secondary); border-bottom: 1px solid var(--border-subtle); font-size: 10px; }.scatter-controls > strong { color: var(--text-primary); font-weight: 620; } label { display: flex; min-width: 0; align-items: center; justify-content: space-between; gap: 8px; } label:has(input[type=checkbox]) { justify-content: flex-start; } input[type=checkbox] { accent-color: var(--button-accent); } button { height: 24px; width: fit-content; padding: 0 7px; color: inherit; background: var(--bg-input); border: 1px solid var(--border-strong); border-radius: 3px; font: inherit; cursor: pointer; white-space: nowrap; } button:hover { color: var(--text-primary); background: var(--bg-hover); border-color: var(--accent-border); } small { color: var(--text-muted); line-height: 1.4; }
 </style>

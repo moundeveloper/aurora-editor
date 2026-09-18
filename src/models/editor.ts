@@ -1,3 +1,4 @@
+import type { NativeModel } from '../../shared/modeling.ts'
 export type AudioNodeKind = 'source' | 'gain' | 'eq' | 'compressor' | 'reverb' | 'master'
 export interface AudioGraphNode {
   id: string; kind: AudioNodeKind; title: string; x: number; y: number
@@ -9,7 +10,7 @@ export interface AudioGraphNode {
 export interface AudioConnection { id: string; from: string; to: string }
 export interface AudioGraph { nodes: AudioGraphNode[]; connections: AudioConnection[] }
 
-export type WorkspaceId = 'Motion' | 'Nodes' | '3D' | 'Audio' | 'Export'
+export type WorkspaceId = 'Motion' | 'Nodes' | '3D' | 'Modeling' | 'Audio' | 'Export'
 
 export type LayerType = 'video' | 'image' | 'text' | 'shape' | 'audio' | 'adjustment' | 'cluster' | '3d-scene'
 
@@ -78,7 +79,7 @@ export interface AuroraPBRMaterial {
   emissiveIntensity: AnimatableProperty<number>
 }
 
-export type Aurora3DPrimitive = 'box' | 'sphere' | 'plane' | 'model'
+export type Aurora3DPrimitive = 'box' | 'sphere' | 'plane' | 'model' | 'native'
 
 export type AuroraInfluenceType = 'array' | 'radial-array' | 'mirror' | 'subdivide' | 'displace' | 'twist' | 'solidify' | 'screw' | 'bevel' | 'boolean'
 
@@ -137,6 +138,7 @@ export interface Aurora3DObject {
   type: 'mesh' | 'group' | 'null'
   primitive: Aurora3DPrimitive
   assetId?: string
+  modelRevision?: number
   parentId?: string
   visible: boolean
   locked: boolean
@@ -365,6 +367,7 @@ export interface TextAnimator {
 }
 
 export interface MediaAsset {
+  nativeModel?: NativeModel
   id: string
   name: string
   kind: 'video' | 'image' | 'audio' | 'composition' | 'scene3d' | 'model3d' | 'hdr' | 'texture'

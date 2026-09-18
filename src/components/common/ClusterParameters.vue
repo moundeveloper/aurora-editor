@@ -30,5 +30,11 @@ function expose() {
   </section>
 </template>
 <style scoped>
-.cluster-parameters{display:flex;flex-direction:column;gap:8px;padding:10px;border-bottom:1px solid #343947;color:#b9c1d3;font-size:11px}label{display:flex;align-items:center;gap:5px}input,button{color:inherit;background:#252b37;border:1px solid #454e61;padding:4px;max-width:100%;min-width:0}summary{cursor:pointer}
+.cluster-parameters { display: flex; flex-direction: column; gap: 7px; padding: 9px; color: var(--text-secondary); border-bottom: 1px solid var(--border-subtle); font-size: 10px; }
+.cluster-parameters > strong { color: var(--text-primary); font-size: 10px; font-weight: 620; }
+label { display: flex; min-width: 0; align-items: center; gap: 5px; }
+label > :deep(.number-field) { min-width: 0; margin-left: auto; }
+input, button { height: 24px; min-width: 0; max-width: 100%; padding: 0 6px; color: inherit; background: var(--bg-input); border: 1px solid var(--border-strong); border-radius: 3px; font: inherit; }
+button { cursor: pointer; white-space: nowrap; } button:hover:not(:disabled) { color: var(--text-primary); background: var(--bg-hover); border-color: var(--accent-border); } button:disabled { opacity: .45; cursor: default; }
+details { display: grid; gap: 6px; padding-top: 2px; } summary { color: var(--text-muted); cursor: pointer; } details :deep(.m-select) { width: 100%; }
 </style>

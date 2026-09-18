@@ -203,13 +203,16 @@ export function addProjectModel(snapshot: SerializedEditorState, mutation: Model
     const parent = scene.objects.find((item) => item.id === mutation.parentId)
     if (!parent || parent.type !== 'group') throw new Error(`Parent ${mutation.parentId} is not a group in this scene`)
   }
+  if (asset.nativeModel && !asset.nativeModel.revisions.length) throw new Error('Publish the native model before placing it')
   const id = mutation.objectId ?? randomUUID()
+  if (scene.objects.some(object => object.id === id)) throw new Error(`Object ID already exists: ${id}`)
   const numeric = (suffix: string, value: number) => ({ id: `${id}-${suffix}`, value, animated: false, keyframes: [] })
   const object: Aurora3DObject = {
     id,
     name: mutation.name?.trim() || asset.name.replace(/\.[^.]+$/, ''),
     type: 'mesh',
-    primitive: 'model',
+    primitive: asset.nativeModel ? 'native' : 'model',
+    ...(asset.nativeModel ? { modelRevision: asset.nativeModel.revisions.at(-1)?.revision } : {}),
     assetId: asset.id,
     ...(mutation.parentId ? { parentId: mutation.parentId } : {}),
     visible: true,
@@ -222,7 +225,7 @@ export function addProjectModel(snapshot: SerializedEditorState, mutation: Model
       scale: vectorProperties(`${id}-scale`, mutation.scale, undefined, [1, 1, 1]),
     },
     material: {
-      baseColor: '#8c94a8',
+      baseColor: asset.nativeModel?.revisions.at(-1)?.color ?? '#8c94a8',
       emissive: '#000000',
       metalness: numeric('metalness', .1),
       roughness: numeric('roughness', .6),

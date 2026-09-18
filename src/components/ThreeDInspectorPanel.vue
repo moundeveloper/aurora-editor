@@ -124,6 +124,12 @@ function pointModeLabel(mode: AuroraPathPointMode) {
     </div>
 
     <div v-if="selectedSceneEntity && transform" class="inspector-scroll">
+      <section v-if="selectedSceneEntity.kind === 'object' && selectedSceneEntity.value.primitive === 'native'" class="property-section native-model-actions">
+        <strong>Native model · r{{ selectedSceneEntity.value.modelRevision }}</strong>
+        <button @click="store.openModelAsset(selectedSceneEntity.value.assetId!)">Edit Model</button>
+        <button @click="store.updateNativeModelInstance(selectedSceneEntity.value.id)">Update to latest published</button>
+        <button @click="store.openModelAsset(store.makeNativeModelUnique(selectedSceneEntity.value.id).id)">Make Unique</button>
+      </section>
       <section class="property-section">
         <button class="section-header" type="button" @click="toggle('transform')"><ChevronDown :size="12" :class="{ closed: collapsed.transform }" /><span>Transform 3D</span><small>Local</small></button>
         <div v-if="!collapsed.transform" class="transform-groups">
@@ -433,4 +439,8 @@ function pointModeLabel(mode: AuroraPathPointMode) {
 .vector-row { display: grid; grid-template-columns: 34px repeat(3, minmax(0, 1fr)); align-items: center; gap: 3px; padding: 3px 4px; }.vector-row > strong { color: var(--text-muted); font-size: 7px; font-weight: 500; text-transform: uppercase; }.vector-row label { display: flex; height: 21px; min-width: 0; align-items: center; overflow: hidden; background: var(--bg-input); border: 1px solid var(--border-strong); border-radius: 3px; }.vector-row label:focus-within { border-color: var(--focus); }.vector-row label > span { width: 13px; padding-left: 3px; font-size: 6.5px; font-weight: 700; }.vector-row label.x > span { color: #df7886; }.vector-row label.y > span { color: #6bb88f; }.vector-row label.z > span { color: #7998e4; }.vector-row :deep(input) { width: 100%; min-width: 0; padding: 0 2px; color: var(--text-primary); background: transparent; border: 0; outline: 0; font: inherit; font-size: 8px; }.vector-row :deep(input:disabled) { color: var(--text-muted); }
 .path-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; }.path-actions button { display: flex; height: 25px; align-items: center; justify-content: center; gap: 4px; color: var(--text-secondary); background: #181a20; border: 1px dashed #3a3e49; border-radius: 3px; font: inherit; font-size: 8.5px; cursor: pointer; }.path-actions button:hover { color: var(--text-primary); border-color: var(--accent-border); }.path-actions button.danger:hover { color: #f0a7a7; border-color: #6d3d45; }
 .metadata { display: grid; grid-template-columns: 1fr auto; gap: 7px 10px; padding: 7px 8px 9px; font-size: 8px; }.metadata span { color: var(--text-muted); }.metadata strong { color: var(--text-secondary); font-weight: 500; }.empty-state { display: flex; flex: 1; align-items: center; justify-content: center; flex-direction: column; gap: 6px; padding: 20px; color: var(--text-muted); text-align: center; }.empty-state svg { color: var(--accent); }.empty-state strong { color: var(--text-primary); font-size: 10px; }.empty-state span { font-size: 8.5px; line-height: 1.4; }
+</style>
+
+<style scoped>
+.native-model-actions { display:grid; gap:7px; padding:12px; }.native-model-actions button { padding:6px; color:var(--text-secondary); background:var(--bg-panel-alt); border:1px solid var(--border-strong); border-radius:4px; cursor:pointer; }
 </style>

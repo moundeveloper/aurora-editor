@@ -9,7 +9,7 @@ import { MAX_RIG_CELLS, MIN_RIG_CELLS } from '@/engine/rig/rigMesh'
 import { normalizeTimelineMarkers } from '@/engine/animation/timelineMarkers'
 import { createLayerEffect, layerEffectParameters, normalizeLayerEffectStacks } from '@/engine/nodes/layerEffects'
 
-export const CURRENT_PROJECT_VERSION = 14
+export const CURRENT_PROJECT_VERSION = 15
 
 export interface EditorStateFallback {
   audioGraph?: SerializedEditorState['audioGraph']

@@ -23,5 +23,5 @@ const store=useEditorStore()
   </section>
 </template>
 <style scoped>
-.shape-points{padding:9px;font-size:10px;color:var(--text-secondary);border-bottom:1px solid var(--border-subtle)}details{margin-top:6px}summary{cursor:pointer}label{display:flex;align-items:center;gap:4px;margin-top:5px}button{background:var(--bg-input);border:1px solid var(--border-strong);color:inherit}
+.shape-points { padding: 9px; color: var(--text-secondary); border-bottom: 1px solid var(--border-subtle); font-size: 10px; }.shape-points > strong { color: var(--text-primary); font-weight: 620; } details { margin-top: 6px; padding: 5px 6px; background: var(--bg-panel-alt); border: 1px solid var(--border-subtle); border-radius: 3px; } summary { color: var(--text-muted); cursor: pointer; } label { display: flex; min-width: 0; align-items: center; gap: 4px; margin-top: 5px; } label > :deep(.number-field) { min-width: 0; margin-left: auto; } button { display: grid; width: 22px; height: 22px; flex: 0 0 auto; place-items: center; padding: 0; color: var(--text-muted); background: var(--bg-input); border: 1px solid var(--border-strong); border-radius: 3px; cursor: pointer; } button:hover { color: var(--accent); background: var(--bg-selected); border-color: var(--accent-border); }
 </style>

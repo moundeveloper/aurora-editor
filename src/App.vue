@@ -19,6 +19,7 @@ import HistoryPanel from '@/components/HistoryPanel.vue'
 import ProjectVersions from '@/components/ProjectVersions.vue'
 import CommandPalette from '@/components/CommandPalette.vue'
 
+const ModelingWorkspace = defineAsyncComponent(() => import('@/components/modeling/ModelingWorkspace.vue'))
 const ThreeDWorkspace = defineAsyncComponent(() => import('@/components/ThreeDWorkspace.vue'))
 const ThreeDPreviewPanel = defineAsyncComponent(() => import('@/components/ThreeDPreviewPanel.vue'))
 const SceneHierarchyPanel = defineAsyncComponent(() => import('@/components/SceneHierarchyPanel.vue'))
@@ -99,7 +100,8 @@ onBeforeUnmount(() => {
     <TopBar @open-command-palette="commandPaletteOpen = true" />
     <CommandPalette v-model:open="commandPaletteOpen" @toggle-panel="togglePanel" />
 
-    <main v-if="workspace !== 'Export'" class="workspace-shell">
+    <main v-if="workspace === 'Modeling'" class="modeling-area"><ModelingWorkspace /></main>
+    <main v-else-if="workspace !== 'Export'" class="workspace-shell">
       <div class="upper-workspace" :class="{ 'no-right-pane': !inspectorVisible }">
         <div v-show="leftOpen" class="left-pane"><SceneHierarchyPanel v-if="workspace === '3D'" /><AssetPanel v-else /></div>
         <div v-show="leftOpen" class="pane-resizer vertical left" role="separator" aria-label="Resize asset browser" @pointerdown="startResize('left')" />
@@ -146,6 +148,7 @@ onBeforeUnmount(() => {
       <span class="status-divider" />
       <span><ShieldCheck :size="11" /> Local-first</span>
       <span><HardDrive :size="11" /> 2.8 GB cache</span>
+      <span v-if="store.projectSaveError" role="alert" :title="store.projectSaveError" style="color:var(--danger)">{{ store.projectSaveError }}</span>
       <span class="status-spacer" />
       <span>{{ selectedLayer?.name || 'No selection' }}</span>
       <span class="status-divider" />
@@ -155,3 +158,7 @@ onBeforeUnmount(() => {
     </footer>
   </div>
 </template>
+
+<style scoped>
+.modeling-area { min-height: 0; overflow: hidden; }
+</style>

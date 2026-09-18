@@ -14,5 +14,5 @@ function toggle(id:string) {const link=props.object.lightLink!;link.ids=link.ids
   </section>
 </template>
 <style scoped>
-.light-links{display:flex;flex-direction:column;gap:6px;padding:9px;border-bottom:1px solid var(--border-subtle);font-size:10px;color:var(--text-secondary)}label{display:flex;align-items:center;gap:5px}small{color:var(--text-muted)}
+.light-links { display: flex; flex-direction: column; gap: 7px; padding: 9px; color: var(--text-secondary); border-bottom: 1px solid var(--border-subtle); font-size: 10px; }.light-links > strong { color: var(--text-primary); font-weight: 620; } label { display: flex; align-items: center; gap: 6px; min-height: 22px; padding: 0 5px; background: var(--bg-input); border: 1px solid var(--border-subtle); border-radius: 3px; } input { accent-color: var(--button-accent); } small { color: var(--text-muted); line-height: 1.4; }
 </style>

@@ -1,4 +1,5 @@
-import { readFile, readdir, rename, writeFile } from 'node:fs/promises'
+import { createHash } from 'node:crypto'
+import { mkdir, rmdir, readFile, readdir, rename, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import {
   editorProjectSchema,
@@ -13,7 +14,12 @@ const ACTIVE_PROJECT_FILE = '.active-project.json'
 
 interface ActiveProjectFile { projectId: string }
 
+export function projectETag(snapshot: unknown) { return createHash('sha256').update(JSON.stringify(snapshot)).digest('hex') }
+export class ProjectConflictError extends Error {
+  constructor() { super('Project changed in another session. Your local edits are retained; reopen or reconcile before saving.'); this.name='ProjectConflictError' }
+}
 export class ProjectRepository {
+  private readonly readVersions = new WeakMap<object, string>()
   private readonly layout: VaultLayout
 
   constructor(layout: VaultLayout) {
@@ -27,21 +33,39 @@ export class ProjectRepository {
 
   private async readProject(path: string): Promise<SharedSerializedProject | null> {
     try {
-      return serializedProjectSchema.parse(JSON.parse(await readFile(path, 'utf8')))
+      const snapshot = serializedProjectSchema.parse(JSON.parse(await readFile(path, 'utf8')))
+      this.readVersions.set(snapshot, projectETag(snapshot))
+      return snapshot
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null
       throw error
     }
   }
 
-  async save(snapshot: unknown): Promise<SharedSerializedProject> {
+  async save(snapshot: unknown, expectedVersion?: string): Promise<SharedSerializedProject> {
     const parsed = serializedProjectSchema.parse(snapshot)
+    const expected = expectedVersion ?? (typeof snapshot === 'object' && snapshot ? this.readVersions.get(snapshot) : undefined)
     const target = this.projectPath(parsed.project.id)
-    const temporary = join(this.layout.temp, `${parsed.project.id}-${process.pid}-${Date.now()}.tmp`)
-    await writeFile(temporary, `${JSON.stringify(parsed, null, 2)}\n`, 'utf8')
-    await rename(temporary, target)
-    await this.setActive(parsed.project.id)
-    return parsed
+    // Atomic cross-process exclusion: the HTTP server and STDIO MCP may run separately.
+    const lock = `${target}.lock`
+    const deadline = Date.now()+3000
+    while (true) {
+      try { await mkdir(lock); break } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
+        if (Date.now()>deadline) throw new Error('Project writer is busy. Retry after the other save finishes.')
+        await new Promise(resolve => setTimeout(resolve,25))
+      }
+    }
+    try {
+      const current = await this.load(parsed.project.id)
+      if (expected !== undefined && (current ? projectETag(current) : 'new') !== expected) throw new ProjectConflictError()
+      const temporary = join(this.layout.temp, `${parsed.project.id}-${process.pid}-${Date.now()}.tmp`)
+      await writeFile(temporary, `${JSON.stringify(parsed, null, 2)}\n`, 'utf8')
+      await rename(temporary, target)
+      if (typeof snapshot === 'object' && snapshot) this.readVersions.set(snapshot,projectETag(parsed))
+      await this.setActive(parsed.project.id)
+      return parsed
+    } finally { await rmdir(lock) }
   }
 
   load(projectId: string) {

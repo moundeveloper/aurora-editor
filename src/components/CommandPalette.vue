@@ -43,7 +43,7 @@ function shortcut(id: string) {
 
 const commands = computed<CommandItem[]>(() => {
   const workspaceCommands: Array<[string, WorkspaceId]> = [
-    ['motion', 'Motion'], ['nodes', 'Nodes'], ['threeD', '3D'], ['audio', 'Audio'], ['export', 'Export'],
+    ['motion', 'Motion'], ['nodes', 'Nodes'], ['threeD', '3D'], ['modeling', 'Modeling'], ['audio', 'Audio'], ['export', 'Export'],
   ]
   return [
     { id: 'palette', label: 'Open command palette', group: 'Window', keywords: 'search actions', shortcut: shortcut('palette'), run: () => emit('update:open', true) },

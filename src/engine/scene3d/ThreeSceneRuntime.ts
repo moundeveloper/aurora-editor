@@ -1,3 +1,4 @@
+import { modelGeometry } from '../modeling/modelGeometry'
 import * as THREE from 'three'
 import { syncScattering } from './scattering'
 import { syncLightLinking } from './lightLinking'
@@ -39,7 +40,7 @@ export interface Scene3DRuntime {
 /** Value edits must not rebuild a complete Three scene. Only topology changes earn a new runtime. */
 function sceneStructureKey(definition: Aurora3DScene, assets: Map<string, MediaAsset>) {
   const objects = definition.objects.map((object) => [
-    object.id, object.type, object.primitive, object.parentId ?? '', object.assetId ?? '',
+    object.id, object.type, object.primitive, object.modelRevision ?? '', object.parentId ?? '', object.assetId ?? '',
     object.assetId ? assets.get(object.assetId)?.dimensions ?? '' : '',
   ].join(':')).join('|')
   const cameras = definition.cameras.map((camera) => `${camera.id}:${camera.projection}`).join('|')
@@ -112,6 +113,10 @@ export function planeHalfExtents(object: Aurora3DObject, assets: Map<string, Med
 }
 
 function makeGeometry(object: Aurora3DObject, assets: Map<string, MediaAsset>): THREE.BufferGeometry {
+  if (object.primitive === 'native') {
+    const source = assets.get(object.assetId ?? '')?.nativeModel?.revisions.find(r => r.revision === object.modelRevision)
+    return source ? modelGeometry(source.mesh) : new THREE.BufferGeometry()
+  }
   if (object.primitive === 'sphere') return new THREE.SphereGeometry(1.15, 48, 32)
   if (object.primitive === 'plane') {
     const { halfWidth, halfHeight } = planeHalfExtents(object, assets)

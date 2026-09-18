@@ -46,5 +46,5 @@ onBeforeUnmount(() => unsubscribe?.())
   </section>
 </template>
 <style scoped>
-.scopes-panel{display:flex;flex:1;min-height:0;flex-direction:column;padding:8px;gap:6px}header{display:flex;align-items:center;gap:12px;color:var(--text-muted);font-size:10px}canvas{width:100%;min-height:0;flex:1;object-fit:contain;background:#0c0c0c}
+.scopes-panel { display: flex; flex: 1; min-height: 0; flex-direction: column; gap: 6px; padding: 8px; background: var(--bg-panel); } header { display: flex; min-width: 0; align-items: center; gap: 8px; color: var(--text-muted); font-size: 9px; } header :deep(.m-select) { width: 150px; flex: 0 1 150px; } header span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } canvas { width: 100%; min-height: 0; flex: 1; object-fit: contain; background: #0b0d11; border: 1px solid var(--border-subtle); border-radius: 3px; }
 </style>

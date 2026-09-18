@@ -212,12 +212,12 @@ onBeforeUnmount(() => {
             :class="{ selected: selectedAssetId === asset.id }"
             type="button"
             draggable="true"
-            :title="`${asset.name}\nDrag to timeline`"
+            :title="`${asset.name}\n${asset.nativeModel ? 'Double-click to edit model' : 'Drag to timeline'}`"
             @click="selectedAssetId = asset.id"
             @contextmenu="openAssetMenu($event, asset)"
             @dragstart="startDrag($event, asset.id)"
             @dragend="endAssetDrag"
-            @dblclick="store.addAssetToTimeline(asset.id)"
+            @dblclick="asset.nativeModel ? store.openModelAsset(asset.id) : store.addAssetToTimeline(asset.id)"
           >
             <span class="asset-thumbnail" :class="asset.kind">
               <img v-if="asset.thumbnail" :src="asset.thumbnail" alt="" />
@@ -254,11 +254,13 @@ onBeforeUnmount(() => {
       title="Delete Library item"
       :description="deleteAsset ? `Remove “${deleteAsset.name}” from this project’s Library?` : ''"
       confirm-label="Delete"
+      :confirm-disabled="Boolean(deleteAsset?.nativeModel && store.mediaAssetReferenceCount(deleteAsset.id))"
       danger
       @close="deleteAsset = null"
       @confirm="confirmAssetDelete"
     >
-      <p class="dialog-warning">{{ deleteAsset && store.mediaAssetReferenceCount(deleteAsset.id) ? `${store.mediaAssetReferenceCount(deleteAsset.id)} linked item(s) will be unlinked but kept in the project. ` : '' }}You can undo this action.</p>
+      <p v-if="deleteAsset?.nativeModel && store.mediaAssetReferenceCount(deleteAsset.id)" class="dialog-warning">This model is used by scene instances. Remove those instances and saved scene references before deleting its source.</p>
+      <p v-else class="dialog-warning">{{ deleteAsset && store.mediaAssetReferenceCount(deleteAsset.id) ? `${store.mediaAssetReferenceCount(deleteAsset.id)} linked item(s) will be unlinked but kept in the project. ` : '' }}You can undo this action.</p>
     </MDialog>
     <ClusterSettingsDialog
       :open="Boolean(editClusterAsset)"

@@ -50,6 +50,6 @@ function move(index: number, direction: number) {
 </template>
 
 <style scoped>
-.curve-modifiers { flex: 0 0 auto; max-height: 130px; overflow: auto; padding: 5px 10px; color: #b9c1d3; background: #171a22; font-size: 11px; }
-summary { cursor: pointer; }.add, .modifier { display: flex; align-items: center; gap: 8px; padding-top: 5px; }.modifier > :deep(*) { max-width: 130px; }button { color: inherit; background: #252a36; border: 1px solid #424958; border-radius: 3px; padding: 3px 8px; }button[aria-pressed=false] { opacity: .45; }
+.curve-modifiers { max-height: 150px; padding: 7px 9px; overflow: auto; color: var(--text-secondary); background: var(--bg-panel-alt); border-bottom: 1px solid var(--border-subtle); font-size: 10px; }
+summary { color: var(--text-muted); cursor: pointer; }.add, .modifier { display: flex; min-width: 0; align-items: center; gap: 5px; padding-top: 6px; }.add :deep(.m-select) { min-width: 0; flex: 1; }.modifier { flex-wrap: wrap; padding: 6px; background: var(--bg-input); border: 1px solid var(--border-subtle); border-radius: 3px; }.modifier > :deep(*) { max-width: 122px; } button { height: 24px; padding: 0 7px; color: inherit; background: transparent; border: 1px solid var(--border-strong); border-radius: 3px; font: inherit; cursor: pointer; white-space: nowrap; } button:hover:not(:disabled) { color: var(--text-primary); background: var(--bg-hover); border-color: var(--accent-border); } button:disabled { opacity: .38; cursor: default; } button[aria-pressed=true] { color: var(--accent); background: var(--bg-selected); border-color: var(--accent-border); } button[aria-pressed=false] { color: var(--text-muted); }
 </style>

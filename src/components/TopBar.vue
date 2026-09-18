@@ -10,7 +10,7 @@ const store = useEditorStore()
 const emit = defineEmits<{ 'open-command-palette': [] }>()
 const router = useRouter()
 const { project, workspace, canUndo, canRedo } = storeToRefs(store)
-const workspaces: WorkspaceId[] = ['Motion', 'Nodes', '3D', 'Audio', 'Export']
+const workspaces: WorkspaceId[] = ['Motion', 'Nodes', '3D', 'Modeling', 'Audio', 'Export']
 const menus = ['File', 'Edit', 'Clip', 'Composition', 'Layer', 'Effect', 'Animation', 'View', 'Window', 'Help']
 
 async function goHome() {

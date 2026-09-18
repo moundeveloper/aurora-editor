@@ -33,5 +33,23 @@ watch(() => store.project.id, () => { selected.value = ''; void load().catch(e =
   </section>
 </template>
 <style scoped>
-.versions { position: fixed; z-index: 80; inset: 12% 15%; display:flex; flex-direction:column; gap: 10px; padding: 18px; background: #191c24; color:#d0d6e4; border:1px solid #4b5468; border-radius:8px; box-shadow:0 15px 60px #000a; font-size:12px; }header,.capture {display:flex; justify-content:space-between; gap:10px;}button,input { color:inherit; background:#292f3c; padding:6px 10px; border:1px solid #4b5468; border-radius:4px; }input {flex:1;}p {margin:0;color:#a0aabc}.diff {overflow:auto;min-height:0;}article {padding:8px 0;border-bottom:1px solid #353b48;}del,ins {display:block;overflow-wrap:anywhere;text-decoration:none;white-space:pre-wrap;}del{color:#eaa4a4}ins{color:#9bd2b1}
+.versions { position: fixed; z-index: 80; inset: 12% 15%; display: flex; flex-direction: column; gap: 8px; padding: 12px; color: var(--text-secondary); background: var(--bg-panel); border: 1px solid var(--border-strong); border-radius: 4px; box-shadow: 0 15px 48px rgb(0 0 0 / .62); font-size: 10px; }
+header, .capture { display: flex; align-items: center; gap: 7px; }
+header { min-height: 25px; padding-bottom: 7px; color: var(--text-primary); border-bottom: 1px solid var(--border-subtle); }
+header strong { flex: 1; font-size: 11px; font-weight: 620; }
+button, input { height: 25px; min-width: 0; padding: 0 8px; color: var(--text-secondary); background: var(--bg-input); border: 1px solid var(--border-strong); border-radius: 3px; font: inherit; }
+button { cursor: pointer; white-space: nowrap; }
+button:hover:not(:disabled) { color: var(--text-primary); background: var(--bg-hover); border-color: var(--accent-border); }
+button:disabled { opacity: .45; cursor: default; }
+header button { display: grid; width: 23px; place-items: center; padding: 0; font-size: 15px; line-height: 1; }
+.capture input { flex: 1; }
+.capture button, .versions > button { color: #151827; background: var(--button-accent); border-color: var(--button-accent); font-weight: 650; }
+.capture button:hover:not(:disabled), .versions > button:hover:not(:disabled) { color: #10131c; background: var(--button-accent-hover); border-color: var(--button-accent-hover); }
+p { margin: 0; color: var(--text-muted); line-height: 1.4; }
+p[role=alert] { color: var(--danger); }
+.diff { min-height: 0; padding: 0 2px; overflow: auto; border-top: 1px solid var(--border-subtle); }
+article { display: grid; gap: 3px; padding: 7px 2px; border-bottom: 1px solid var(--border-subtle); }
+article strong { overflow: hidden; color: var(--text-primary); font-size: 9px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+del, ins { display: block; overflow-wrap: anywhere; text-decoration: none; white-space: pre-wrap; }
+del { color: #d98b90; } ins { color: #80bb9c; }
 </style>
