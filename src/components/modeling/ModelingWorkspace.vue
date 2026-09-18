@@ -25,6 +25,11 @@ const distance=ref(.5), thickness=ref(.2), offset=ref<Vec3>([0,.5,0]), scale=ref
 const error=ref(''), status=ref(''), wire=ref(false), xray=ref(false), activeGesture=ref(false), gestureText=ref('')
 const loopActive=ref(false)
 const loopCuts=ref(1),loopPosition=ref(.5),loopStage=ref<'hover'|'slide'>('hover')
+// Blender creates the extrusion topology before the modal movement begins. A tiny
+// valid offset gives us that same zero-distance starting state while preserving the
+// mesh validator's no-zero-length-edge invariant.
+const extrusionStartDistance=1e-5
+const extrusionOriginDirection:Vec3=[0,1,0]
 const tool=ref<'select'|'translate'|'rotate'|'scale'>('translate')
 const host=ref<HTMLElement>(), canvas=ref<HTMLCanvasElement>()
 const selectedIds=computed(()=>displayed.value ? mode.value==='object' ? displayed.value.mesh.vertices.map(v=>v.id) : selectionVertices(displayed.value.mesh,selectMode.value,selected.value) : [])
@@ -175,6 +180,10 @@ function startGesture(kind:Gesture['kind']){
   if(kind!=='gizmo')gizmo?.detach()
   gestureText.value=kind==='inset'?'INSET REGION · move pointer or type thickness in meters · Enter/click confirm · Esc/right-click cancel':`${kind.toUpperCase()} · move pointer · X/Y/Z: axis · Shift+X/Y/Z: exclude axis (Move/Scale) · type value · Enter/click confirm · Esc/right-click cancel`
   canvas.value?.focus()
+  if(kind==='extrude'){
+    previewOperation({type:'extrude-region',faceIds:gesture.faceIds,distance:extrusionStartDistance,direction:extrusionOriginDirection})
+    gestureText.value='EXTRUDE REGION · move pointer · X/Y/Z: axis · Shift+X/Y/Z: exclude axis · Esc keeps the new cap at its start'
+  }
 }
 function startEdgeSlide(){
   if(mode.value!=='edit' || selectMode.value==='face'){error.value='Select an edge loop in Edge or Vertex mode to slide.';return}
@@ -266,8 +275,8 @@ function updateGesture(pointer=lastPointer,precise=false){
   const {delta,perPixel}=screenMove(g,dx,dy)
   const axis=g.axis?axes[g.axis]:null
   if(g.kind==='extrude'){
-    const value=numeric??(dx-dy)*perPixel
-    if(Math.abs(value)<1e-6){preview.value=null;g.operation=null;g.valid=true;error.value='';return}
+    const requested=numeric??(dx-dy)*perPixel
+    const value=Math.abs(requested)<extrusionStartDistance ? (requested<0 ? -extrusionStartDistance : extrusionStartDistance) : requested
     previewOperation({type:'extrude-region',faceIds:g.faceIds,distance:value,direction:axis?axis.toArray() as Vec3:undefined})
   }else if(g.kind==='inset'){
     const value=numeric??Math.max(0,dx*perPixel)
@@ -299,14 +308,27 @@ function finishGesture(){
   if(g.operation)act(()=>{store.editNativeModel(g.assetId,g.base.revision,g.operation!);if(g.kind==='loop-cut'){selectMode.value='edge';selected.value=cutSelection}})
   rebuild()
 }
-function cancelGesture(){
+function cancelGesture(keepExtrusion=false){
   if(!gesture)return
+  const g=gesture
+  if(keepExtrusion && g.kind==='extrude'){
+    const origin:ModelOperation={type:'extrude-region',faceIds:g.faceIds,distance:extrusionStartDistance,direction:extrusionOriginDirection}
+    clearLoop();gesture=null;activeGesture.value=false;preview.value=null
+    if(controls)controls.enabled=true
+    if(gizmo?.dragging){gizmo.reset();gizmo.dragging=false}
+    act(()=>store.editNativeModel(g.assetId,g.base.revision,origin))
+    selected.value=[...g.faceIds]
+    rebuild()
+    return
+  }
   clearLoop()
   gesture=null;activeGesture.value=false;preview.value=null
   if(controls)controls.enabled=true
   if(gizmo?.dragging){gizmo.reset();gizmo.dragging=false}
   error.value='';rebuild()
 }
+function cancelPointer(){cancelGesture()}
+function cancelButton(){cancelGesture()}
 function pointerDown(event:PointerEvent){
   canvas.value?.focus()
   if(gesture && gesture.kind!=='gizmo'){
@@ -320,7 +342,7 @@ function pointerMove(event:PointerEvent){lastPointer={x:event.clientX,y:event.cl
 function key(event:KeyboardEvent){
   if((event.target as HTMLElement).tagName!=='CANVAS')return
   if(gesture){
-    if(event.key==='Escape'){event.preventDefault();cancelGesture();return}
+    if(event.key==='Escape'){event.preventDefault();cancelGesture(true);return}
     if(event.key.toLowerCase()==='g' && gesture.kind==='translate'){event.preventDefault();event.stopPropagation();if(!event.repeat)startEdgeSlide();return}
     if(gesture.kind==='gizmo')return
     event.preventDefault();event.stopPropagation()
@@ -404,7 +426,7 @@ onBeforeUnmount(()=>{clearLoop();gesture=null;observer?.disconnect();controls?.d
         <button :class="{active:wire}" @click="wire=!wire">Quad Wire</button><button :class="{active:xray}" @click="xray=!xray">X-Ray</button>
       </div>
       <div ref="host" class="model-viewport">
-        <canvas ref="canvas" tabindex="0" aria-label="Modeling viewport. Left click selects; left drag orbits; middle/right drag pans. 1 vertices, 2 edges, 3 faces. G move, R rotate, S scale, E extrude, I inset. Alt click selects loops; G then G slides selected edges." @wheel.capture="loopWheel" @pointerdown.capture="pointerDown" @pointermove="pointerMove" @pointerup="pick" @pointercancel="cancelGesture" @contextmenu.prevent @keydown="key" />
+        <canvas ref="canvas" tabindex="0" aria-label="Modeling viewport. Left click selects; left drag orbits; middle/right drag pans. 1 vertices, 2 edges, 3 faces. G move, R rotate, S scale, E extrude, I inset. Alt click selects loops; G then G slides selected edges." @wheel.capture="loopWheel" @pointerdown.capture="pointerDown" @pointermove="pointerMove" @pointerup="pick" @pointercancel="cancelPointer" @contextmenu.prevent @keydown="key" />
         <div class="viewport-tools" aria-label="Mesh tools">
           <button v-for="item in (['select','translate','rotate','scale'] as const)" :key="item" :disabled="activeGesture" :class="{active:tool===item}" @click="tool=item; canvas?.focus()">{{ item==='translate'?'Move':item.charAt(0).toUpperCase()+item.slice(1) }}</button>
           <button :disabled="!selectedFaces.length || activeGesture" @click="startGesture('extrude')">Extrude <kbd>E</kbd></button>
@@ -421,9 +443,9 @@ onBeforeUnmount(()=>{clearLoop();gesture=null;observer?.disconnect();controls?.d
     </div>
     <aside class="model-properties">
       <header><strong>Model properties</strong></header>
-      <div v-if="activeGesture" class="gesture-actions"><strong>{{ gestureText }}</strong><button @click="acceptGesture">Confirm</button><button @click="cancelGesture">Cancel</button></div>
+      <div v-if="activeGesture" class="gesture-actions"><strong>{{ gestureText }}</strong><button @click="acceptGesture">Confirm</button><button @click="cancelButton">Cancel</button></div>
       <section v-if="loopActive"><h3>Loop Cut</h3><label>Cuts<input v-model.number="loopCuts" type="number" min="1" max="16" :disabled="loopStage==='slide'" @input="previewLoop" /></label><label v-if="loopCuts===1">Position (0–1)<input v-model.number="loopPosition" type="number" min="0.01" max="0.99" step="0.01" @input="previewLoop" /></label><p class="muted">Hover an edge to preview the connected quad strip. Multiple cuts are evenly spaced.</p></section>
-      <p class="muted">Drag the colored gizmo handles to transform your selection. Choose Move, Rotate or Scale above the viewport. Shift-click selects additional elements. Alt-click an edge selects its loop; Shift+Alt-click adds or removes a loop. G, G slides selected edges along the mesh. G / R / S starts a transform; X / Y / Z restricts an axis; Shift+X / Y / Z excludes it during Move or Scale. Type a value and press Enter. Escape cancels.</p>
+      <p class="muted">Drag the colored gizmo handles to transform your selection. Choose Move, Rotate or Scale above the viewport. Shift-click selects additional elements. Alt-click an edge selects its loop; Shift+Alt-click adds or removes a loop. G, G slides selected edges along the mesh. G / R / S starts a transform; X / Y / Z restricts an axis; Shift+X / Y / Z excludes it during Move or Scale. Type a value and press Enter. Escape cancels movement; during extrusion it keeps the new cap at its start.</p>
       <template v-if="asset && draft">
         <label>Name<input :value="asset.name" maxlength="128" @change="rename" /></label>
         <label>Surface color<input type="color" :value="draft.color" @change="operation({type:'color',color:($event.target as HTMLInputElement).value})" /></label>

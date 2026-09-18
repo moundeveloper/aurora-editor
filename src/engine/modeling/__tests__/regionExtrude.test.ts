@@ -23,6 +23,19 @@ describe('region extrusion',()=>{
   const twice=applyModelOperation(out,2,{type:'extrude-region',faceIds,distance:1})
   expect(validateMesh(twice.mesh)).toMatchObject({faces:20,boundaryEdges:8})
  })
+ it('keeps the new cap topology at its starting position when movement is cancelled',()=>{
+  const base=createModel().draft
+  const out=applyModelOperation(base,1,{type:'extrude-region',faceIds:['f5'],distance:1e-5,direction:[0,1,0]})
+  expect(out.mesh.faces).toHaveLength(10)
+  expect(out.mesh.faces.find(f=>f.id==='f5')!.vertices).not.toEqual(base.mesh.faces.find(f=>f.id==='f5')!.vertices)
+  const original=base.mesh.vertices.filter(v=>['v3','v7','v6','v2'].includes(v.id)).map(v=>v.position)
+  const cap=out.mesh.faces.find(f=>f.id==='f5')!
+  const capPositions=cap.vertices.map(id=>out.mesh.vertices.find(v=>v.id===id)!.position)
+  expect(capPositions).toHaveLength(4)
+  for(const position of capPositions)expect(position[0]).toBeCloseTo(original.find(p=>Math.abs(p[0]-position[0])<1e-8)![0])
+  // The cap is distinct and remains the active face ID, so the next movement can continue it.
+  expect(cap.id).toBe('f5')
+ })
  it('preserves a hole by extruding both inner and outer boundary loops',()=>{
   const base=grid(3);base.mesh.faces=base.mesh.faces.filter(f=>f.id!=='f4')
   const out=applyModelOperation(base,1,{type:'extrude-region',faceIds:base.mesh.faces.map(f=>f.id),distance:1})

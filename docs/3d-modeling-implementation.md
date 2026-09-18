@@ -38,7 +38,7 @@ Source primitives, extrusion caps, and side walls are quad polygons. Rendering s
 
 
 
-Selections can contain multiple vertices/edges/faces. Transforms use the selected vertices' median as pivot. Extrude and inset support one or more selected faces as a joined region. Cancel rolls back the entire pending extrusion, including new topology. The current editor supports axis constraints in global coordinates; Shift+axis plane constraints are supported for Move/Scale; local/normal transform orientations remain future work.
+Selections can contain multiple vertices/edges/faces. Transforms use the selected vertices' median as pivot. Extrude and inset support one or more selected faces as a joined region. During modal extrusion the cap is created immediately; Escape cancels only its movement and keeps the new cap at its starting position and selected. The Cancel button and right-click discard the pending topology. The current editor supports axis constraints in global coordinates; Shift+axis plane constraints are supported for Move/Scale; local/normal transform orientations remain future work.
 
 
 
@@ -197,7 +197,7 @@ References: [Blender Select Loops](https://docs.blender.org/manual/en/5.2/modeli
 
 ## Region extrusion and selection gizmos
 
-Select faces (Shift-click to add), then press **E** or **Extrude**. The entire selected cap moves along its area-weighted average normal; **X/Y/Z** overrides the direction. Enter/click commits and Escape/right-click cancels all preview geometry. Side quads are created only on region boundaries, shared cap vertices stay shared, cap face IDs stay selected, and unused original interior vertices are removed. Holes and separate boundary loops are retained. Pinched boundaries are rejected. A selection with cancelling normals requires an explicit axis; this is region extrusion, not individual-face extrusion or per-vertex normal offset. Inset also supports regions, as described below.
+Select faces (Shift-click to add), then press **E** or **Extrude**. The cap and boundary walls are created immediately, and the selected cap moves along its area-weighted average normal; **X/Y/Z** overrides the direction. Enter/click commits the current distance. **Escape cancels only the movement, leaving the extrusion at its starting position with the cap selected**, matching Blender's modal extrusion behavior. The Cancel button and right-click discard all pending topology. Side quads are created only on region boundaries, shared cap vertices stay shared, cap face IDs stay selected, and unused original interior vertices are removed. Holes and separate boundary loops are retained. Pinched boundaries are rejected. A selection with cancelling normals requires an explicit axis; this is region extrusion, not individual-face extrusion or per-vertex normal offset. Inset also supports regions, as described below.
 
 MCP operation: `{"type":"extrude-region","faceIds":["f1","f5"],"distance":0.5}` with optional `direction:[0,1,0]`. One operation increments the revision once and uses the same validation as the viewport. General surface self-intersection detection is not implemented.
 
