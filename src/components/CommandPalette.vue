@@ -49,7 +49,7 @@ const commands = computed<CommandItem[]>(() => {
     { id: 'palette', label: 'Open command palette', group: 'Window', keywords: 'search actions', shortcut: shortcut('palette'), run: () => emit('update:open', true) },
     { id: 'undo', label: 'Undo', group: 'Edit', shortcut: shortcut('undo'), disabled: !store.canUndo, run: () => store.undo() },
     { id: 'redo', label: 'Redo', group: 'Edit', shortcut: shortcut('redo'), disabled: !store.canRedo, run: () => store.redo() },
-    { id: 'split', label: 'Split selected layer', group: 'Edit', keywords: 'cut clip', shortcut: shortcut('split'), disabled: !store.selectedLayer, run: () => store.splitSelectedLayer() },
+    { id: 'split', label: 'Split selected layer', group: 'Edit', keywords: 'cut clip', shortcut: shortcut('split'), disabled: !store.selectedLayer || store.workspace === 'Modeling', run: () => store.splitSelectedLayer() },
     { id: 'play', label: store.playing ? 'Pause playback' : 'Start playback', group: 'Playback', keywords: 'space stop', shortcut: shortcut('play'), run: () => store.togglePlayback() },
     { id: 'previousFrame', label: 'Previous frame', group: 'Playback', shortcut: shortcut('previousFrame'), run: () => store.stepFrame(-1) },
     { id: 'nextFrame', label: 'Next frame', group: 'Playback', shortcut: shortcut('nextFrame'), run: () => store.stepFrame(1) },

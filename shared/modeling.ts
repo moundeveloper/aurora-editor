@@ -5,16 +5,43 @@ import { z } from 'zod'
 import { insertQuadLoop } from './loopCut.ts'
 import { knifeCut } from './knife.ts'
 import { deleteMeshElements } from './deleteMesh.ts'
+import { deleteLooseVertices, dissolveElements, fillBoundaries, mergeVertices } from './topologyRepair.ts'
+import { meshTopology } from './meshTopology.ts'
+import { bevel, bridgeLoops } from './construction.ts'
+import { subdivide, unsubdivide } from './subdivision.ts'
+import { connectVertexPath, connectionEdges } from './connectPath.ts'
+import { rotateEdges, splitFaceRegion, pokeFaces } from './edgeConstruction.ts'
+import { shapeTransform } from './shapeTransforms.ts'
 
 export type Vec3 = [number, number, number]
 export interface ModelVertex { id: string; position: Vec3 }
 export interface ModelFace { id: string; vertices: string[] }
 export interface ModelMesh { vertices: ModelVertex[]; faces: ModelFace[]; nextId: number }
-export interface ModelDraft { schemaVersion: 1; revision: number; mesh: ModelMesh; color: string }
+export interface ModelSelectionSet { name: string; mode: 'vertex'|'edge'|'face'; ids: string[] }
+export interface ModelDraft { schemaVersion: 1; revision: number; mesh: ModelMesh; color: string; selectionSets?: ModelSelectionSet[] }
 export interface NativeModel { draft: ModelDraft; revisions: ModelDraft[] }
 
 const vector = z.tuple([z.number().finite(), z.number().finite(), z.number().finite()])
 export const modelOperationSchema = z.discriminatedUnion('type', [
+  z.object({type:z.literal('shrink-fatten'),vertexIds:z.array(z.string()).min(1).max(12000),distance:z.number().finite().min(-1000).max(1000)}),
+  z.object({type:z.literal('push-pull'),vertexIds:z.array(z.string()).min(2).max(12000),distance:z.number().finite().min(-1000).max(1000)}),
+  z.object({type:z.literal('flatten'),vertexIds:z.array(z.string()).min(3).max(12000),plane:z.enum(['average','x','y','z']),strength:z.number().finite().min(.001).max(1).default(1)}),
+  z.object({type:z.literal('selection-set-save'),name:z.string().trim().min(1).max(64),mode:z.enum(['vertex','edge','face']),ids:z.array(z.string()).min(1).max(24000),replace:z.boolean().optional()}),
+  z.object({type:z.literal('selection-set-delete'),name:z.string().trim().min(1).max(64)}),
+  z.object({type:z.literal('rotate-edge'),edgeIds:z.array(z.string()).min(1).max(24000)}),
+  z.object({type:z.literal('split'),faceIds:z.array(z.string()).min(1).max(12000)}),
+  z.object({type:z.literal('rip'),faceIds:z.array(z.string()).min(1).max(12000),offset:vector}),
+  z.object({type:z.literal('poke'),faceIds:z.array(z.string()).min(1).max(12000),offset:z.number().finite().min(-1000).max(1000).default(0)}),
+  z.object({type:z.literal('subdivide'),mode:z.enum(['face','edge']),ids:z.array(z.string()).min(1).max(24000),cuts:z.number().int().min(1).max(15).default(1)}),
+  z.object({type:z.literal('unsubdivide'),faceIds:z.array(z.string()).min(4).max(12000),iterations:z.number().int().min(1).max(4).default(1)}),
+  z.object({type:z.literal('connect-path'),vertexIds:z.array(z.string()).min(2).max(128)}),
+  z.object({type:z.literal('bevel'),mode:z.enum(['edge','vertex']),ids:z.array(z.string()).min(1).max(24000),width:z.number().finite().min(.00001).max(1000),segments:z.number().int().min(1).max(16).default(1),profile:z.number().finite().min(.1).max(.9).default(.5),clampOverlap:z.boolean().default(true)}),
+  z.object({type:z.literal('bridge'),edgeIds:z.array(z.string()).min(6).max(24000),cuts:z.number().int().min(0).max(32).default(0),twist:z.number().int().min(-128).max(128).default(0)}),
+  z.object({ type: z.literal('merge'), vertexIds: z.array(z.string()).min(2).max(12000), method: z.enum(['distance', 'center', 'first', 'last']), distance: z.number().finite().min(1e-7).max(1000).default(.001) }),
+  z.object({ type: z.literal('dissolve'), mode: z.enum(['vertex', 'edge', 'face']), ids: z.array(z.string()).min(1).max(24000) }),
+  z.object({ type: z.literal('fill'), mode: z.enum(['vertex', 'edge']), ids: z.array(z.string()).min(3).max(24000), style: z.enum(['polygon', 'triangles', 'grid']).default('polygon') }),
+  z.object({ type: z.literal('fill-holes'), style: z.enum(['polygon', 'triangles', 'grid']).default('polygon') }),
+  z.object({ type: z.literal('delete-loose') }),
   z.object({ type: z.literal('extrude'), faceId: z.string(), distance: z.number().finite().min(-1000).max(1000), direction:vector.optional() }),
   z.object({type:z.literal('extrude-region'),faceIds:z.array(z.string()).min(1).max(12000),distance:z.number().finite().min(-1000).max(1000),direction:vector.optional()}),
   z.object({type:z.literal('inset-region'),faceIds:z.array(z.string()).min(1).max(12000),thickness:z.number().finite().positive().max(1000)}),
@@ -109,6 +136,36 @@ export function applyModelOperation(draft: ModelDraft, expectedRevision: number,
   const op = modelOperationSchema.parse(input), result = clone(draft), mesh = result.mesh
   validateMesh(mesh)
   if (op.type === 'color') result.color = op.color
+  else if (op.type === 'shrink-fatten'||op.type === 'push-pull'||op.type === 'flatten') shapeTransform(mesh,op)
+  else if (op.type === 'selection-set-save') {
+    const known=new Set(op.mode==='vertex'?mesh.vertices.map(v=>v.id):op.mode==='face'?mesh.faces.map(f=>f.id):[...meshTopology(mesh).edges.keys()])
+    if(new Set(op.ids).size!==op.ids.length||op.ids.some(id=>!known.has(id)))throw new Error('Selection set contains duplicate or unknown element IDs')
+    const sets=result.selectionSets??=[], existing=sets.findIndex(set=>set.name===op.name)
+    if(existing>=0&&!op.replace)throw new Error('A selection set with this name already exists; use Update saved set')
+    if(existing<0&&op.replace)throw new Error('Unknown selection set')
+    if(existing<0&&sets.length>=64)throw new Error('A model supports up to 64 selection sets')
+    const saved={name:op.name,mode:op.mode,ids:[...op.ids]}
+    if(existing<0)sets.push(saved);else sets[existing]=saved
+    result.selectionSets=sets
+  }
+  else if (op.type === 'selection-set-delete') {
+    if(!result.selectionSets?.some(set=>set.name===op.name))throw new Error('Unknown selection set')
+    result.selectionSets=result.selectionSets.filter(set=>set.name!==op.name)
+  }
+  else if (op.type === 'rotate-edge') rotateEdges(mesh,op.edgeIds)
+  else if (op.type === 'split') splitFaceRegion(mesh,op.faceIds)
+  else if (op.type === 'rip') splitFaceRegion(mesh,op.faceIds,op.offset)
+  else if (op.type === 'poke') pokeFaces(mesh,op.faceIds,op.offset)
+  else if (op.type === 'subdivide') subdivide(mesh,op.mode,op.ids,op.cuts)
+  else if (op.type === 'unsubdivide') unsubdivide(mesh,op.faceIds,op.iterations)
+  else if (op.type === 'connect-path') connectVertexPath(mesh,op.vertexIds)
+  else if (op.type === 'bevel') bevel(mesh,op)
+  else if (op.type === 'bridge') bridgeLoops(mesh,op.edgeIds,op.cuts,op.twist)
+  else if (op.type === 'merge') mergeVertices(mesh, op.vertexIds, op.method, op.distance)
+  else if (op.type === 'dissolve') dissolveElements(mesh, op.mode, op.ids)
+  else if (op.type === 'fill') fillBoundaries(mesh, op.mode, op.ids, op.style)
+  else if (op.type === 'fill-holes') fillBoundaries(mesh, 'edge', [], op.style, true)
+  else if (op.type === 'delete-loose') deleteLooseVertices(mesh)
   else if (op.type === 'inset-region') insetRegion(mesh,op.faceIds,op.thickness)
   else if (op.type === 'extrude-region') extrudeRegion(mesh,op.faceIds,op.distance,op.direction)
   else if (op.type === 'edge-slide') {
@@ -155,8 +212,43 @@ export function applyModelOperation(draft: ModelDraft, expectedRevision: number,
     // Reuse the cap face ID so repeated extrusion and inset keep the selection meaningful.
   }
   validateMesh(mesh)
+  if(result.selectionSets?.length){
+    const valid={vertex:new Set(mesh.vertices.map(v=>v.id)),edge:new Set(meshTopology(mesh).edges.keys()),face:new Set(mesh.faces.map(f=>f.id))}
+    for(const set of result.selectionSets)set.ids=set.ids.filter(id=>valid[set.mode].has(id))
+  }
   result.revision++
   return result
+}
+
+/** Rich result for previews and external clients; the draft-only API remains compatible. */
+export function modelOperationResult(draft: ModelDraft, expectedRevision: number, operation: ModelOperation) {
+  const result = applyModelOperation(draft, expectedRevision, operation)
+  const elements = (mesh: ModelMesh) => ({ vertex: mesh.vertices.map(v => v.id), edge: [...meshTopology(mesh).edges.keys()], face: mesh.faces.map(f => f.id) })
+  const before = elements(draft.mesh), after = elements(result.mesh)
+  const difference = (a: typeof before, b: typeof before) => {
+    const diff = (kind: keyof typeof before) => { const known = new Set(b[kind]); return a[kind].filter(id => !known.has(id)) }
+    return { vertex: diff('vertex'), edge: diff('edge'), face: diff('face') }
+  }
+  const created = difference(after, before), deleted = difference(before, after)
+  const selection = { vertex: [...created.vertex], edge: [...created.edge], face: [...created.face] }
+  if (operation.type === 'split' || operation.type === 'rip' || operation.type === 'poke') selection.face=[...operation.faceIds,...created.face]
+  if (operation.type === 'subdivide') {
+    const selected=new Set(operation.ids),surviving=new Set(after.face)
+    const parents=operation.mode==='face'?operation.ids:draft.mesh.faces.filter(f=>f.vertices.every((v,i)=>selected.has(JSON.stringify([v,f.vertices[(i+1)%f.vertices.length]!].sort())))).map(f=>f.id)
+    selection.face=[...new Set([...created.face,...parents.filter(id=>surviving.has(id))])]
+  }
+  if (operation.type === 'unsubdivide') { const surviving=new Set(after.face);selection.face=operation.faceIds.filter(id=>surviving.has(id)) }
+  if (operation.type === 'connect-path') selection.edge=connectionEdges(result.mesh,operation.vertexIds)
+  if (operation.type === 'merge') {
+    const surviving = new Set(after.vertex)
+    selection.vertex = [...new Set(operation.vertexIds)].filter(id => surviving.has(id))
+  }
+  if (operation.type === 'dissolve' && operation.mode !== 'vertex') {
+    const topology = meshTopology(draft.mesh), surviving = new Set(after.face)
+    const affected = operation.mode === 'face' ? operation.ids : operation.ids.flatMap(id => topology.edges.get(id)?.map(use => use.faceId) ?? [])
+    selection.face = [...new Set(affected)].filter(id => surviving.has(id))
+  }
+  return { draft: result, created, deleted, selection, diagnostics: deleted.vertex.length || deleted.edge.length || deleted.face.length ? ['Removed element references are no longer valid.'] : [], undo: clone(draft) }
 }
 
 export function publishModel(model: NativeModel, expectedRevision: number): ModelDraft {

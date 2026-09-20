@@ -9,11 +9,15 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js'
 import { TransformControls } from 'three/addons/controls/TransformControls.js'
 import { Box, Plus, Save, ArrowUpRight, Undo2, Redo2 } from '@lucide/vue'
 import { useEditorStore } from '@/stores/editor'
+import MSelect from '@/components/common/MSelect.vue'
+import { meshTopology } from '../../../shared/meshTopology'
 import { constrainedMove, constrainedScale, toggleConstraint, constraintLabel } from '@/engine/modeling/transformConstraint'
 import { attachSelectionGizmo } from '@/engine/modeling/selectionGizmo'
 import { modelGeometry } from '@/engine/modeling/modelGeometry'
+import { similarProperties } from '../../../shared/selectionProperties'
+import { queryMeshSelection, type MeshSelectionQuery } from '../../../shared/meshSelection'
 import { convertSelection, meshEdges, pickMeshElement, pickMeshElements, selectionCenter, selectionVertices, transformedVertices, type SelectionMode } from '@/engine/modeling/modelSelection'
-import { applyModelOperation, validateMesh, type ModelDraft, type ModelOperation, type Vec3 } from '../../../shared/modeling'
+import { applyModelOperation, modelOperationResult, validateMesh, type ModelDraft, type ModelOperation, type Vec3 } from '../../../shared/modeling'
 
 const store=useEditorStore()
 const models=computed(()=>store.assets.filter(a=>a.nativeModel))
@@ -23,6 +27,25 @@ const preview=shallowRef<ModelDraft|null>(null)
 const displayed=computed(()=>preview.value ?? draft.value)
 const mode=ref<'object'|'edit'>('edit'), selectMode=ref<SelectionMode>('face'), selected=ref<string[]>([])
 const distance=ref(.5), thickness=ref(.2), offset=ref<Vec3>([0,.5,0]), scale=ref<Vec3>([1,1,1])
+const mergeMethod=ref<'distance'|'center'|'first'|'last'>('distance'), mergeDistance=ref(.001)
+const fillStyle=ref<'polygon'|'triangles'|'grid'>('polygon')
+const bevelWidth=ref(.1),bevelSegments=ref(1),bevelProfile=ref(.5),bevelClamp=ref(true)
+const bridgeCuts=ref(0),bridgeTwist=ref(0)
+const subdivisionCuts=ref(1),unsubdivideIterations=ref(1)
+const pokeOffset=ref(0),ripOffset=ref<Vec3>([0,0.25,0])
+const similarProperty=ref<NonNullable<MeshSelectionQuery['property']>>('area'),similarTolerance=ref(0)
+const selectionTrait=ref<NonNullable<MeshSelectionQuery['trait']>>('boundary')
+const similarOptions=computed(()=>[...similarProperties[selectMode.value]])
+const traitOptions=computed(()=>[{value:'boundary',label:'Open boundary'},{value:'non-manifold',label:'Non-manifold'},...(selectMode.value==='vertex'?[{value:'loose',label:'Loose vertices'},{value:'poles',label:'Interior poles'}]:[])])
+const toleranceLabel=computed(()=>similarProperty.value==='length'?'Tolerance (m)':similarProperty.value==='area'?'Tolerance (m²)':similarProperty.value==='normal'||similarProperty.value==='angle'?'Tolerance (degrees)':'Tolerance (count)')
+watch(selectMode,()=>{similarProperty.value=similarProperties[selectMode.value][0].value;similarTolerance.value=0;if(selectMode.value!=='vertex'&&(selectionTrait.value==='loose'||selectionTrait.value==='poles'))selectionTrait.value='boundary'})
+const checkerKeep=ref(1),checkerSkip=ref(1),checkerOffset=ref(0)
+const setName=ref(''),savedSetName=ref('')
+const savedSets=computed(()=>draft.value?.selectionSets??[])
+const savedSetOptions=computed(()=>[{value:'',label:'Choose a saved selection'},...savedSets.value.map(s=>({value:s.name,label:`${s.name} · ${s.mode} · ${s.ids.length}`}))])
+watch(savedSets,()=>{if(!savedSets.value.some(s=>s.name===savedSetName.value))savedSetName.value=''}, {deep:true})
+const shapeDistance=ref(0.1),flattenStrength=ref(1),flattenPlane=ref<'average'|'x'|'y'|'z'>('average')
+const repairPanel=ref<HTMLElement>()
 const error=ref(''), status=ref(''), wire=ref(false), xray=ref(false), activeGesture=ref(false), gestureText=ref('')
 const debugOpen=ref(false), debugHeight=ref(170), debugLines=ref<string[]>([]), debugResizing=ref(false)
 const loopActive=ref(false)
@@ -46,11 +69,12 @@ const scene=new THREE.Scene(), content=new THREE.Group(), pivot=new THREE.Object
 let body:THREE.Mesh|undefined
 let down={x:0,y:0},lastPointer:{x:number;y:number}|null=null,skipPick=false,orbitMoved=false,orbitAlt=false,orbitButton=0,navigationGuard=false
 interface Gesture {
-  kind:'translate'|'rotate'|'scale'|'extrude'|'inset'|'gizmo'|'loop-cut'|'edge-slide'|'knife'
+  kind:'translate'|'rotate'|'scale'|'extrude'|'inset'|'gizmo'|'loop-cut'|'edge-slide'|'knife'|'repair'
   base:ModelDraft; assetId:string; ids:string[]; faceId:string; faceIds:string[]; pivot:THREE.Vector3
   start:{x:number;y:number}|null; axis:'x'|'y'|'z'|null; exclude:boolean; typed:string
   edge?:[string,string]; slideEdges?:string[];
   knifeStart?:ScreenPoint; knifeEnd?:ScreenPoint; knifeSegments?:KnifeSegment[];
+  resultSelection?:{mode:SelectionMode;ids:string[]};
   operation:ModelOperation|null; valid:boolean; startMatrix:THREE.Matrix4
 }
 let gesture:Gesture|null=null
@@ -209,6 +233,108 @@ function deleteSelection(){
   if(mode.value!=='edit'||!selected.value.length||!asset.value||!draft.value){error.value='Select vertices, edges, or faces to delete.';return}
   act(()=>{store.editNativeModel(asset.value!.id,draft.value!.revision,{type:'delete',mode:selectMode.value,ids:[...selected.value]});selected.value=[]})
 }
+function saveSelectionSet(replace=false){
+  if(!asset.value||!draft.value||activeGesture.value||mode.value!=='edit')return
+  act(()=>{
+    const name=(replace?savedSetName.value:setName.value).trim()
+    store.editNativeModel(asset.value!.id,draft.value!.revision,{type:'selection-set-save',name,mode:selectMode.value,ids:[...selected.value],replace})
+    savedSetName.value=name;setName.value='';status.value='Selection set saved.'
+  })
+}
+function recallSelectionSet(){
+  if(activeGesture.value||mode.value!=='edit')return
+  const set=savedSets.value.find(s=>s.name===savedSetName.value)
+  if(!set)return
+  selectMode.value=set.mode;selected.value=[...set.ids];error.value=''
+  status.value=set.ids.length?`Recalled ${set.name}: ${set.ids.length} elements.`:'This set is empty because its elements were removed.'
+  canvas.value?.focus()
+}
+function deleteSelectionSet(){
+  if(!asset.value||!draft.value||activeGesture.value||mode.value!=='edit')return
+  act(()=>{store.editNativeModel(asset.value!.id,draft.value!.revision,{type:'selection-set-delete',name:savedSetName.value});savedSetName.value='';status.value='Selection set removed. Undo restores it.'})
+}
+function selectTopology(action:MeshSelectionQuery['action']){
+  if(!draft.value||mode.value!=='edit'||activeGesture.value)return
+  act(()=>{
+    selected.value=queryMeshSelection(draft.value!.mesh,{mode:selectMode.value,action,ids:[...selected.value],...(action==='similar'?{property:similarProperty.value,tolerance:similarTolerance.value}:action==='trait'?{trait:selectionTrait.value}:action==='checker'?{keep:checkerKeep.value,skip:checkerSkip.value,offset:checkerOffset.value}:{})})
+    status.value=`${selected.value.length} ${selectMode.value} elements selected.`
+    canvas.value?.focus()
+  })
+}
+function selectBoundary(){
+  if(!draft.value||activeGesture.value)return
+  error.value=''
+  selectMode.value='edge';mode.value='edit'
+  selected.value=[...meshTopology(draft.value.mesh).edges].filter(([,uses])=>uses.length===1).map(([id])=>id)
+  status.value=selected.value.length ? 'Open boundary edges selected.' : 'This mesh has no open boundaries.'
+  canvas.value?.focus()
+}
+function previewShape(type:'shrink-fatten'|'push-pull'|'flatten'){
+  if(mode.value!=='edit'||activeGesture.value)return
+  const vertexIds=[...selectedIds.value]
+  repair(type==='flatten'?{type,vertexIds,plane:flattenPlane.value,strength:flattenStrength.value}:{type,vertexIds,distance:shapeDistance.value})
+}
+function repair(op:ModelOperation){
+  if(mode.value!=='edit'||activeGesture.value||!draft.value||!asset.value)return
+  act(()=>{
+    const base=draft.value!, result=modelOperationResult(base,base.revision,op)
+    startGesture('repair')
+    if(!gesture)return
+    gesture.operation=op;gesture.valid=true;preview.value=result.draft
+    const nextMode:SelectionMode=(op.type==='connect-path'||op.type==='rotate-edge')?'edge':op.type==='subdivide'?(result.selection.face.length?'face':'edge'):op.type==='split'||op.type==='rip'||op.type==='poke'||op.type==='unsubdivide'||op.type==='bevel'||op.type==='bridge'||op.type==='fill'||op.type==='fill-holes'||(op.type==='dissolve'&&op.mode!=='vertex')?'face':op.type==='merge'?'vertex':selectMode.value
+    const surviving=new Set((nextMode==='vertex'?result.draft.mesh.vertices:nextMode==='edge'?meshEdges(result.draft.mesh):result.draft.mesh.faces).map(e=>e.id))
+    let ids=nextMode===selectMode.value?selected.value.filter(id=>surviving.has(id)):[]
+    if(op.type==='merge')ids=op.vertexIds.filter(id=>surviving.has(id))
+    if(op.type==='bevel'||op.type==='bridge'||op.type==='fill'||op.type==='fill-holes')ids=result.created.face
+    if(op.type==='dissolve'&&op.mode!=='vertex')ids=result.selection.face
+    if(op.type==='rotate-edge'||op.type==='split'||op.type==='rip'||op.type==='poke'||op.type==='subdivide'||op.type==='unsubdivide'||op.type==='connect-path')ids=result.selection[nextMode]
+    gesture.resultSelection={mode:nextMode,ids}
+    const removed=Object.values(result.deleted).reduce((sum,ids)=>sum+ids.length,0)
+    gestureText.value=op.type==='shrink-fatten'||op.type==='push-pull'||op.type==='flatten'
+      ?`${op.type.toUpperCase()} preview · ${op.vertexIds.length} vertices · Enter/click confirms · Esc cancels`
+      :`${op.type.toUpperCase()} preview · ${result.created.face.length} new faces · ${removed} removed elements · Enter/click confirms · Esc cancels`
+    rebuild()
+  })
+}
+function rotateSelection(){
+  if(selectMode.value!=='edge'||!selected.value.length){error.value='Select interior edges between coplanar triangles.';return}
+  repair({type:'rotate-edge',edgeIds:[...selected.value]})
+}
+function regionConstruction(type:'split'|'rip'|'poke'){
+  if(selectMode.value!=='face'||!selected.value.length){error.value='Select a face region in Face mode.';return}
+  const faceIds=[...selected.value]
+  if(type==='rip')repair({type,faceIds,offset:[...ripOffset.value]})
+  else if(type==='poke')repair({type,faceIds,offset:pokeOffset.value})
+  else repair({type,faceIds})
+}
+function mergeSelection(){repair({type:'merge',vertexIds:selectMode.value==='vertex'?[...selected.value]:selectedIds.value,method:mergeMethod.value,distance:mergeDistance.value})}
+function bevelSelection(vertices=false){
+  if(mode.value!=='edit'||(selectMode.value==='face'&&!vertices)){error.value='Select edges or vertices to bevel.';return}
+  const vertexMode=vertices||selectMode.value==='vertex'
+  repair({type:'bevel',mode:vertexMode?'vertex':'edge',ids:vertexMode?selectedIds.value:[...selected.value],width:bevelWidth.value,segments:vertexMode?1:bevelSegments.value,profile:bevelProfile.value,clampOverlap:bevelClamp.value})
+}
+function bridgeSelection(){
+  if(selectMode.value!=='edge'){error.value='Select two complete open loops in Edge mode to bridge.';return}
+  repair({type:'bridge',edgeIds:[...selected.value],cuts:bridgeCuts.value,twist:bridgeTwist.value})
+}
+function subdivideSelection(){
+  const ids=selectMode.value==='vertex'&&draft.value?meshEdges(draft.value.mesh).filter(e=>e.vertices.every(id=>selected.value.includes(id))).map(e=>e.id):[...selected.value]
+  if(!ids.length){error.value='Select faces, edges, or both endpoints of an edge to subdivide.';return}
+  repair({type:'subdivide',mode:selectMode.value==='face'?'face':'edge',ids,cuts:subdivisionCuts.value})
+}
+function unsubdivideSelection(){
+  if(selectMode.value!=='face'){error.value='Select complete regular 2×2 quad blocks in Face mode.';return}
+  repair({type:'unsubdivide',faceIds:[...selected.value],iterations:unsubdivideIterations.value})
+}
+function connectSelection(){
+  if(selectMode.value!=='vertex'||selected.value.length<2){error.value='Select at least two vertices in path order using Ctrl-click.';return}
+  repair({type:'connect-path',vertexIds:[...selected.value]})
+}
+function fillSelection(){
+  if(selectMode.value==='face'){error.value='Select boundary vertices or edges to fill, or use Fill all holes.';return}
+  repair({type:'fill',mode:selectMode.value,ids:[...selected.value],style:fillStyle.value})
+}
+function focusMerge(){repairPanel.value?.scrollIntoView({block:'nearest'});repairPanel.value?.querySelector<HTMLButtonElement>('.m-select button')?.click()}
 function pick(event:PointerEvent){
   if(event.button===0 && gesture?.kind==='knife' && gesture.operation){skipPick=false;acceptGesture();return}
   if(event.button!==0 || skipPick || gizmo?.dragging || gesture){skipPick=false;return}
@@ -229,7 +355,7 @@ function pick(event:PointerEvent){
 }
 function startGesture(kind:Gesture['kind']){
   if(!draft.value || !asset.value || gesture)return
-  if(kind!=='loop-cut' && kind!=='knife' && !selectedIds.value.length){error.value='Select mesh elements first.';return}
+  if(kind!=='loop-cut' && kind!=='knife' && kind!=='repair' && !selectedIds.value.length){error.value='Select mesh elements first.';return}
   if(kind==='extrude' && !selectedFaces.value.length){error.value='Select faces in Face mode to extrude a region.';return}
   if(kind==='inset' && !selectedFaces.value.length){error.value='Select faces in Face mode to inset a region.';return}
   error.value='';status.value='';activeGesture.value=true
@@ -404,7 +530,7 @@ function screenMove(g:Gesture,dx:number,dy:number){
 }
 function updateGesture(pointer=lastPointer,precise=false){
   const g=gesture
-  if(!g || g.kind==='gizmo')return
+  if(!g || g.kind==='gizmo' || g.kind==='repair')return
   if(g.kind==='loop-cut'){if(pointer)moveLoop(pointer);return}
   if(g.kind==='knife'){
     if(pointer&&canvas.value){const rect=canvas.value.getBoundingClientRect();updateKnifeHover({x:pointer.x-rect.left,y:pointer.y-rect.top})}
@@ -456,6 +582,7 @@ function finishGesture(){
   gesture=null;activeGesture.value=false;preview.value=null;controls.enabled=true
   if(g.operation)act(()=>{
     store.editNativeModel(g.assetId,g.base.revision,g.operation!)
+    if(g.resultSelection){selectMode.value=g.resultSelection.mode;selected.value=g.resultSelection.ids;status.value=['shrink-fatten','push-pull','flatten'].includes(g.operation?.type??'')?'Shape updated. Selection preserved.':'Topology updated. Selection now contains surviving or newly created elements.'}
     if(g.kind==='loop-cut'){selectMode.value='edge';selected.value=cutSelection}
     if(g.kind==='knife'){selectMode.value='face';selected.value=[...new Set([...(g.knifeSegments??[]).map(segment=>segment.faceId),...knifeNewFaces])]}
   })
@@ -506,7 +633,7 @@ function key(event:KeyboardEvent){
     if(gesture.kind==='gizmo')return
     event.preventDefault();event.stopPropagation()
     if(event.key==='Enter'){acceptGesture();return}
-    if(gesture.kind==='loop-cut'||gesture.kind==='knife')return
+    if(gesture.kind==='loop-cut'||gesture.kind==='knife'||gesture.kind==='repair')return
     const axis=event.key.toLowerCase()
     if(['translate','scale','rotate','extrude'].includes(gesture.kind) && (axis==='x'||axis==='y'||axis==='z')){
       if(!event.repeat)Object.assign(gesture,toggleConstraint(gesture,axis,event.shiftKey && (gesture.kind==='translate'||gesture.kind==='scale')))
@@ -515,15 +642,26 @@ function key(event:KeyboardEvent){
     else if(event.key==='Backspace')gesture.typed=gesture.typed.slice(0,-1)
     updateGesture();return
   }
+  if((event.ctrlKey||event.metaKey) && event.key.toLowerCase()==='b'){event.preventDefault();event.stopPropagation();bevelSelection(event.shiftKey);return}
   if((event.ctrlKey||event.metaKey) && event.key.toLowerCase()==='r'){event.preventDefault();event.stopPropagation();startLoopCut();return}
   if(event.ctrlKey||event.metaKey)return
   const k=event.key.toLowerCase()
   if(k==='tab'){event.preventDefault();switchMode(mode.value==='edit'?'object':'edit')}
   else if(['1','2','3'].includes(k)){event.preventDefault();switchSelection(k==='1'?'vertex':k==='2'?'edge':'face')}
   else if(k==='a'){event.preventDefault();selectAll(event.altKey)}
+  else if(k==='s'&&event.altKey&&mode.value==='edit'){event.preventDefault();previewShape('shrink-fatten')}
+  else if(k==='g'&&event.shiftKey&&mode.value==='edit'){event.preventDefault();selectTopology('similar')}
   else if(k==='g'||k==='r'||k==='s'){event.preventDefault();startGesture(k==='g'?'translate':k==='r'?'rotate':'scale')}
   else if(k==='e'||k==='i'){event.preventDefault();startGesture(k==='e'?'extrude':'inset')}
   else if(k==='k'){event.preventDefault();startGesture('knife')}
+  else if(k==='b'&&event.shiftKey&&mode.value==='edit'){event.preventDefault();bridgeSelection()}
+  else if(k==='l'&&mode.value==='edit'){event.preventDefault();selectTopology('linked')}
+  else if(k===']'&&mode.value==='edit'){event.preventDefault();selectTopology('grow')}
+  else if(k==='['&&mode.value==='edit'){event.preventDefault();selectTopology('shrink')}
+  else if(k==='j'&&mode.value==='edit'){event.preventDefault();connectSelection()}
+  else if(k==='m'&&mode.value==='edit'){event.preventDefault();focusMerge()}
+  else if(k==='f'&&mode.value==='edit'){event.preventDefault();fillSelection()}
+  else if(k==='x'&&event.altKey&&mode.value==='edit'){event.preventDefault();repair({type:'dissolve',mode:selectMode.value,ids:[...selected.value]})}
   else if(k==='x'||event.key==='Delete'){event.preventDefault();deleteSelection()}
   else if(k==='z' && event.altKey){event.preventDefault();xray.value=!xray.value}
   else if(k==='z'){event.preventDefault();wire.value=!wire.value}
@@ -602,6 +740,19 @@ onBeforeUnmount(()=>{clearLoop();gesture=null;observer?.disconnect();controls?.d
           <button v-for="item in (['select','translate','rotate','scale'] as const)" :key="item" :disabled="activeGesture" :class="{active:tool===item}" @click="tool=item; canvas?.focus()">{{ item==='translate'?'Move':item.charAt(0).toUpperCase()+item.slice(1) }}</button>
           <button :disabled="!selectedFaces.length || activeGesture" @click="startGesture('extrude')">Extrude <kbd>E</kbd></button>
           <button :disabled="!selectedFaces.length || activeGesture" @click="startGesture('inset')">Inset <kbd>I</kbd></button>
+          <button :disabled="!selected.length || selectMode==='face' || mode!=='edit' || activeGesture" @click="bevelSelection()">Bevel <kbd>Ctrl B</kbd></button>
+          <button :disabled="selected.length<6 || selectMode!=='edge' || mode!=='edit' || activeGesture" @click="bridgeSelection">Bridge <kbd>Shift B</kbd></button>
+          <button :disabled="!selected.length||mode!=='edit'||activeGesture" @click="selectTopology('linked')">Linked <kbd>L</kbd></button>
+          <button :disabled="selected.length!==2||mode!=='edit'||activeGesture" @click="selectTopology('path')">Path Select</button>
+          <button :disabled="!selected.length||mode!=='edit'||activeGesture" @click="selectTopology('grow')">Grow <kbd>]</kbd></button>
+          <button :disabled="!selected.length||mode!=='edit'||activeGesture" @click="selectTopology('shrink')">Shrink <kbd>[</kbd></button>
+          <button :disabled="selectMode!=='edge'||!selected.length||mode!=='edit'||activeGesture" @click="rotateSelection">Rotate edge</button>
+          <button :disabled="!selectedFaces.length||mode!=='edit'||activeGesture" @click="regionConstruction('split')">Split region</button>
+          <button :disabled="!selectedFaces.length||mode!=='edit'||activeGesture" @click="regionConstruction('rip')">Rip region</button>
+          <button :disabled="!selectedFaces.length||mode!=='edit'||activeGesture" @click="regionConstruction('poke')">Poke faces</button>
+          <button :disabled="!selected.length || mode!=='edit' || activeGesture" @click="subdivideSelection">Subdivide</button>
+          <button :disabled="selectedFaces.length<4 || mode!=='edit' || activeGesture" @click="unsubdivideSelection">Un-Subdivide</button>
+          <button :disabled="selected.length<2 || selectMode!=='vertex' || mode!=='edit' || activeGesture" @click="connectSelection">Connect <kbd>J</kbd></button>
           <button :disabled="mode!=='edit' || activeGesture" @click="startGesture('knife')">Knife <kbd>K</kbd></button>
           <button :disabled="!selected.length || mode!=='edit' || activeGesture" @click="deleteSelection">Delete <kbd>X</kbd></button>
           <button :disabled="!selectedIds.length || mode!=='edit' || selectMode==='face' || activeGesture" @click="startEdgeSlide">Slide <kbd>G G</kbd></button>
@@ -615,13 +766,145 @@ onBeforeUnmount(()=>{clearLoop();gesture=null;observer?.disconnect();controls?.d
     </div>
     <aside class="model-properties">
       <header><strong>Model properties</strong></header>
+      <p v-if="error" role="alert" class="message error">{{ error }}</p>
+      <p v-else-if="status" role="status" class="message">{{ status }}</p>
       <div v-if="activeGesture" class="gesture-actions"><strong>{{ gestureText }}</strong><button @click="acceptGesture">Confirm</button><button @click="cancelButton">Cancel</button></div>
       <section v-if="loopActive"><h3>Loop Cut</h3><label>Cuts<input v-model.number="loopCuts" type="number" min="1" max="16" :disabled="loopStage==='slide'" @input="previewLoop" /></label><label v-if="loopCuts===1">Position (0–1)<input v-model.number="loopPosition" type="number" min="0.01" max="0.99" step="0.01" @input="previewLoop" /></label><p class="muted">Hover an edge to preview the connected quad strip. Multiple cuts are evenly spaced.</p></section>
-      <p class="muted">Drag the colored gizmo handles to transform your selection. Choose Move, Rotate or Scale above the viewport. Ctrl-click selects additional elements. Alt-click an edge selects its loop; Ctrl+Alt-click adds or removes a loop. K draws a Knife stroke anywhere in the viewport; X-Ray includes hidden and backside faces in that cut. G, G slides selected edges along the mesh. G / R / S starts a transform; X / Y / Z restricts an axis; Shift+X / Y / Z excludes it during Move or Scale. X/Delete removes the current vertices, edges, or faces. Type a value and press Enter. Escape cancels movement; during extrusion it keeps the new cap at its start.</p>
+      <details class="model-help"><summary>Controls and shortcuts</summary><p class="muted">Drag the colored gizmo handles to transform your selection. Choose Move, Rotate or Scale above the viewport. Ctrl-click selects additional elements. Alt-click an edge selects its loop; Ctrl+Alt-click adds or removes a loop. K draws a Knife stroke anywhere in the viewport; X-Ray includes hidden and backside faces in that cut. G, G slides selected edges along the mesh. G / R / S starts a transform; X / Y / Z restricts an axis; Shift+X / Y / Z excludes it during Move or Scale. X/Delete removes the current vertices, edges, or faces. Type a value and press Enter. Escape cancels movement; during extrusion it keeps the new cap at its start. M opens merge options, F previews boundary fill, and Alt+X previews dissolve. Ctrl+B previews bevel; Ctrl+Shift+B chamfers selected vertices. J connects selected vertices in click order across coplanar faces. Subdivide and Un-Subdivide are available in the viewport toolbar; all construction parameters are in Construct topology.</p></details>
       <template v-if="asset && draft">
         <label>Name<input :value="asset.name" maxlength="128" @change="rename" /></label>
         <label>Surface color<input type="color" :value="draft.color" @change="operation({type:'color',color:($event.target as HTMLInputElement).value})" /></label>
-        <section v-if="mode==='edit' && selectMode==='face'"><h3>Selected faces ({{ selectedFaces.length }})</h3><select v-model="faceId" aria-label="Select polygon"><option value="">Select a face in the viewport</option><option v-for="face in draft.mesh.faces" :key="face.id" :value="face.id">Face {{ face.id }}</option></select>
+        <section v-if="mode==='edit'"><h3>Selection</h3>
+          <fieldset :disabled="activeGesture">
+            <legend>Connected geometry</legend>
+            <button :disabled="!selected.length" @click="selectTopology('linked')">Select linked <kbd>L</kbd></button>
+            <button :disabled="selected.length!==2" @click="selectTopology('path')">Select shortest path</button>
+            <p class="muted">Ctrl-click two endpoints, then select their shortest path by number of connections. Vertices follow edges; edges meet at vertices; faces share edges. Linked expands from the current selection. Both include hidden geometry.</p>
+            <button :disabled="!selected.length" @click="selectTopology('grow')">Grow selection <kbd>]</kbd></button>
+            <button :disabled="!selected.length" @click="selectTopology('shrink')">Shrink selection <kbd>[</kbd></button>
+            <button @click="selectTopology('invert')">Invert selection</button>
+            <p class="muted">Grow adds one adjacent ring. Shrink removes the selection border, open mesh boundaries, and isolated elements.</p>
+          </fieldset>
+          <fieldset :disabled="activeGesture">
+            <legend>Select Similar</legend>
+            <MSelect v-model="similarProperty" label="Similarity property" :options="similarOptions" />
+            <label>{{ toleranceLabel }}<input v-model.number="similarTolerance" type="number" min="0" max="180" step="0.01" /></label>
+            <button :disabled="!selected.length" @click="selectTopology('similar')">Select similar <kbd>Shift+G</kbd></button>
+            <p class="muted">Add elements matching any selected reference, within an absolute tolerance. Normals compare direction; face angle compares two incident faces. Hidden geometry is included.</p>
+          </fieldset>
+          <fieldset :disabled="activeGesture">
+            <legend>Select by trait</legend>
+            <MSelect v-model="selectionTrait" label="Selection trait" :options="traitOptions" />
+            <button @click="selectTopology('trait')">Select matching trait</button>
+            <p class="muted">Replace selection across the whole mesh. Non-manifold includes open boundaries and disconnected vertex fans. Faces touching matching vertices are included. Loose vertices and interior poles (edge count other than four) require Vertex mode.</p>
+          </fieldset>
+        </section>
+        <section v-if="mode==='edit'"><h3>Selection patterns and sets</h3>
+          <fieldset :disabled="activeGesture">
+            <legend>Checker deselect</legend>
+            <label>Keep rings<input v-model.number="checkerKeep" type="number" min="1" max="100" step="1" /></label>
+            <label>Skip rings<input v-model.number="checkerSkip" type="number" min="1" max="100" step="1" /></label>
+            <label>Pattern offset<input v-model.number="checkerOffset" type="number" min="0" max="199" step="1" /></label>
+            <button :disabled="!selected.length" @click="selectTopology('checker')">Checker deselect</button>
+            <p class="muted">Keep and skip adjacency rings within the selected geometry. Each connected selection starts at its first selected element. Odd loops and branches may not alternate perfectly.</p>
+          </fieldset>
+          <fieldset :disabled="activeGesture">
+            <legend>Named selection sets</legend>
+            <label>New selection name<input v-model="setName" maxlength="64" /></label>
+            <button :disabled="!selected.length||!setName.trim()" @click="saveSelectionSet()">Save new selection</button>
+            <MSelect v-model="savedSetName" label="Saved selection" :options="savedSetOptions" />
+            <button :disabled="!savedSetName" @click="recallSelectionSet">Recall selection</button>
+            <button :disabled="!savedSetName||!selected.length" @click="saveSelectionSet(true)">Update saved set</button>
+            <button :disabled="!savedSetName" @click="deleteSelectionSet">Delete saved set</button>
+            <p class="muted">Sets save with this model, including element order and mode. Editing removes deleted IDs from sets; new geometry is not added automatically. Save, update and delete support Undo.</p>
+          </fieldset>
+        </section>
+        <section v-if="mode==='edit'"><h3>Shape tools</h3>
+          <fieldset :disabled="activeGesture">
+            <legend>Shrink/Fatten and Push/Pull</legend>
+            <label>Shape distance (m)<input v-model.number="shapeDistance" type="number" min="-1000" max="1000" step="0.05" /></label>
+            <button :disabled="!selectedIds.length" @click="previewShape('shrink-fatten')">Preview Shrink/Fatten <kbd>Alt+S</kbd></button>
+            <button :disabled="selectedIds.length<2" @click="previewShape('push-pull')">Preview Push/Pull</button>
+            <p class="muted">Shrink/Fatten follows area-weighted vertex normals from all incident faces. Push/Pull moves a fixed distance radially from the selection center. Negative distances move inward.</p>
+          </fieldset>
+          <fieldset :disabled="activeGesture">
+            <legend>Flatten</legend>
+            <MSelect v-model="flattenPlane" label="Flatten plane" :options="[{value:'average',label:'Average surface normal'},{value:'x',label:'X — YZ plane'},{value:'y',label:'Y — XZ plane'},{value:'z',label:'Z — XY plane'}]" />
+            <label>Flatten strength<input v-model.number="flattenStrength" type="number" min="0.001" max="1" step="0.1" /></label>
+            <button :disabled="selectedIds.length<3" @click="previewShape('flatten')">Preview flatten</button>
+            <p class="muted">Project selected vertices toward a plane through their center. Strength 1 fully flattens. Average uses fully selected faces, or incident faces when none are fully selected; opposing normals may cancel.</p>
+          </fieldset>
+        </section>
+        <section v-if="mode==='edit'"><h3>Construct topology</h3>
+          <fieldset :disabled="activeGesture">
+            <legend>Rotate edge</legend>
+            <p class="muted">Flip the diagonal between two coplanar triangles. Selected edges must not share faces.</p>
+            <button :disabled="selectMode!=='edge'||!selected.length" @click="rotateSelection">Preview edge rotation</button>
+          </fieldset>
+          <fieldset :disabled="activeGesture">
+            <legend>Split / Rip face region</legend>
+            <p class="muted">Detach selected faces from their neighbors. Split keeps their position; Rip moves the entire detached region by the offset below.</p>
+            <button :disabled="!selectedFaces.length" @click="regionConstruction('split')">Preview split region</button>
+            <label v-for="(axis,i) in ['X','Y','Z']" :key="axis">Rip {{ axis }} offset (m)<input v-model.number="ripOffset[i]" type="number" min="-1000" max="1000" step="0.1" /></label>
+            <button :disabled="!selectedFaces.length" @click="regionConstruction('rip')">Preview rip region</button>
+          </fieldset>
+          <fieldset :disabled="activeGesture">
+            <legend>Poke faces</legend>
+            <p class="muted">Create a triangle fan in each selected planar face. Height follows each face normal.</p>
+            <label>Poke height (m)<input v-model.number="pokeOffset" type="number" min="-1000" max="1000" step="0.1" /></label>
+            <button :disabled="!selectedFaces.length" @click="regionConstruction('poke')">Preview poke faces</button>
+          </fieldset>
+          <fieldset :disabled="activeGesture">
+            <legend>Subdivide / Un-Subdivide</legend>
+            <label>Subdivision cuts<input v-model.number="subdivisionCuts" type="number" min="1" max="15" step="1" /></label>
+            <button :disabled="!selected.length" @click="subdivideSelection">Preview subdivision</button>
+            <label>Coarsening iterations<input v-model.number="unsubdivideIterations" type="number" min="1" max="4" step="1" /></label>
+            <button :disabled="selectedFaces.length<4" @click="unsubdivideSelection">Preview Un-Subdivide</button>
+            <p class="muted">Subdivide triangles, quads, or selected edges. Un-Subdivide coarsens complete regular 2×2 quad blocks while preserving their shape.</p>
+          </fieldset>
+          <fieldset :disabled="activeGesture">
+            <legend>Connect Vertex Path</legend>
+            <p class="muted">Ctrl-click vertices in path order. J joins consecutive vertices across a continuous coplanar surface, splitting crossed faces.</p>
+            <button :disabled="selectMode!=='vertex'||selected.length<2" @click="connectSelection">Preview connect path <kbd>J</kbd></button>
+          </fieldset>
+          <fieldset :disabled="activeGesture">
+            <legend>Bevel</legend>
+            <label>Width (m)<input v-model.number="bevelWidth" type="number" min="0.00001" max="1000" step="0.05" /></label>
+            <label>Edge segments<input v-model.number="bevelSegments" type="number" min="1" max="16" step="1" /></label>
+            <label>Edge profile<input v-model.number="bevelProfile" type="number" min="0.1" max="0.9" step="0.1" /></label>
+            <label class="check-option"><input v-model="bevelClamp" type="checkbox" /> Clamp width to avoid overlap</label>
+            <p class="muted">Closed convex solids with planar faces. Edge bevel supports rounded profiles; vertex bevel creates a single chamfer.</p>
+            <button :disabled="!selected.length||selectMode==='face'" @click="bevelSelection()">Preview bevel <kbd>Ctrl+B</kbd></button>
+            <button :disabled="!selectedIds.length" @click="bevelSelection(true)">Bevel vertices <kbd>Ctrl+Shift+B</kbd></button>
+          </fieldset>
+          <fieldset :disabled="activeGesture">
+            <legend>Bridge Edge Loops</legend>
+            <label>Intermediate cuts<input v-model.number="bridgeCuts" type="number" min="0" max="32" step="1" /></label>
+            <label>Twist (vertex steps)<input v-model.number="bridgeTwist" type="number" min="-128" max="128" step="1" /></label>
+            <p class="muted">Select two complete open loops with matching vertex counts. Correspondence starts at the closest alignment; cuts interpolate linearly.</p>
+            <button :disabled="selectMode!=='edge'||selected.length<6" @click="bridgeSelection">Preview bridge</button>
+          </fieldset>
+        </section>
+        <section v-if="mode==='edit'" ref="repairPanel"><h3>Repair topology</h3>
+          <button :disabled="activeGesture" @click="selectBoundary">Select open boundaries</button>
+          <fieldset :disabled="activeGesture">
+            <legend>Merge <kbd>M</kbd></legend>
+            <MSelect v-model="mergeMethod" label="Merge method" :options="[{value:'distance',label:'By distance'},{value:'center',label:'At center'},{value:'first',label:'At first selected'},{value:'last',label:'At last selected'}]" />
+            <label v-if="mergeMethod==='distance'">Distance (m)<input v-model.number="mergeDistance" type="number" min="0.0000001" max="1000" step="0.001" /></label>
+            <p v-if="mergeMethod==='first'||mergeMethod==='last'" class="muted">Use Vertex mode to merge in click-selection order.</p>
+            <button :disabled="selectedIds.length<2 || ((mergeMethod==='first'||mergeMethod==='last')&&selectMode!=='vertex')" @click="mergeSelection">Preview merge</button>
+            <button :disabled="!selected.length" @click="repair({type:'dissolve',mode:selectMode,ids:[...selected]})">Dissolve selection <kbd>Alt+X</kbd></button>
+          </fieldset>
+          <fieldset :disabled="activeGesture">
+            <legend>Fill <kbd>F</kbd></legend>
+            <MSelect v-model="fillStyle" label="Fill style" :options="[{value:'polygon',label:'Polygon'},{value:'triangles',label:'Triangle fan'},{value:'grid',label:'Quad grid'}]" />
+            <p class="muted">Select a complete open boundary. Grid fill uses four equally sampled sides (4, 8, 12… vertices). Polygon and triangle fills require convex boundaries.</p>
+            <button :disabled="selectMode==='face'||selected.length<3" @click="fillSelection">Preview boundary fill</button>
+            <button @click="repair({type:'fill-holes',style:fillStyle})">Preview fill all holes</button>
+            <button @click="repair({type:'delete-loose'})">Remove loose vertices</button>
+          </fieldset>
+        </section>
+        <section v-if="mode==='edit' && selectMode==='face'"><h3>Selected faces ({{ selectedFaces.length }})</h3><MSelect v-model="faceId" label="Select polygon" :options="[{value:'',label:'Select a face in the viewport'},...draft.mesh.faces.map(face=>({value:face.id,label:`Face ${face.id}`}))]" />
           <label>Extrude distance (m)<input v-model.number="distance" type="number" step="0.1" /></label><button :disabled="!selectedFaces.length || activeGesture" @click="extrude">Extrude region <kbd>E</kbd></button>
           <label>Inset thickness (m)<input v-model.number="thickness" type="number" min="0.000001" step="0.05" /></label><button :disabled="!selectedFaces.length || activeGesture" @click="inset">Inset region <kbd>I</kbd></button>
         </section>
@@ -635,6 +918,14 @@ onBeforeUnmount(()=>{clearLoop();gesture=null;observer?.disconnect();controls?.d
 </template>
 
 <style scoped>
+fieldset { min-width:0; margin:0; padding:10px 0 0; border:0; display:grid; gap:9px; }
+legend { color:var(--text-secondary); font-size:11px; }
+.check-option { flex-direction:row; align-items:center; }
+.check-option input { width:14px; height:14px; }
+.viewport-tools { max-height:calc(100% - 60px); overflow-y:auto; scrollbar-width:thin; }
+.gesture-actions { position:sticky; top:0; z-index:20; background:var(--bg-panel); border-bottom:1px solid var(--border-subtle); }
+.model-help { padding:12px; color:var(--text-muted); font-size:11px; }
+.model-help summary { cursor:pointer; }
 .modeling-workspace { display:grid; grid-template-columns:210px minmax(360px,1fr) 250px; height:100%; min-height:0; background:var(--bg-panel); }
 header { display:flex; align-items:center; gap:8px; min-height:43px; padding:12px; border-bottom:1px solid var(--border-subtle); } header span { margin-left:auto; color:var(--text-muted); font-size:10px; }
 .model-library,.model-properties { min-height:0; overflow:auto; } .model-library { border-right:1px solid var(--border-subtle); display:flex; flex-direction:column; }.model-properties { border-left:1px solid var(--border-subtle); padding-bottom:14px; }
@@ -644,6 +935,6 @@ button { display:inline-flex; align-items:center; justify-content:center; gap:6p
 .model-main { display:flex; flex-direction:column; min-width:0; min-height:0; }.model-toolbar { display:flex; flex-wrap:wrap; align-items:center; gap:4px; padding:7px; border-bottom:1px solid var(--border-subtle); }.divider { width:1px; height:20px; background:var(--border-subtle); margin:0 3px; }.model-viewport { position:relative; flex:1; min-height:0; overflow:hidden; }canvas { display:block; width:100%; height:100%; touch-action:none; outline:none; }.knife-stroke { position:absolute; inset:0; width:100%; height:100%; pointer-events:none; overflow:visible; }.knife-stroke line { stroke:#ffd34e; stroke-width:2; stroke-dasharray:6 4; vector-effect:non-scaling-stroke; }.viewport-label,.viewport-help { position:absolute; pointer-events:none; color:#adb5c6; font-size:10px; background:#10141ccc; padding:6px 8px; border-radius:3px; }.viewport-label { top:12px; left:112px; }.viewport-label span { color:#6e7c95; }.viewport-help { bottom:12px; left:12px; right:12px; text-align:center; font-size:9px; }
 .debug-panel { position:absolute; z-index:20; right:0; bottom:0; left:0; display:flex; min-height:90px; flex-direction:column; overflow:hidden; color:#c5cbe0; background:#0d1016f5; border-top:1px solid #4b5270; box-shadow:0 -8px 24px #0008; }.debug-panel > header { display:flex; height:29px; min-height:29px; align-items:center; gap:7px; padding:0 8px; background:#171b26; border-bottom:1px solid #2d3345; font-size:10px; }.debug-panel > header span { margin-left:auto; color:#77819b; font-size:9px; }.debug-panel > header button { min-height:20px; padding:2px 7px; color:#aeb6d0; background:#202638; border:1px solid #3a435b; font-size:9px; }.debug-panel > header button:hover { color:#f0f2ff; background:#2a3350; }.debug-resize { position:absolute; z-index:1; top:-4px; right:0; left:0; height:8px; cursor:ns-resize; }.debug-resize::after { display:block; width:42px; height:2px; margin:2px auto 0; background:#64709a; border-radius:2px; content:''; }.debug-body { min-height:0; flex:1; overflow:auto; padding:7px 10px 10px; font:10px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace; }.debug-line { white-space:pre-wrap; }.debug-line.error { color:#ef9b9b; }.debug-line.status { color:#9dd7b0; }.debug-empty { color:#69738c; }.debug-meta { margin-top:7px; padding-top:5px; color:#69738c; border-top:1px solid #242b3a; font-size:9px; }
 .model-status { display:flex; justify-content:space-between; gap:8px; padding:8px 12px; color:var(--text-muted); font-size:10px; border-top:1px solid var(--border-subtle); }.message { margin:0; padding:12px; color:var(--success); background:var(--bg-input); }.message.error { color:var(--danger); }.empty-state { position:absolute; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center; background:#10141cd9; color:var(--text-secondary); }.empty-state h2 { color:var(--text-primary); font-size:19px; margin-bottom:0; }.empty-state p { color:var(--text-muted); }
-.model-properties>label { margin:14px 12px; }label { display:flex; flex-direction:column; gap:7px; color:var(--text-secondary); font-size:11px; }input,select { width:100%; min-width:0; height:28px; border:1px solid var(--border-strong); border-radius:3px; padding:4px 6px; background:var(--bg-input); color:var(--text-primary); font-size:11px; }input[type=color] { padding:2px; }section section { border-top:1px solid var(--border-subtle); padding:12px; display:grid; gap:9px; }h3 { margin:0 0 3px; font-size:11px; font-weight:600; }.vector { display:grid; grid-template-columns:repeat(3,1fr); gap:6px; }.publish .muted { margin:0; }.publish small { color:var(--text-muted); }.primary { background:var(--bg-selected); color:var(--accent); border-color:var(--accent-border); }kbd { margin-left:auto; color:var(--text-muted); font:inherit; }
+.model-properties>label { margin:14px 12px; }label { display:flex; flex-direction:column; gap:7px; color:var(--text-secondary); font-size:11px; }input { width:100%; min-width:0; height:28px; border:1px solid var(--border-strong); border-radius:3px; padding:4px 6px; background:var(--bg-input); color:var(--text-primary); font-size:11px; }input[type=color] { padding:2px; }section section { border-top:1px solid var(--border-subtle); padding:12px; display:grid; gap:9px; }h3 { margin:0 0 3px; font-size:11px; font-weight:600; }.vector { display:grid; grid-template-columns:repeat(3,1fr); gap:6px; }.publish .muted { margin:0; }.publish small { color:var(--text-muted); }.primary { background:var(--bg-selected); color:var(--accent); border-color:var(--accent-border); }kbd { margin-left:auto; color:var(--text-muted); font:inherit; }
 .viewport-tools { position:absolute; top:12px; left:10px; display:grid; gap:5px; width:90px; }.viewport-tools button { background:var(--bg-panel); box-shadow:0 2px 5px #0003; justify-content:space-between; }.viewport-tools button.active { background:var(--bg-selected); }.gesture-actions { display:grid; gap:8px; padding:12px; color:var(--accent); font-size:11px; line-height:1.5; }.model-properties :disabled { opacity:.4; }
 </style>
