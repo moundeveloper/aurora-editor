@@ -6,6 +6,18 @@ import { useEditorStore } from '../editor'
 describe('editor history and Library management', () => {
   beforeEach(() => setActivePinia(createPinia()))
 
+  it('undoes and redoes scene grading and AO together', () => {
+    const store=useEditorStore()
+    const before=JSON.stringify(store.selectedScene!.settings)
+    store.setSceneLook({colorGrade:{enabled:true,saturation:.6},ambientOcclusion:true})
+    expect(store.selectedScene!.settings.colorGrade?.saturation).toBe(.6)
+    store.undo()
+    expect(JSON.stringify(store.selectedScene!.settings)).toBe(before)
+    store.redo()
+    expect(store.selectedScene!.settings.colorGrade?.saturation).toBe(.6)
+    expect(store.selectedScene!.settings.ambientOcclusion).toBe(true)
+  })
+
   it('restores persisted audio graph edits through undo and redo', () => {
     const store = useEditorStore()
     store.setWorkspace('Audio')

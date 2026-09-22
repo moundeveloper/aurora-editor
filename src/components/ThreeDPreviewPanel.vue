@@ -4,6 +4,7 @@ import { storeToRefs } from 'pinia'
 import { ImageOff, Radio, View } from '@lucide/vue'
 import * as THREE from 'three'
 import { useEditorStore } from '@/stores/editor'
+import { assetRenderSignature } from '@/engine/scene3d/assetRenderSignature'
 import { ThreeSceneRuntimeRegistry } from '@/engine/scene3d/ThreeSceneRuntime'
 import { cameraIdAtTime } from '@/engine/scene3d/cameraCuts'
 import { cameraLensAtTime } from '@/engine/scene3d/cameraLens'
@@ -137,10 +138,12 @@ onBeforeUnmount(() => {
   renderer = null
 })
 
-watch([selectedLayer, selectedScene, currentTime, assets, project, rigs], () => {
+watch([selectedLayer, selectedScene, project, rigs], () => {
   syncProgramCamera()
   renderPreview()
 }, { deep: true, immediate: true })
+watch(currentTime, () => { syncProgramCamera(); renderPreview() })
+watch(() => assetRenderSignature(assets.value), renderPreview)
 watch(cameraChoice, renderPreview)
 watch(() => [shading.mode, shading.wireOverlay], renderPreview)
 watch(() => selectedScene.value?.cameras.map((camera) => camera.id), (cameraIds) => {

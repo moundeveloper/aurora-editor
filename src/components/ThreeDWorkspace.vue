@@ -7,6 +7,7 @@ import { configureViewportNavigation } from '@/engine/scene3d/viewportNavigation
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js'
 import { TransformControls, type TransformControlsMode } from 'three/addons/controls/TransformControls.js'
 import { useEditorStore } from '@/stores/editor'
+import { assetRenderSignature } from '@/engine/scene3d/assetRenderSignature'
 import { planeHalfExtents, ThreeSceneRuntimeRegistry, type Scene3DRuntime } from '@/engine/scene3d/ThreeSceneRuntime'
 import { evaluateNumericProperty } from '@/engine/animation/evaluateProperty'
 import { applyMatrix, boneTransforms } from '@/engine/rig/skeleton'
@@ -625,6 +626,7 @@ function renderViewportNow() {
   renderer.shadowMap.enabled = pass.shadowsEnabled
   renderer.setScissorTest(false)
   renderer.setViewport(0, 0, host.clientWidth, host.clientHeight)
+  renderer.info.reset()
   try {
     scenePipeline?.render(targetRuntime.scene, editorCamera, pass.settings, host.clientWidth, host.clientHeight, 'screen')
   } finally {
@@ -1279,6 +1281,8 @@ onMounted(async () => {
   renderer.toneMappingExposure = 1
   renderer.setClearColor('#090b10', 1)
   renderer.shadowMap.enabled = true
+  // Count the whole frame, including shadow/AO passes, rather than only the final screen triangle.
+  renderer.info.autoReset = false
   renderer.shadowMap.type = THREE.PCFSoftShadowMap
   scenePipeline = new AuroraSceneRenderPipeline(renderer)
   perspectiveCamera = new THREE.PerspectiveCamera(48, 1, .1, 2000)
@@ -1343,7 +1347,10 @@ onBeforeUnmount(() => {
   orthographicCamera = null
 })
 
-watch([selectedLayer, selectedScene, currentTime, selectedSceneEntityId, assets, rigs], renderViewport, { deep: true })
+// Playhead/selection changes must not re-traverse published native polygon buffers.
+watch([selectedLayer, selectedScene, rigs], renderViewport, { deep: true })
+watch([currentTime, selectedSceneEntityId], renderViewport)
+watch(() => assetRenderSignature(assets.value), renderViewport)
 </script>
 
 <template>

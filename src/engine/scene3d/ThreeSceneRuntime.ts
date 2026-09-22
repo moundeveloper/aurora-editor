@@ -1,6 +1,7 @@
 import { modelGeometry } from '../modeling/modelGeometry'
 import * as THREE from 'three'
 import { syncScattering } from './scattering'
+import { cachedSceneBounds } from './sceneBoundsCache'
 import { syncLightLinking } from './lightLinking'
 import { RectAreaLightUniformsLib } from 'three/examples/jsm/lights/RectAreaLightUniformsLib.js'
 import { evaluateNumericProperty } from '@/engine/animation/evaluateProperty'
@@ -252,6 +253,15 @@ function makeRiggedPlaneGeometry(definition: Aurora3DObject, rig: AuroraRig, ass
  */
 function syncGeometry(mesh: THREE.Mesh, definition: Aurora3DObject, rig: AuroraRig | undefined, assets: Map<string, MediaAsset>, time: number, runtime: Scene3DRuntime, scene: Aurora3DScene) {
   const rigged = definition.primitive === 'plane' && rigIsActive(rig)
+  if (!rigged && !definition.influences.some(influence => influence.enabled)) {
+    if (mesh.userData.geometrySignature === 'base') return
+    const base = (mesh.userData.baseGeometry as THREE.BufferGeometry | undefined) ?? mesh.geometry
+    mesh.userData.baseGeometry = base
+    if (mesh.geometry !== base) mesh.geometry.dispose()
+    mesh.geometry = base
+    mesh.userData.geometrySignature = 'base'
+    return
+  }
   const operands = (definition.influences ?? []).filter(item => item.enabled && item.type === 'boolean').map(item => {
     const target = scene.objects.find(object => object.id === item.targetId)
     return [item.targetId,target ? influenceSignature(target.influences.filter(influence => influence.type !== 'boolean'),time) : '',runtime.objects.get(item.targetId ?? '')?.matrixWorld.elements,mesh.matrixWorld.elements]
@@ -314,6 +324,8 @@ function syncArrayClone(runtime: Scene3DRuntime, clone: THREE.Object3D) {
  * materials stay shared, while every clone mirrors the source's evaluated local transform.
  */
 function syncGroupArrays(runtime: Scene3DRuntime, definition: Aurora3DScene, time: number) {
+  const groups = definition.objects.filter(object => object.type === 'group')
+  if (!groups.length) return
   const childrenByParent = new Map<string, Aurora3DObject[]>()
   definition.objects.forEach((object) => {
     if (!object.parentId) return
@@ -321,7 +333,7 @@ function syncGroupArrays(runtime: Scene3DRuntime, definition: Aurora3DScene, tim
     children.push(object)
     childrenByParent.set(object.parentId, children)
   })
-  definition.objects.filter((object) => object.type === 'group').forEach((groupDefinition) => {
+  groups.forEach((groupDefinition) => {
     const group = runtime.objects.get(groupDefinition.id)
     if (!group) return
     const influence = groupDefinition.influences?.find((item) => item.enabled && item.type === 'array')
@@ -464,6 +476,11 @@ export class ThreeSceneRuntimeRegistry {
     }
     this.update(runtime, sceneDefinition, width / Math.max(1, height), time, assetMap, rigMap)
     return runtime
+  }
+
+  /** Waits for resources requested by the initial get(), including imported models and HDR maps. */
+  async whenAssetsReady() {
+    await Promise.all([...this.texturePromises.values(), ...this.environmentPromises.values(), ...this.modelPromises.values()])
   }
 
   /** Preloads plane and material maps so offline/export renders include textures on the first frame. */
@@ -660,6 +677,10 @@ export class ThreeSceneRuntimeRegistry {
       || material.alphaTest !== (imagePlane ? .001 : 0)
       || material.polygonOffset !== imagePlane
     material.side = nextSide
+    // Flat cards gain nothing from drawing their back and front faces separately.
+    // Keep two passes for rigs/influences that can fold a card over itself.
+    material.forceSinglePass = definition.primitive === 'plane' && !definition.rigId
+      && !definition.influences.some(influence => influence.enabled)
     material.depthWrite = !imagePlane
     material.alphaTest = imagePlane ? .001 : 0
     // Prevent a card mounted directly on a wall from losing patches to z-fighting at grazing angles.
@@ -772,7 +793,6 @@ export class ThreeSceneRuntimeRegistry {
       const object = runtime.objects.get(item.id)
       if (!object) return
       object.visible = item.visible
-      applyTransform(object, item.transform, time)
       if (item.primitive === 'model') this.syncModel(object, item, assets, definition.environmentIntensity)
       if (object instanceof THREE.Mesh) syncGeometry(object, item, item.rigId ? rigs.get(item.rigId) : undefined, assets, time, runtime, definition)
       if (object instanceof THREE.Mesh) {
@@ -795,7 +815,9 @@ export class ThreeSceneRuntimeRegistry {
     runtime.root.updateMatrixWorld(true)
     syncScattering(runtime.root, runtime.objects, definition, time)
     runtime.root.updateMatrixWorld(true)
-    const sceneBounds = new THREE.Box3().setFromObject(runtime.root)
+    // Bounds are only consumed by shadow fitting, not camera or object animation.
+    const sceneBounds = definition.settings.shadows && definition.lights.some(light => light.castShadow)
+      ? cachedSceneBounds(runtime.root) : null
     definition.cameras.forEach((item) => {
       const camera = runtime.cameras.get(item.id)
       if (!camera) return
@@ -837,7 +859,7 @@ export class ThreeSceneRuntimeRegistry {
         light.width = Math.max(.01, item.width ? evaluateNumericProperty(item.width, time) : 4)
         light.height = Math.max(.01, item.height ? evaluateNumericProperty(item.height, time) : 2)
       }
-      if (item.castShadow) configureShadow(light, definition, sceneBounds)
+      if (item.castShadow && sceneBounds) configureShadow(light, definition, sceneBounds)
       if (light instanceof THREE.DirectionalLight || light instanceof THREE.SpotLight) {
         const direction = new THREE.Vector3(0, 0, -1).applyQuaternion(light.quaternion)
         light.target.position.copy(light.position).add(direction)

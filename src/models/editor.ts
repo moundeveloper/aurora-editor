@@ -247,6 +247,8 @@ export interface AuroraLight {
 }
 
 export interface Scene3DSettings {
+  /** Non-destructive display-referred scene grade, shared by viewport, camera and export. */
+  colorGrade?: { enabled: boolean; temperature: number; tint: number; contrast: number; saturation: number }
   workingColorSpace?: 'linear-srgb' | 'linear-display-p3'
   viewTransform?: 'aces' | 'agx' | 'neutral' | 'standard'
   exposureStops?: number

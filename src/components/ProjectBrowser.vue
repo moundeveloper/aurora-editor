@@ -54,6 +54,10 @@ async function createProject() {
   }
 }
 
+async function createHud() {
+  if(await store.createPhaseHud(name.value==='Untitled Project'?undefined:name.value.trim().slice(0,120)||undefined))await router.push(`/projects/${store.project.id}`)
+}
+
 async function openProject(projectId = selectedProjectId.value) {
   selectedProjectId.value = projectId
   if (await store.openProject(projectId)) await router.push(`/projects/${projectId}`)
@@ -100,6 +104,7 @@ function formatUpdatedAt(timestamp: number) {
 
       <aside class="new-project-panel" aria-labelledby="new-project-title">
         <div class="panel-heading"><span class="new-icon"><Plus :size="15" /></span><span><strong id="new-project-title">New empty project</strong><small>Start with a blank timeline and node output.</small></span></div>
+        <button type="button" class="hud-preset" :disabled="projectBrowserBusy" @click="createHud">Create animated HUD · 12s portrait</button>
         <form @submit.prevent="createProject">
           <label><span>Name</span><input v-model="name" maxlength="120" required @focus="($event.target as HTMLInputElement).select()" /></label>
           <label><span>Resolution</span><MSelect :model-value="resolution" :options="resolutionOptions" label="Project resolution" @update:model-value="selectResolution" /></label>
@@ -119,6 +124,7 @@ function formatUpdatedAt(timestamp: number) {
 </template>
 
 <style scoped>
+.hud-preset {margin:12px;padding:10px;color:var(--text-primary);background:var(--bg-selected);border:1px solid var(--accent-border);border-radius:4px;cursor:pointer;}
 .project-browser { display: grid; width: 100%; height: 100%; min-width: 760px; grid-template-rows: 46px minmax(0, 1fr); overflow: hidden; color: var(--text-primary); background: var(--bg-app); }
 .browser-header { display: flex; align-items: center; gap: 9px; padding: 0 14px; background: #12141a; border-bottom: 1px solid var(--border-subtle); }.brand-mark { display: grid; width: 27px; height: 27px; place-items: center; color: #cbd3ff; background: #232943; border: 1px solid #6e7ed0; border-radius: 5px; font-size: 13px; font-weight: 800; }.browser-header > span { display: flex; flex-direction: column; gap: 2px; }.browser-header strong { font-size: 11px; }.browser-header small { color: var(--text-muted); font-size: 8px; }
 .browser-body { display: grid; min-height: 0; grid-template-columns: minmax(420px, 1fr) 310px; }.project-library { display: flex; min-width: 0; min-height: 0; flex-direction: column; }.section-heading { display: flex; min-height: 58px; align-items: center; gap: 16px; padding: 10px 14px; background: #0f1116; border-bottom: 1px solid var(--border-subtle); }.section-heading > span, .panel-heading > span:last-child { display: flex; min-width: 0; flex-direction: column; gap: 3px; }.section-heading strong, .panel-heading strong { font-size: 11px; }.section-heading small, .panel-heading small { color: var(--text-muted); font-size: 8.5px; }.project-search { display: flex; width: min(280px, 45%); height: 28px; margin-left: auto; align-items: center; gap: 6px; padding: 0 7px; color: var(--text-muted); background: var(--bg-input); border: 1px solid var(--border-strong); border-radius: 4px; }.project-search:focus-within { border-color: var(--focus); box-shadow: 0 0 0 1px #424b70; }.project-search input { width: 100%; min-width: 0; color: var(--text-primary); background: transparent; border: 0; outline: 0; font: inherit; font-size: 9.5px; }

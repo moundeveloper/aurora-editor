@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import { applySceneLook, type SceneLookPatch } from '../../shared/sceneLook.ts'
 import type {
   AnimatableProperty, Aurora3DObject, Aurora3DScene, AuroraCamera, AuroraLight, SerializedEditorState,
 } from '../../src/models/editor.ts'
@@ -49,6 +50,14 @@ function requireScene(snapshot: SerializedEditorState, sceneId: string): Aurora3
 function commit(snapshot: SerializedEditorState, scene: Aurora3DScene) {
   scene.revision += 1
   snapshot.project.updatedAt = Date.now()
+}
+
+export function setProjectSceneLook(snapshot: SerializedEditorState, sceneId: string, patch: SceneLookPatch) {
+  const scene=requireScene(snapshot,sceneId)
+  applySceneLook(scene,patch)
+  commit(snapshot,scene)
+  for(const asset of snapshot.assets)if(asset.sceneTemplate?.id===scene.id){asset.sceneTemplate.settings=structuredClone(scene.settings);asset.sceneTemplate.revision=scene.revision}
+  return scene
 }
 
 export interface CameraLensMutation {

@@ -6,6 +6,7 @@ import { computed, ref } from 'vue'
 import { storeToRefs } from 'pinia'
 import { Box, Camera, ChevronDown, ChevronUp, CircleDot, Image as ImageIcon, Layers3, Lock, Plus, RotateCcw, SlidersHorizontal, Spline, Sun, Target, Trash2 } from '@lucide/vue'
 import { useEditorStore } from '@/stores/editor'
+import { DEFAULT_COLOR_GRADE, sceneColorGrade } from '../../shared/sceneLook'
 import type { AnimatableProperty, Aurora3DPathPoint, AuroraPathPointMode } from '@/models/editor'
 import { evaluateNumericProperty } from '@/engine/animation/evaluateProperty'
 import { INFLUENCE_DEFINITIONS, INFLUENCE_TYPES, influenceParameters } from '@/engine/scene3d/influences'
@@ -19,6 +20,7 @@ import RigPanel from './common/RigPanel.vue'
 
 const store = useEditorStore()
 const { selectedLayer, selectedScene, selectedSceneEntity, currentTime, assets } = storeToRefs(store)
+const colorGrade=computed(()=>sceneColorGrade(selectedScene.value?.settings??{}))
 const collapsed = ref<Record<string, boolean>>({})
 const expandedPoints = ref<Record<string, boolean>>({})
 const draggedInfluence = ref<string | null>(null)
@@ -397,14 +399,29 @@ function pointModeLabel(mode: AuroraPathPointMode) {
         </div>
       </section>
 
+      <section v-if="selectedScene" class="property-section" aria-label="Scene color grading">
+        <div class="section-header static"><SlidersHorizontal :size="12" /><span>Color grading</span><small>Non-destructive</small></div>
+        <div class="property-list">
+          <label class="check-row"><span>Enable grading</span><button type="button" aria-label="Enable scene color grading" :aria-pressed="colorGrade.enabled" :class="{ checked: colorGrade.enabled }" @click="store.setSceneLook({colorGrade:{enabled:!colorGrade.enabled}})"><CircleDot :size="10" /></button></label>
+          <label><span>Temperature</span><NumberField :model-value="colorGrade.temperature" :min="-100" :max="100" :step="1" label="Color grading temperature" @update:model-value="store.setSceneLook({colorGrade:{temperature:$event}})" /></label>
+          <label><span>Tint</span><NumberField :model-value="colorGrade.tint" :min="-100" :max="100" :step="1" label="Color grading tint" @update:model-value="store.setSceneLook({colorGrade:{tint:$event}})" /></label>
+          <label><span>Contrast</span><NumberField :model-value="colorGrade.contrast" :min="0" :max="2" :step=".05" label="Color grading contrast" @update:model-value="store.setSceneLook({colorGrade:{contrast:$event}})" /></label>
+          <label><span>Saturation</span><NumberField :model-value="colorGrade.saturation" :min="0" :max="2" :step=".05" label="Color grading saturation" @update:model-value="store.setSceneLook({colorGrade:{saturation:$event}})" /></label>
+          <button type="button" class="model-action" @click="store.setSceneLook({colorGrade:{...DEFAULT_COLOR_GRADE}})">Reset color grading</button>
+          <p class="section-note">Positive temperature warms the image; positive tint adds magenta. Neutral contrast and saturation are 1. The grade applies after the view transform to the viewport, preview and export.</p>
+        </div>
+      </section>
+
       <section class="property-section">
         <div class="section-header static"><Box :size="12" /><span>Renderer</span><small>WebGL2 · GTAO</small></div>
         <div v-if="selectedScene" class="property-list">
           <label class="check-row"><span>Shadows</span><button type="button" :class="{ checked: selectedScene.settings.shadows }" @click="selectedScene.settings.shadows = !selectedScene.settings.shadows; store.markSceneChanged()"><CircleDot :size="10" /></button></label>
           <label><span>Shadow map</span><NumberField :model-value="selectedScene.settings.shadowMapSize" :min="256" :max="4096" :step="256" label="shadow map size" @update:model-value="selectedScene.settings.shadowMapSize = $event; store.markSceneChanged()" /></label>
-          <label class="check-row"><span>Ambient occlusion</span><button type="button" :class="{ checked: selectedScene.settings.ambientOcclusion }" @click="selectedScene.settings.ambientOcclusion = !selectedScene.settings.ambientOcclusion; store.markSceneChanged()"><CircleDot :size="10" /></button></label>
-          <label><span>AO intensity</span><NumberField :model-value="selectedScene.settings.ambientOcclusionIntensity" :min="0" :max="3" :step=".05" label="ambient occlusion intensity" @update:model-value="selectedScene.settings.ambientOcclusionIntensity = $event; store.markSceneChanged()" /></label>
-          <label><span>AO radius</span><NumberField :model-value="selectedScene.settings.ambientOcclusionRadius" :min=".01" :max="5" :step=".05" label="ambient occlusion radius" @update:model-value="selectedScene.settings.ambientOcclusionRadius = $event; store.markSceneChanged()" /></label>
+          <label class="check-row"><span>Ambient occlusion</span><button type="button" aria-label="Ambient occlusion" :aria-pressed="selectedScene.settings.ambientOcclusion" :class="{ checked: selectedScene.settings.ambientOcclusion }" @click="store.setSceneLook({ambientOcclusion:!selectedScene.settings.ambientOcclusion})"><CircleDot :size="10" /></button></label>
+          <label><span>AO intensity</span><NumberField :model-value="selectedScene.settings.ambientOcclusionIntensity" :min="0" :max="3" :step=".05" label="ambient occlusion intensity" @update:model-value="store.setSceneLook({ambientOcclusionIntensity:$event})" /></label>
+          <label><span>AO radius</span><NumberField :model-value="selectedScene.settings.ambientOcclusionRadius" :min=".01" :max="5" :step=".05" label="ambient occlusion radius" @update:model-value="store.setSceneLook({ambientOcclusionRadius:$event})" /></label>
+          <label><span>Render quality</span><MSelect :model-value="selectedScene.settings.quality" :options="[{value:'draft',label:'Draft'},{value:'preview',label:'Preview'},{value:'full',label:'Full'}]" label="Scene render quality" @update:model-value="store.setSceneLook({quality:$event as 'draft'|'preview'|'full'})" /></label>
+          <p class="section-note">Ambient occlusion is live, not baked. Draft quality disables it.</p>
           <label class="check-row"><span>Motion blur</span><button type="button" :class="{ checked: selectedScene.settings.motionBlur }" @click="selectedScene.settings.motionBlur = !selectedScene.settings.motionBlur; store.markSceneChanged()"><CircleDot :size="10" /></button></label>
           <template v-if="selectedScene.settings.motionBlur">
             <label v-if="selectedLayer?.type === '3d-scene'" class="check-row"><span>This scene layer</span><button type="button" :class="{ checked: selectedLayer.motionBlur !== false }" @click="selectedLayer.motionBlur = selectedLayer.motionBlur === false; store.markSceneChanged()"><CircleDot :size="10" /></button></label>
@@ -412,8 +429,8 @@ function pointModeLabel(mode: AuroraPathPointMode) {
             <label><span>Full samples</span><NumberField :model-value="selectedScene.settings.motionBlurSamples" :min="2" :max="16" :step="1" label="full quality motion blur samples" @update:model-value="selectedScene.settings.motionBlurSamples = Math.round($event); store.markSceneChanged()" /></label>
             <p class="section-note">Preview uses up to 8 samples. Draft disables blur; full quality uses the authored count.</p>
           </template>
-          <label><span>View transform</span><MSelect :model-value="selectedScene.settings.viewTransform ?? 'aces'" :options="[{value:'aces',label:'ACES filmic'},{value:'agx',label:'AgX'},{value:'neutral',label:'Neutral'},{value:'standard',label:'Standard'}]" label="Scene view transform" @update:model-value="selectedScene.settings.viewTransform = $event as 'aces'|'agx'|'neutral'|'standard'; store.markSceneChanged()" /></label>
-          <label><span>Exposure (stops)</span><NumberField :model-value="selectedScene.settings.exposureStops ?? 0" :min="-10" :max="10" :step=".1" label="Scene exposure stops" @update:model-value="selectedScene.settings.exposureStops = $event; store.markSceneChanged()" /></label>
+          <label><span>View transform</span><MSelect :model-value="selectedScene.settings.viewTransform ?? 'aces'" :options="[{value:'aces',label:'ACES filmic'},{value:'agx',label:'AgX'},{value:'neutral',label:'Neutral'},{value:'standard',label:'Standard'}]" label="Scene view transform" @update:model-value="store.setSceneLook({viewTransform:$event as 'aces'|'agx'|'neutral'|'standard'})" /></label>
+          <label><span>Exposure (stops)</span><NumberField :model-value="selectedScene.settings.exposureStops ?? 0" :min="-10" :max="10" :step=".1" label="Scene exposure stops" @update:model-value="store.setSceneLook({exposureStops:$event})" /></label>
           <label><span>Working space</span><MSelect :model-value="selectedScene.settings.workingColorSpace ?? 'linear-srgb'" :options="[{value:'linear-srgb',label:'Linear sRGB'},{value:'linear-display-p3',label:'Linear Display P3'}]" label="Scene working color space" @update:model-value="selectedScene.settings.workingColorSpace = $event as 'linear-srgb'|'linear-display-p3'; store.markSceneChanged()" /></label>
           <p class="section-note">Lighting uses the selected linear working gamut. The view transform produces sRGB output for compositing, scopes, and export.</p>
           <label><span>Environment light</span><NumberField :model-value="selectedScene.environmentIntensity" :min="0" :max="4" :step=".05" label="environment light intensity" @update:model-value="selectedScene.environmentIntensity = $event; store.markSceneChanged()" /></label>
@@ -442,5 +459,6 @@ function pointModeLabel(mode: AuroraPathPointMode) {
 </style>
 
 <style scoped>
+.model-action { padding:6px; color:var(--text-secondary); background:var(--bg-panel-alt); border:1px solid var(--border-strong); border-radius:4px; cursor:pointer; font:inherit; }
 .native-model-actions { display:grid; gap:7px; padding:12px; }.native-model-actions button { padding:6px; color:var(--text-secondary); background:var(--bg-panel-alt); border:1px solid var(--border-strong); border-radius:4px; cursor:pointer; }
 </style>

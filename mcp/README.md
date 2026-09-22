@@ -4,6 +4,56 @@ Aurora exposes its local project vault over an MCP STDIO server. The editor and 
 same project repository, so an MCP-authored project appears in Aurora's project browser and remains
 fully editable.
 
+## Animated PHASE HUD preset
+
+`aurora_project_create_phase_hud` creates a new 1080 × 1500, 30 fps, 12-second
+project. Optional `name` is the only setting; existing projects are never replaced.
+The same factory powers **Project Browser → Create animated HUD · 12s portrait**,
+which uses the Name field. Use `node mcp/src/create-phase-hud.ts [name]` when MCP
+tools are not attached.
+
+The preset contains 15 editable image cards: dark circuit artwork, cyan telemetry
+panels, orange markers, keyframed scan cursors and status pulses, an acquisition
+sweep, and a drifting camera with animated focus. All animation loops at 12 seconds.
+SVG typography is embedded artwork inside each card, not individual text layers.
+There is no animated film grain or chromatic-aberration pass; those would require
+additional effects with matching UI controls. Fine artwork is batched into textures
+to keep scene cost small. Camera previews use the actual runtime.
+
+`node mcp/src/render-project.ts <id> full 720 1000 6` renders the frame at six seconds.
+`tests/browser/phase-hud-smoke.mjs` exercises UI preset creation and scrubbing in an
+isolated browser with all HTTP writes intercepted. `mcp/src/render-phase-hud-loop.ts`
+renders a low-frame-rate contact preview through MCP; the saved project runs at 30 fps.
+
+## Scene grading and ambient occlusion
+
+`aurora_scene_look_set` accepts `projectId`, `sceneId`, and a partial `settings` object.
+The equivalent UI is **3D → Inspector → Color grading / Renderer**. Both use shared
+validation; UI changes support undo/redo. Omitted values are preserved.
+
+```json
+{"ambientOcclusion":true,"quality":"full","colorGrade":{"enabled":true,"temperature":10,"tint":0,"contrast":1.05,"saturation":1.05}}
+```
+
+Temperature/tint range from -100 to 100; contrast/saturation from 0 to 2 (neutral 1).
+Grading is optional and disabled for older scenes. It runs after the view transform in
+the existing output pass, with exact neutral/bypass behavior and unchanged alpha.
+The same renderer supplies the viewport, camera preview, scene composition, and export.
+This provides basic global grading; LUT import, curves, and selective grading are not
+implemented by this control.
+
+Other settings: `exposureStops` (-10–10), `viewTransform` (`aces`, `agx`, `neutral`,
+`standard`), `ambientOcclusionIntensity` (0–3), `ambientOcclusionRadius` (0.01–5),
+and `quality` (`draft`, `preview`, `full`). AO is live GTAO, not baked; Draft bypasses it.
+For unattached MCP sessions, save a settings JSON file and run:
+
+```powershell
+node mcp/src/set-scene-look.ts <project-id> <scene-id> <settings.json>
+```
+
+`tests/browser/scene-look-smoke.mjs` verifies the inspector grading enable/saturation/reset
+and AO toggle in an isolated context with HTTP writes intercepted.
+
 ## Run
 
 ```powershell
@@ -18,6 +68,8 @@ codex mcp add aurora-editor -- node mcp/src/index.ts
 
 The server currently provides:
 
+- `aurora_scene_render_preview` — render a saved camera with Aurora's actual WebGL runtime and post-processing; return a PNG, artifact path, geometry counts, GPU-inclusive timing, and redundant instance-upload counts. Works without a running editor or app server.
+- `aurora_project_create_crimson_citadel` — create the editable White Gardens scene, with native cathedral towers, arched bridges, crimson ivy, cloud banks, and 40,000 botanical instances. Optionally regenerate an explicit project ID.
 - `aurora_project_list` — list projects in the vault.
 - `aurora_project_get` — inspect a complete editable project document.
 - `aurora_project_create_showcase` — author and activate the Neon Singularity hybrid animation.
@@ -34,6 +86,63 @@ The server currently provides:
 
 See [the modeling implementation notes](../docs/explained/3d-modeling-implementation.md) for the human workflow,
 operation examples, current limits, and conflict handling. Restart the MCP process to discover new tools.
+
+## Reliable camera preview and profiling
+
+Install dependencies with `pnpm install`. The renderer launches isolated **headless Chromium** with a
+fresh browser context and temporary local Vite server; it uses the same `ThreeSceneRuntimeRegistry`
+and `AuroraSceneRenderPipeline` as the editor. No desktop automation connection is required. Browser
+lookup checks `AURORA_CHROMIUM_PATH`, Playwright's installed Chromium, and installed Chrome/Edge on
+Windows. If none is installed, set `AURORA_CHROMIUM_PATH` to a Chromium executable. It never connects
+to an existing browser profile or tab.
+
+Call `aurora_scene_render_preview` with:
+
+```json
+{
+  "projectId": "31d7d3e4-cd9d-4e42-b7a3-2ebe2ba1ac3f",
+  "sceneId": "scene-crimson-citadel",
+  "time": 0,
+  "quality": "preview",
+  "width": 960,
+  "height": 540,
+  "benchmarkFrames": 6
+}
+```
+
+`sceneId` and `cameraId` are optional; omission selects the first scene and its camera cut at `time`.
+`quality` is an optional render-only override; omission honors the saved scene settings. Resolution
+is bounded to 1920 × 1080. The output contains the PNG as MCP image content and a path under
+`<vault>/renders`, plus a matching JSON report. Allow up to 180 seconds on a cold machine; warm runs
+typically finish in a few seconds. Files are retained for inspection; no project save is performed.
+
+When the MCP server is not attached to the agent session, this CLI invokes exactly the same tool:
+
+```powershell
+pnpm mcp:render-preview <project-id> preview 960 540
+```
+
+The statistics include first scene setup time, median/P95 steady-state scene sync and complete frame
+time (including GPU completion), total pass draw calls/triangles, scatter instance count, and instance
+buffer upload count. Zero uploads are expected for repeated renders of static geometry. Timings are
+specific to the reported GPU/resolution and do not include editor UI work. This renders a saved 3D
+camera, not unsaved viewport state or the complete 2D/compositing graph; motion-blur accumulation is
+not performed by this still-preview tool.
+
+For a read-only **actual editor** performance/screenshot check against the running dev app:
+
+```powershell
+node tests/browser/large-scene-smoke.mjs <project-id> final
+```
+
+This uses a separate Chrome context, intercepts HTTP writes, and checks scrubbing, selection, an object
+edit, and undo. `AURORA_APP_URL` overrides `http://localhost:5173`. It saves screenshots/timings to
+`artifacts/crimson-citadel`. The persistent [agent workflow](../AGENTS.md) points future sessions here.
+
+Implementation references: [Three.js InstancedMesh](https://threejs.org/docs/pages/InstancedMesh.html)
+documents explicit instance-buffer and bounds updates; [Playwright browser support](https://playwright.dev/docs/browsers)
+documents installed Chromium/Chrome/Edge support. Static redraws reuse instance data; animation or
+geometry changes invalidate it.
 
 Construction operations use the same atomic batch endpoint:
 

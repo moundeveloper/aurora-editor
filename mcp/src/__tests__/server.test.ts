@@ -48,6 +48,20 @@ describe('Aurora MCP influence authoring', () => {
 })
 
 describe('Aurora MCP scene authoring', () => {
+  it('creates independent animated HUD projects without replacing prior work',async()=>{
+    const root=await mkdtemp(join(tmpdir(),'aurora-hud-'));temporaryRoots.push(root)
+    const {server,projects}=await createAuroraMcpServer(root)
+    const client=new Client({name:'hud-test',version:'1'})
+    const [a,b]=InMemoryTransport.createLinkedPair();await server.connect(b);await client.connect(a)
+    try{
+      for(let i=0;i<2;i++)expect((await client.callTool({name:'aurora_project_create_phase_hud',arguments:{name:`HUD ${i}`}})).isError).not.toBe(true)
+      const list=await projects.list();expect(list).toHaveLength(2)
+      const doc=await projects.load(list[0]!.id)
+      expect(doc?.project).toMatchObject({width:1080,height:1500,duration:12})
+      expect(doc?.scenes3D).toHaveLength(1)
+      expect(JSON.stringify(doc)).toContain('scan-1-y')
+    }finally{await client.close();await server.close()}
+  })
   it('advertises the scene mutation tools and persists a focus pull and a spot cone', async () => {
     const root = await mkdtemp(join(tmpdir(), 'aurora-mcp-scene-'))
     temporaryRoots.push(root)
@@ -59,6 +73,7 @@ describe('Aurora MCP scene authoring', () => {
     try {
       const advertised = (await client.listTools()).tools.map((tool) => tool.name)
       expect(advertised).toContain('aurora_scene_camera_lens_set')
+      expect(advertised).toContain('aurora_scene_look_set')
       expect(advertised).toContain('aurora_scene_light_upsert')
       expect(advertised).toContain('aurora_scene_environment_set')
       expect(advertised).toContain('aurora_scene_model_add')
@@ -86,6 +101,12 @@ describe('Aurora MCP scene authoring', () => {
 
       expect(lens.isError).not.toBe(true)
       expect(spot.isError).not.toBe(true)
+      const look=await client.callTool({name:'aurora_scene_look_set',arguments:{projectId:'scene-protocol-test',sceneId:'scene-pillar-run',settings:{ambientOcclusion:true,quality:'full',colorGrade:{enabled:true,temperature:12,saturation:.8}}}})
+      expect(look.isError).not.toBe(true)
+      const lookPatch=await client.callTool({name:'aurora_scene_look_set',arguments:{projectId:'scene-protocol-test',sceneId:'scene-pillar-run',settings:{colorGrade:{contrast:1.1}}}})
+      expect(lookPatch.isError).not.toBe(true)
+      const lookStored=await projects.load('scene-protocol-test')
+      expect((lookStored?.scenes3D[0] as {settings:unknown}).settings).toMatchObject({ambientOcclusion:true,quality:'full',colorGrade:{enabled:true,temperature:12,tint:0,contrast:1.1,saturation:.8}})
       const stored = await projects.load('scene-protocol-test')
       const scene = stored?.scenes3D[0] as {
         cameras: Array<{ id: string; depthOfField?: boolean; fStop?: { value: number }; focusDistance?: { animated: boolean; keyframes: unknown[] } }>

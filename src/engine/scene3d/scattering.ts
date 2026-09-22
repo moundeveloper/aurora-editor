@@ -1,6 +1,6 @@
 import * as THREE from 'three'
 import type { Aurora3DObject, Aurora3DScene } from '@/models/editor'
-import { evaluate3DPath } from './pathEvaluation'
+import { evaluate3DPath, pathTransformMatrix } from './pathEvaluation'
 
 function randomSequence(seed: number) {
   let state = seed | 0
@@ -53,20 +53,40 @@ export function scatterMatrices(source: THREE.Mesh, target: THREE.Mesh | undefin
   return matrices
 }
 
+const scatterCache = new WeakMap<THREE.InstancedMesh, string>()
+
+/** Surface samples only change with geometry, transforms or settings, not with the playhead. */
+function scatterSignature(root: THREE.Group, source: THREE.Mesh, target: THREE.Mesh | undefined, definition: Aurora3DObject, scene: Aurora3DScene, time: number) {
+  const geometry = target?.geometry
+  const position = geometry?.getAttribute('position') as THREE.BufferAttribute | THREE.InterleavedBufferAttribute | undefined
+  const positionVersion = position instanceof THREE.InterleavedBufferAttribute ? position.data.version : position?.version
+  const path = definition.scatter?.mode === 'path' ? scene.paths.find(p => p.id === definition.scatter?.targetId) : undefined
+  return JSON.stringify([
+    definition.scatter, source.matrixWorld.elements, root.matrixWorld.elements,
+    geometry?.uuid, positionVersion, geometry?.index?.version, target?.matrixWorld.elements,
+    // Evaluated transforms include animation/drivers while static paths reuse their buffers too.
+    path ? [path.points, path.closed, pathTransformMatrix(path.transform,time).elements] : null,
+  ])
+}
+
 export function syncScattering(root: THREE.Group, objects: Map<string, THREE.Object3D>, scene: Aurora3DScene, time: number) {
   const existing = new Map(root.children.filter(item => item.userData.auroraScatter).map(item => [item.userData.auroraScatter as string,item as THREE.InstancedMesh]))
   for (const definition of scene.objects) {
     const source = objects.get(definition.id), target = objects.get(definition.scatter?.targetId ?? '')
     if (!(source instanceof THREE.Mesh) || !definition.scatter?.enabled) continue
-    const matrices = scatterMatrices(source,target instanceof THREE.Mesh ? target : undefined,definition,scene,time)
+    const targetMesh = target instanceof THREE.Mesh ? target : undefined
+    const signature = scatterSignature(root,source,targetMesh,definition,scene,time)
     let instances = existing.get(definition.id)
-    if (instances && (instances.count !== matrices.length || instances.geometry !== source.geometry || instances.material !== source.material)) {
-      root.remove(instances); instances.dispose(); instances = undefined
+    const count = Math.max(0, Math.min(5000, Math.floor(definition.scatter.count)))
+    if (instances && (instances.count !== count || instances.geometry !== source.geometry || instances.material !== source.material)) {
+      root.remove(instances); instances.dispose(); instances = undefined; existing.delete(definition.id)
     }
+    const changed = !instances || scatterCache.get(instances) !== signature
+    const matrices = changed ? scatterMatrices(source,targetMesh,definition,scene,time) : null
+    if (matrices && !matrices.length) continue // Leave old instances in `existing` for cleanup.
     existing.delete(definition.id)
-    if (!matrices.length) continue
     if (!instances) {
-      instances = new THREE.InstancedMesh(source.geometry,source.material,matrices.length)
+      instances = new THREE.InstancedMesh(source.geometry,source.material,matrices!.length)
       instances.userData.auroraScatter = definition.id
       root.add(instances)
     }
@@ -75,10 +95,14 @@ export function syncScattering(root: THREE.Group, objects: Map<string, THREE.Obj
       instances.visible = parent.visible
     }
     instances.castShadow = source.castShadow; instances.receiveShadow = source.receiveShadow
-    const inverseRoot = root.matrixWorld.clone().invert()
-    matrices.forEach((matrix,index) => instances!.setMatrixAt(index,inverseRoot.clone().multiply(matrix)))
-    instances.instanceMatrix.needsUpdate = true
-    instances.computeBoundingSphere()
+    if (matrices) {
+      const inverseRoot = root.matrixWorld.clone().invert(), local = new THREE.Matrix4()
+      matrices.forEach((matrix,index) => instances!.setMatrixAt(index,local.multiplyMatrices(inverseRoot,matrix)))
+      instances.instanceMatrix.needsUpdate = true
+      instances.computeBoundingSphere()
+      instances.computeBoundingBox()
+      scatterCache.set(instances,signature)
+    }
   }
   for (const instances of existing.values()) { root.remove(instances); instances.dispose() }
 }

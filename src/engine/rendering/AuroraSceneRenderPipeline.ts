@@ -7,6 +7,7 @@ import { RenderPass } from 'three/addons/postprocessing/RenderPass.js'
 import type { Scene3DSettings } from '@/models/editor'
 import type { CameraLens } from '@/engine/scene3d/cameraLens'
 import { configureSceneColor } from './colorManagement'
+import { COLOR_GRADE_GLSL, colorGradeUniforms } from './sceneColorGrade'
 import { SceneWorkingSpace, sceneWorkingSpace, workingToDisplayMatrix } from './sceneWorkingSpace'
 
 export type AuroraScenePipelineOutput = 'screen' | 'texture'
@@ -14,8 +15,8 @@ export type AuroraScenePipelineOutput = 'screen' | 'texture'
 interface PipelineState {
   composer: EffectComposer
   renderPass: RenderPass
-  gtaoPass: GTAOPass
-  bokehPass: BokehPass
+  gtaoPass: GTAOPass | null
+  bokehPass: BokehPass | null
   outputPass: OutputPass
   perspective: boolean
 }
@@ -92,20 +93,19 @@ export class AuroraSceneRenderPipeline {
     const state = this.ensureState(scene, camera, width, height)
     state.renderPass.scene = scene
     state.renderPass.camera = camera
-    state.gtaoPass.scene = scene
-    state.gtaoPass.camera = camera
-    state.bokehPass.scene = scene
-    state.bokehPass.camera = camera
+    const aoEnabled = settings.ambientOcclusion && settings.quality !== 'draft'
+    this.syncEffects(state, scene, camera, aoEnabled, Boolean(lens))
     // Intermediate passes stay linear. Texture output is tagged only after the final OutputPass so
     // the hybrid compositor decodes it exactly once on the way back to the sRGB drawing buffer.
     const workingSpace = sceneWorkingSpace(settings)
     state.composer.renderTarget1.texture.colorSpace = workingSpace
     state.composer.renderTarget2.texture.colorSpace = workingSpace
     state.outputPass.uniforms.auroraWorkingToSRGB!.value.copy(workingToDisplayMatrix(workingSpace))
+    const grade = colorGradeUniforms(settings)
+    state.outputPass.uniforms.auroraGrade!.value.copy(grade.values)
+    state.outputPass.uniforms.auroraGradeEnabled!.value = grade.enabled
 
-    const aoEnabled = settings.ambientOcclusion && settings.quality !== 'draft'
-    state.gtaoPass.enabled = aoEnabled
-    if (aoEnabled) {
+    if (state.gtaoPass) {
       const samples = settings.quality === 'full' ? 16 : 8
       if (samples !== this.sampleCount) {
         state.gtaoPass.updateGtaoMaterial({ samples })
@@ -119,10 +119,8 @@ export class AuroraSceneRenderPipeline {
       })
     }
 
-    // Bokeh reads the same depth the beauty pass wrote, so it belongs after ambient occlusion and
-    // before the output transform. Without a lens it stands down entirely.
-    state.bokehPass.enabled = Boolean(lens)
-    if (lens) {
+    // Bokeh renders its own depth pass, after AO and before the output transform.
+    if (lens && state.bokehPass) {
       const uniforms = state.bokehPass.uniforms as Partial<Record<'focus' | 'aperture' | 'maxblur', { value: number }>>
       if (uniforms.focus) uniforms.focus.value = lens.focus
       if (uniforms.aperture) uniforms.aperture.value = lens.aperture
@@ -208,18 +206,18 @@ export class AuroraSceneRenderPipeline {
       composer.renderToScreen = false
       const renderPass = new RenderPass(scene, camera)
       renderPass.clear = true
-      const gtaoPass = new GTAOPass(scene, camera, width, height)
-      const bokehPass = new BokehPass(scene, camera, {})
       const outputPass = new OutputPass()
       outputPass.uniforms.auroraWorkingToSRGB = { value: new THREE.Matrix3() }
+      outputPass.uniforms.auroraGrade = { value: new THREE.Vector4(0,0,1,1) }
+      outputPass.uniforms.auroraGradeEnabled = { value: 0 }
       outputPass.material.fragmentShader = outputPass.material.fragmentShader
         .replace('uniform sampler2D tDiffuse;', 'uniform sampler2D tDiffuse;\nuniform mat3 auroraWorkingToSRGB;')
         .replace('gl_FragColor = texture2D( tDiffuse, vUv );', 'gl_FragColor = texture2D( tDiffuse, vUv );\ngl_FragColor.rgb = auroraWorkingToSRGB * gl_FragColor.rgb;')
+        .replace('void main() {', `${COLOR_GRADE_GLSL}\nvoid main() {`)
+        .replace('// color space', 'gl_FragColor.rgb = auroraColorGrade(gl_FragColor.rgb);\n// color space')
       composer.addPass(renderPass)
-      composer.addPass(gtaoPass)
-      composer.addPass(bokehPass)
       composer.addPass(outputPass)
-      this.state = { composer, renderPass, gtaoPass, bokehPass, outputPass, perspective }
+      this.state = { composer, renderPass, gtaoPass: null, bokehPass: null, outputPass, perspective }
       this.width = 0
       this.height = 0
       this.sampleCount = 0
@@ -230,6 +228,30 @@ export class AuroraSceneRenderPipeline {
       this.height = height
     }
     return this.state
+  }
+
+  private syncEffects(state: PipelineState, scene: THREE.Scene, camera: THREE.Camera, ao: boolean, dof: boolean) {
+    if (ao && !state.gtaoPass) {
+      state.gtaoPass = new GTAOPass(scene, camera, this.width, this.height)
+      state.composer.insertPass(state.gtaoPass, 1)
+      this.sampleCount = 0
+    } else if (!ao && state.gtaoPass) {
+      state.composer.removePass(state.gtaoPass)
+      state.gtaoPass.dispose()
+      state.gtaoPass = null
+      this.sampleCount = 0
+    }
+    if (dof && !state.bokehPass) {
+      state.bokehPass = new BokehPass(scene, camera, {})
+      state.composer.insertPass(state.bokehPass, state.gtaoPass ? 2 : 1)
+    } else if (!dof && state.bokehPass) {
+      state.composer.removePass(state.bokehPass)
+      state.bokehPass.dispose()
+      state.bokehPass = null
+    }
+    for (const pass of [state.gtaoPass, state.bokehPass]) {
+      if (pass) { pass.scene = scene; pass.camera = camera }
+    }
   }
 
   dispose() {
@@ -243,8 +265,8 @@ export class AuroraSceneRenderPipeline {
 
   private disposeComposer() {
     if (!this.state) return
-    this.state.gtaoPass.dispose()
-    this.state.bokehPass.dispose()
+    this.state.gtaoPass?.dispose()
+    this.state.bokehPass?.dispose()
     this.state.outputPass.dispose()
     this.state.composer.dispose()
     this.state = null

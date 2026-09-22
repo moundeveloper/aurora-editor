@@ -1,4 +1,5 @@
 import { createModel, applyModelOperation, publishModel, type ModelOperation } from '../../shared/modeling'
+import { applySceneLook, type SceneLookPatch } from '../../shared/sceneLook'
 import { computed, ref, toRaw, watch } from 'vue'
 import { defaultAudioGraph, type AudioGraph } from '@/engine/audio/audioGraph'
 import { sharedAudioEngine, audioWav } from '@/engine/audio/AudioEngine'
@@ -306,15 +307,17 @@ export const useEditorStore = defineStore('editor', () => {
   }
 
   function currentState(): SerializedEditorState {
+    // These are serialization boundaries, not reactive computations. Reading raw targets avoids
+    // paying Vue proxy traps for every vertex while saving or capturing an undo checkpoint.
     return {
-      project: project.value,
-      layers: layers.value,
-      scenes3D: scenes3D.value,
-      assets: assets.value,
-      nodes: nodes.value,
-      nodeConnections: nodeConnections.value,
-      rigs: rigs.value,
-      audioGraph: audioGraph.value,
+      project: toRaw(project.value),
+      layers: toRaw(layers.value),
+      scenes3D: toRaw(scenes3D.value),
+      assets: toRaw(assets.value),
+      nodes: toRaw(nodes.value),
+      nodeConnections: toRaw(nodeConnections.value),
+      rigs: toRaw(rigs.value),
+      audioGraph: toRaw(audioGraph.value),
     }
   }
 
@@ -375,6 +378,21 @@ export const useEditorStore = defineStore('editor', () => {
     } finally {
       projectBrowserBusy.value = false
     }
+  }
+
+  async function createPhaseHud(name?:string) {
+    projectBrowserBusy.value=true
+    projectBrowserError.value=''
+    try {
+      await flushProjectSave()
+      const {createPhaseHudProject}=await import('../../shared/phaseHud')
+      applyLoadedState(createPhaseHudProject(name))
+      changeRevision+=1
+      await saveProjectNow()
+      await refreshProjects()
+      return true
+    }catch(error){projectBrowserError.value=error instanceof Error?error.message:'HUD creation failed';return false}
+    finally{projectBrowserBusy.value=false}
   }
 
   async function createEmptyProject(options: NewProjectOptions) {
@@ -480,10 +498,10 @@ export const useEditorStore = defineStore('editor', () => {
   }
 
   function historySignature(snapshot: EditorHistorySnapshot) {
-    const { id: _id, label: _label, createdAt: _createdAt, ...content } = snapshot
+    const { id: _id, label: _label, createdAt: _createdAt, ...content } = toRaw(snapshot)
     return JSON.stringify({
       ...content,
-      state: { ...snapshot.state, project: { ...snapshot.state.project, updatedAt: 0 } },
+      state: { ...content.state, project: { ...content.state.project, updatedAt: 0 } },
     })
   }
 
@@ -555,7 +573,7 @@ export const useEditorStore = defineStore('editor', () => {
   function restoreHistorySnapshot(snapshot: EditorHistorySnapshot) {
     cancelAudioPlayback()
     restoringHistory = true
-    const state = JSON.parse(JSON.stringify(snapshot.state)) as SerializedEditorState
+    const state = JSON.parse(JSON.stringify(toRaw(snapshot.state))) as SerializedEditorState
     audioGraph.value = state.audioGraph ?? defaultAudioGraph()
     project.value = state.project
     layers.value = state.layers
@@ -1976,6 +1994,13 @@ export const useEditorStore = defineStore('editor', () => {
     markChanged()
   }
 
+  function setSceneLook(patch: SceneLookPatch) {
+    const scene=selectedScene.value
+    if(!scene)return
+    applySceneLook(scene,patch)
+    markSceneChanged(scene)
+  }
+
   function add3DPrimitive(primitive: 'box' | 'sphere') {
     const scene = selectedScene.value
     if (!scene) return null
@@ -3290,9 +3315,9 @@ export const useEditorStore = defineStore('editor', () => {
     splitLayerAt, splitSelectedLayer, markChanged, saveProjectNow, flushProjectSave, initializePersistence,
     requestFrameCacheRange, cancelFrameCache, requestFrameCacheClear, beginFrameCache,
     recordFrameCached, updateFrameCacheProgress, finishFrameCache, resetFrameCacheDisplay,
-    refreshProjects, openProject, createEmptyProject, setProjectFormat, setWorkspace, create3DSceneFromWorkspace, exportVideo, exportGif, cancelExport,
+    refreshProjects, openProject, createEmptyProject, createPhaseHud, setProjectFormat, setWorkspace, create3DSceneFromWorkspace, exportVideo, exportGif, cancelExport,
     publish3DSceneAsset, ensure3DSceneAssets,
-    selectSceneEntity, select3DLayer, markSceneChanged, add3DPrimitive, add3DGroup, ungroup3DObject, add3DImagePlane, add3DModel, add3DLight, add3DCamera, set3DEntityTransform,
+    selectSceneEntity, select3DLayer, markSceneChanged, setSceneLook, add3DPrimitive, add3DGroup, ungroup3DObject, add3DImagePlane, add3DModel, add3DLight, add3DCamera, set3DEntityTransform,
     rename3DEntity, set3DEntityVisible, delete3DEntity,
     update3DEntityTransform, set3DObjectMaterial, set3DObjectImage, set3DObjectModel, set3DLightIntensity, set3DLightCone, set3DLightArea, set3DEnvironmentMap, set3DEnvironmentBackground, set3DCameraFov, set3DCameraLens, set3DCameraDepthOfField,
     toggle3DKeyframe, keySelected3DTransform, move3DKeyframe, delete3DKeyframe, setActive3DCamera,

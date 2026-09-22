@@ -1,0 +1,25 @@
+{
+  "settings": {
+    "shadows": true,
+    "shadowMapSize": 2048,
+    "ambientOcclusion": true,
+    "ambientOcclusionIntensity": 0.65,
+    "ambientOcclusionRadius": 0.65,
+    "motionBlur": false,
+    "motionBlurShutter": 180,
+    "motionBlurSamples": 4,
+    "quality": "full",
+    "backgroundColor": "#729aac",
+    "viewTransform": "aces",
+    "exposureStops": 0.22,
+    "colorGrade": {
+      "enabled": true,
+      "temperature": 8,
+      "tint": 3,
+      "contrast": 1.12,
+      "saturation": 0
+    },
+    "workingColorSpace": "linear-srgb"
+  },
+  "errors": []
+}

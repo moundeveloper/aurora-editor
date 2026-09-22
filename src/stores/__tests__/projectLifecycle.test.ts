@@ -26,4 +26,16 @@ describe('project lifecycle', () => {
     expect(store.layers[1]).toMatchObject({ type: 'audio', isPlaceholder: true })
     expect(store.layers.map((layer) => [layer.transform.x.value, layer.transform.y.value])).toEqual([[540, 960], [540, 960]])
   })
+
+  it('creates and reopens the shared animated HUD preset',async()=>{
+    const store=useEditorStore();await store.initializePersistence()
+    const original=store.project.id
+    expect(await store.createPhaseHud('UI HUD')).toBe(true)
+    expect(store.project.id).not.toBe(original)
+    const id=store.project.id
+    expect(await store.openProject(id)).toBe(true)
+    expect(store.project.name).toBe('UI HUD')
+    expect(store.scenes3D[0]?.objects.find(o=>o.id==='scan-1')?.transform.position.y.keyframes).toHaveLength(5)
+    expect(store.assets.filter(a=>a.kind==='image')).toHaveLength(15)
+  })
 })

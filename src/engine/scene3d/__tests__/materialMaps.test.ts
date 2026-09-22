@@ -54,6 +54,13 @@ describe('PBR texture slots', () => {
     expect(material.normalMap).toBeNull()
     expect(material.roughnessMap).toBeNull()
     expect(material.depthWrite).toBe(false)
+    expect(material.forceSinglePass).toBe(true)
+    object.rigId='folded-card'
+    registry.get(scene,64,64,0,assets)
+    expect(material.forceSinglePass).toBe(false)
+    delete object.rigId
+    registry.get(scene,64,64,0,assets)
+    expect(material.forceSinglePass).toBe(true)
     registry.dispose()
   })
 })

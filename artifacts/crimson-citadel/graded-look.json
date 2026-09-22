@@ -1,0 +1,10 @@
+{
+  "colorGrade": {
+    "enabled": true,
+    "temperature": 8,
+    "tint": 3,
+    "contrast": 1.12,
+    "saturation": 1.08
+  },
+  "exposureStops": 0.22
+}

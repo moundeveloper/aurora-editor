@@ -1,4 +1,4 @@
-import type { AnimatableProperty } from '@/models/editor'
+import type { AnimatableProperty, Keyframe } from '@/models/editor'
 import { numericScopes } from './propertyScope'
 import { compileExpression } from './expressions'
 
@@ -19,9 +19,20 @@ function cubicBezier(progress: number, x1: number, y1: number, x2: number, y2: n
   return sample(parameter, y1, y2)
 }
 
+const keyOrderCache = new WeakMap<AnimatableProperty<number>, { source: Keyframe<number>[]; times: number[]; sorted: Keyframe<number>[] }>()
+
+/** Keep references to keys so value/easing edits stay live; invalidate for insertion or retiming. */
+function orderedKeys(channel: AnimatableProperty<number>) {
+  const keys = channel.keyframes, cached = keyOrderCache.get(channel)
+  if (cached && cached.source.length === keys.length && keys.every((key, index) => cached.source[index] === key && cached.times[index] === key.time)) return cached.sorted
+  const sorted = [...keys].sort((left, right) => left.time - right.time)
+  keyOrderCache.set(channel, { source: [...keys], times: keys.map(key => key.time), sorted })
+  return sorted
+}
+
 function evaluateKeyframes(channel: AnimatableProperty<number>, time: number): number {
   if (!channel.animated || channel.keyframes.length === 0) return channel.value
-  const keys = [...channel.keyframes].sort((left, right) => left.time - right.time)
+  const keys = orderedKeys(channel)
   const first = keys[0]
   const last = keys[keys.length - 1]
   if (!first || !last) return channel.value
