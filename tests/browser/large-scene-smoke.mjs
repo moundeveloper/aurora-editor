@@ -32,7 +32,13 @@ try {
     const undoStart=performance.now();store.undo();const undoMs=performance.now()-undoStart
     await settle()
     if(store.selectedScene.objects[0].transform.position.x.value!==original)throw new Error('Undo failed to restore object position')
-    return {ticks,selections,editMs,undoMs,assets:store.assets.length,objects:store.selectedScene.objects.length}
+    const sustained=[]
+    for(let i=0;i<240;i++){
+      const start=performance.now();store.currentTime=(i/30)%store.project.duration
+      await settle();sustained.push(performance.now()-start)
+    }
+    const ordered=[...sustained].sort((a,b)=>a-b)
+    return {ticks,selections,editMs,undoMs,assets:store.assets.length,objects:store.selectedScene.objects.length,sustained:{frames:240,medianMs:ordered[120],p95Ms:ordered[228],includesTwoAnimationFrames:true}}
   })
   await mkdir('artifacts/crimson-citadel',{recursive:true})
   await page.screenshot({path:`artifacts/crimson-citadel/editor-${label}.png`})

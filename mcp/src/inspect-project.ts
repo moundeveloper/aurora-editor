@@ -10,6 +10,7 @@ const transport = new StdioClientTransport({
   cwd: process.cwd(),
   env: { ...process.env } as Record<string, string>,
   stderr: 'inherit',
+  maxBufferSize: 128 * 1024 * 1024,
 })
 const client = new Client({ name: 'aurora-project-inspector', version: '0.1.0' })
 

@@ -18,14 +18,16 @@ function sourceFiles(directory: string): string[] {
  * ShaderMaterial it compiles. A hand-written `#include` of one of those chunks therefore redefines
  * its functions, the fragment shader fails to compile, and every draw using that material is
  * silently skipped: the viewport goes blank with nothing but a `useProgram: program not valid`
- * warning to show for it. Three's own chunk names are the trap, so the whole family is banned.
+ * warning to show for it. Only explicitly reviewed, non-injected chunks are allowed.
  */
 describe('engine shader sources', () => {
   it('never re-includes a Three shader chunk that Three already injects', () => {
     const offenders = sourceFiles(engineRoot)
       .flatMap((path) => readFileSync(path, 'utf8')
         .split('\n')
-        .flatMap((line, index) => /#include\s*</.test(line) ? [`${path}:${index + 1}: ${line.trim()}`] : []))
+        // Packing is not in ShaderMaterial's generated prefix; the alpha-aware
+        // depth pass needs its exact RGBADepthPacking and view-Z conversions.
+        .flatMap((line, index) => /#include\s*</.test(line) && !/#include\s*<packing>/.test(line) ? [`${path}:${index + 1}: ${line.trim()}`] : []))
 
     expect(offenders).toEqual([])
   })

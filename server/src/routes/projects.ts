@@ -1,10 +1,22 @@
 import { Hono } from 'hono'
+import { renderPreviewOptionsSchema } from '../../../shared/renderPreview.ts'
+import type { SerializedEditorState } from '../../../src/models/editor.ts'
+import type { VaultLayout } from '../storage/paths.ts'
 import { serializedProjectSchema } from '../../../shared/contracts.ts'
 import { projectETag, ProjectConflictError, type ProjectRepository } from '../projects/ProjectRepository.ts'
 
-export function projectRoutes(projects: ProjectRepository) {
+export function projectRoutes(projects: ProjectRepository, layout: VaultLayout) {
   return new Hono()
     .get('/', async (context) => context.json({ projects: await projects.list() }))
+    .post('/:id/render-preview',async context=>{
+      const parsed=renderPreviewOptionsSchema.safeParse({...await context.req.json(),projectId:context.req.param('id')})
+      if(!parsed.success)return context.json({error:parsed.error.issues[0]?.message},400)
+      const {projectId,...options}=parsed.data,snapshot=await projects.load(projectId)
+      if(!snapshot)return context.json({error:'Unknown project'},404)
+      const {renderProjectPreviewIsolated}=await import('../../../mcp/src/renderPreviewProcess.ts')
+      const result=await renderProjectPreviewIsolated({snapshot:snapshot as unknown as SerializedEditorState,...options},layout)
+      return context.json({...result.summary,image:`data:image/png;base64,${result.png}`})
+    })
     .get('/active', async (context) => {
       const snapshot = await projects.loadActive()
       if (snapshot) context.header('ETag', projectETag(snapshot))

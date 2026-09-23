@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { scheduleSurface, cancelSurface } from '@/engine/rendering/surfaceScheduler'
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { storeToRefs } from 'pinia'
 import { ArrowLeftToLine, ArrowRightToLine, Box, Camera, Crosshair, Grid3X3, Move3D, Plus, Rotate3D, Scaling, Spline, Sun, Trash2, View } from '@lucide/vue'
@@ -637,7 +638,7 @@ function renderViewportNow() {
 
 function renderViewport() {
   if (viewportFrame) return
-  viewportFrame = requestAnimationFrame(() => {
+  viewportFrame = scheduleSurface(() => {
     viewportFrame = 0
     renderViewportNow()
   })
@@ -1320,7 +1321,7 @@ onMounted(async () => {
 })
 
 onBeforeUnmount(() => {
-  if (viewportFrame) cancelAnimationFrame(viewportFrame)
+  if (viewportFrame) cancelSurface(viewportFrame)
   resizeObserver?.disconnect()
   window.removeEventListener('keydown', onKeydown)
   window.removeEventListener('pointermove', onGesturePointerMove)

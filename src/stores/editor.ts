@@ -2,6 +2,7 @@ import { createModel, applyModelOperation, publishModel, type ModelOperation } f
 import { applySceneLook, type SceneLookPatch } from '../../shared/sceneLook'
 import { computed, ref, toRaw, watch } from 'vue'
 import { defaultAudioGraph, type AudioGraph } from '@/engine/audio/audioGraph'
+import { HistoryStatePool } from '@/engine/project/historyState'
 import { sharedAudioEngine, audioWav } from '@/engine/audio/AudioEngine'
 import { bindNumericScope, collectNumericProperties, renewNumericPropertyIds } from '@/engine/animation/propertyScope'
 import { defineStore } from 'pinia'
@@ -470,12 +471,14 @@ export const useEditorStore = defineStore('editor', () => {
    */
   let interactiveEdits = 0
 
+  const historyStatePool = new HistoryStatePool()
+
   function captureHistorySnapshot(label = 'Edit project'): EditorHistorySnapshot {
     return {
       id: `history-${Date.now()}-${++historySequence}`,
       label,
       createdAt: Date.now(),
-      state: JSON.parse(serializeEditorState(currentState())) as SerializedEditorState,
+      state: historyStatePool.capture(currentState()),
       workspace: workspace.value,
       currentTime: currentTime.value,
       selectedLayerId: selectedLayerId.value,
@@ -499,7 +502,7 @@ export const useEditorStore = defineStore('editor', () => {
 
   function historySignature(snapshot: EditorHistorySnapshot) {
     const { id: _id, label: _label, createdAt: _createdAt, ...content } = toRaw(snapshot)
-    return JSON.stringify({
+    return historyStatePool.signature({
       ...content,
       state: { ...content.state, project: { ...content.state.project, updatedAt: 0 } },
     })
@@ -573,7 +576,7 @@ export const useEditorStore = defineStore('editor', () => {
   function restoreHistorySnapshot(snapshot: EditorHistorySnapshot) {
     cancelAudioPlayback()
     restoringHistory = true
-    const state = JSON.parse(JSON.stringify(toRaw(snapshot.state))) as SerializedEditorState
+    const state = historyStatePool.clone(toRaw(snapshot.state))
     audioGraph.value = state.audioGraph ?? defaultAudioGraph()
     project.value = state.project
     layers.value = state.layers

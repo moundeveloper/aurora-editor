@@ -106,11 +106,14 @@ Call `aurora_scene_render_preview` with:
   "quality": "preview",
   "width": 960,
   "height": 540,
-  "benchmarkFrames": 6
+  "benchmarkFrames": 240,
+  "duration": 8
 }
 ```
 
-`sceneId` and `cameraId` are optional; omission selects the first scene and its camera cut at `time`.
+`sceneId` and `cameraId` are optional; omission selects the first scene and follows camera cuts at each sample.
+`duration` advances animation from `time` for up to 30 seconds (clamped to project duration);
+zero repeats one frame. `benchmarkFrames` accepts 1–600 samples. The returned image is the last sample.
 `quality` is an optional render-only override; omission honors the saved scene settings. Resolution
 is bounded to 1920 × 1080. The output contains the PNG as MCP image content and a path under
 `<vault>/renders`, plus a matching JSON report. Allow up to 180 seconds on a cold machine; warm runs
@@ -120,6 +123,7 @@ When the MCP server is not attached to the agent session, this CLI invokes exact
 
 ```powershell
 pnpm mcp:render-preview <project-id> preview 960 540
+node mcp/src/render-project.ts <project-id> full 960 540 0 8 240
 ```
 
 The statistics include first scene setup time, median/P95 steady-state scene sync and complete frame
@@ -128,6 +132,29 @@ buffer upload count. Zero uploads are expected for repeated renders of static ge
 specific to the reported GPU/resolution and do not include editor UI work. This renders a saved 3D
 camera, not unsaved viewport state or the complete 2D/compositing graph; motion-blur accumulation is
 not performed by this still-preview tool.
+
+The matching UI is **3D → camera preview header → Profile**. It exposes scene, camera,
+start time, duration, dimensions, quality and frame count, then displays the image,
+sample range, all timing/count results, artifact path and PNG download. Both entry
+points use `shared/renderPreview.ts` validation and the same renderer. The HTTP route
+runs the renderer in an isolated Node process so Vite does not enter Node's development
+watch graph and restart the app server during a request.
+
+### Model storage and large MCP messages
+
+On the next normal save, native models are stored as lossless, SHA-256-addressed gzip
+JSON blobs under `<vault>/projects/.geometry`; the project file contains references.
+Legacy inline files still load. HTTP and MCP return fully expanded project data, and
+optimistic concurrency uses the logical project rather than its storage encoding.
+Back up the entire projects directory, including `.geometry`; a raw manifest alone
+is no longer a complete backup. Blobs are retained conservatively, without automatic
+garbage collection. This storage change is shared by UI and MCP saves.
+
+The SDK's default STDIO receive buffer is 10 MB. Full native-model project responses
+can exceed it, even with compact JSON. The bundled inspector uses 128 MB; other clients
+reading such projects need an equivalent `maxBufferSize` setting. Rendering does not
+send the full project through the client. `node tests/storage-profile.ts` measures a
+saved project through MCP and round-trips it in a temporary vault without modifying it.
 
 For a read-only **actual editor** performance/screenshot check against the running dev app:
 

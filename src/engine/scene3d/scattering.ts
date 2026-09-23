@@ -70,6 +70,7 @@ function scatterSignature(root: THREE.Group, source: THREE.Mesh, target: THREE.M
 }
 
 export function syncScattering(root: THREE.Group, objects: Map<string, THREE.Object3D>, scene: Aurora3DScene, time: number) {
+  let worldChanged=false
   const existing = new Map(root.children.filter(item => item.userData.auroraScatter).map(item => [item.userData.auroraScatter as string,item as THREE.InstancedMesh]))
   for (const definition of scene.objects) {
     const source = objects.get(definition.id), target = objects.get(definition.scatter?.targetId ?? '')
@@ -89,6 +90,7 @@ export function syncScattering(root: THREE.Group, objects: Map<string, THREE.Obj
       instances = new THREE.InstancedMesh(source.geometry,source.material,matrices!.length)
       instances.userData.auroraScatter = definition.id
       root.add(instances)
+      worldChanged=true
     }
     instances.visible = source.visible
     for (let parent = source.parent; parent && instances.visible; parent = parent.parent) {
@@ -96,6 +98,7 @@ export function syncScattering(root: THREE.Group, objects: Map<string, THREE.Obj
     }
     instances.castShadow = source.castShadow; instances.receiveShadow = source.receiveShadow
     if (matrices) {
+      worldChanged=true
       const inverseRoot = root.matrixWorld.clone().invert(), local = new THREE.Matrix4()
       matrices.forEach((matrix,index) => instances!.setMatrixAt(index,local.multiplyMatrices(inverseRoot,matrix)))
       instances.instanceMatrix.needsUpdate = true
@@ -104,5 +107,6 @@ export function syncScattering(root: THREE.Group, objects: Map<string, THREE.Obj
       scatterCache.set(instances,signature)
     }
   }
-  for (const instances of existing.values()) { root.remove(instances); instances.dispose() }
+  for (const instances of existing.values()) { root.remove(instances); instances.dispose(); worldChanged=true }
+  return worldChanged
 }

@@ -343,8 +343,8 @@ function sceneHasEntity(scene: Aurora3DScene, entityId: string) {
     || scene.cameras.some((item) => item.id === entityId)
 }
 
-export function serializeEditorState(state: SerializedEditorState): string {
-  return JSON.stringify({
+export function serializableEditorState(state: SerializedEditorState): SerializedEditorState {
+  return {
     project: {
       ...state.project,
       version: CURRENT_PROJECT_VERSION,
@@ -357,7 +357,11 @@ export function serializeEditorState(state: SerializedEditorState): string {
     nodeConnections: state.nodeConnections,
       rigs: state.rigs,
       audioGraph: state.audioGraph,
-  })
+  }
+}
+
+export function serializeEditorState(state: SerializedEditorState): string {
+  return JSON.stringify(serializableEditorState(state))
 }
 
 export function deserializeEditorState(raw: string | null, fallback: EditorStateFallback): SerializedEditorState {

@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import * as THREE from 'three'
 import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js'
 import { GTAOPass } from 'three/addons/postprocessing/GTAOPass.js'
-import { BokehPass } from 'three/addons/postprocessing/BokehPass.js'
+import { BokehPass } from '../AlphaBokehPass'
 import { AuroraSceneRenderPipeline } from '../AuroraSceneRenderPipeline'
 import { createDemo3DScene } from '../../scene3d/sceneFactory'
 

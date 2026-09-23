@@ -1,4 +1,5 @@
 import { registerModelingTools } from './modelingTools.ts'
+import { renderPreviewOptionsSchema } from '../../shared/renderPreview.ts'
 import { createPhaseHudProject } from '../../shared/phaseHud.ts'
 import { createCrimsonCitadelProject } from './crimsonCitadel.ts'
 import { sceneLookPatchSchema } from '../../shared/sceneLook.ts'
@@ -35,12 +36,7 @@ export async function createAuroraMcpServer(root?: string) {
   server.registerTool('aurora_scene_render_preview', {
     title: 'Render and profile an Aurora camera',
     description: 'Renders a saved project with Aurora’s real Three.js scene runtime and post-processing in an isolated headless Chromium browser. Returns the PNG image, local artifact path, draw calls, triangle/instance counts, and warm-frame timing. Does not open, save, or modify the editor/project. No running UI or app server is required. See mcp/README.md for setup.',
-    inputSchema: z.object({
-      projectId:z.string().min(1),sceneId:z.string().optional(),cameraId:z.string().optional(),
-      time:z.number().min(0).default(0),width:z.number().int().min(64).max(1920).default(960),height:z.number().int().min(64).max(1080).default(540),
-      quality:z.enum(['draft','preview','full']).optional().describe('Override quality for this render only; omitted uses saved settings'),
-      benchmarkFrames:z.number().int().min(1).max(60).default(6),
-    }),annotations:{readOnlyHint:true,openWorldHint:false},
+    inputSchema: renderPreviewOptionsSchema,annotations:{readOnlyHint:true,openWorldHint:false},
   },async ({projectId,...options})=>{
     const snapshot=await projects.load(projectId)
     if(!snapshot)return {isError:true,content:[{type:'text',text:'Unknown Aurora project'}]}
@@ -82,7 +78,7 @@ export async function createAuroraMcpServer(root?: string) {
   }, async ({ projectId }) => {
     const snapshot = await projects.load(projectId)
     return snapshot
-      ? { content: [{ type: 'text', text: JSON.stringify(snapshot, null, 2) }] }
+      ? { content: [{ type: 'text', text: JSON.stringify(snapshot) }] }
       : { isError: true, content: [{ type: 'text', text: `Unknown Aurora project: ${projectId}` }] }
   })
 

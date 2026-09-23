@@ -1,6 +1,8 @@
 import { modelGeometry } from '../modeling/modelGeometry'
 import * as THREE from 'three'
 import { syncScattering } from './scattering'
+import { acquireTexture } from './sharedTextures'
+import { IdentityIndex } from './identityIndex'
 import { cachedSceneBounds } from './sceneBoundsCache'
 import { syncLightLinking } from './lightLinking'
 import { RectAreaLightUniformsLib } from 'three/examples/jsm/lights/RectAreaLightUniformsLib.js'
@@ -325,7 +327,7 @@ function syncArrayClone(runtime: Scene3DRuntime, clone: THREE.Object3D) {
  */
 function syncGroupArrays(runtime: Scene3DRuntime, definition: Aurora3DScene, time: number) {
   const groups = definition.objects.filter(object => object.type === 'group')
-  if (!groups.length) return
+  if (!groups.length) return false
   const childrenByParent = new Map<string, Aurora3DObject[]>()
   definition.objects.forEach((object) => {
     if (!object.parentId) return
@@ -369,6 +371,7 @@ function syncGroupArrays(runtime: Scene3DRuntime, definition: Aurora3DScene, tim
       copyRoot.children.forEach((child) => syncArrayClone(runtime, child))
     })
   })
+  return true
 }
 
 function entityWorldPosition(runtime: Scene3DRuntime, entityId: string) {
@@ -451,9 +454,12 @@ function applyCameraObjectConstraint(runtime: Scene3DRuntime, camera: THREE.Came
 }
 
 export class ThreeSceneRuntimeRegistry {
+  private assetIndex=new IdentityIndex<MediaAsset>()
+  private rigIndex=new IdentityIndex<AuroraRig>()
   private runtimes = new Map<string, Scene3DRuntime>()
   private texturePromises = new Map<string, Promise<THREE.Texture | null>>()
   private textures = new Map<string, THREE.Texture>()
+  private textureReleases = new Map<string, () => void>()
   private environmentPromises = new Map<string, Promise<THREE.Texture | null>>()
   private environments = new Map<string, THREE.Texture>()
   private neutralWorld: THREE.DataTexture | null = null
@@ -465,8 +471,8 @@ export class ThreeSceneRuntimeRegistry {
 
   get(sceneDefinition: Aurora3DScene, width: number, height: number, time: number, assets: readonly MediaAsset[] = [], rigs: readonly AuroraRig[] = []): Scene3DRuntime {
     this.disposed = false
-    const assetMap = new Map(assets.map((asset) => [asset.id, asset]))
-    const rigMap = new Map(rigs.map((rig) => [rig.id, rig]))
+    const assetMap = this.assetIndex.get(assets)
+    const rigMap = this.rigIndex.get(rigs)
     const structureKey = sceneStructureKey(sceneDefinition, assetMap)
     let runtime = this.runtimes.get(sceneDefinition.id)
     if (!runtime || runtime.structureKey !== structureKey) {
@@ -503,15 +509,10 @@ export class ThreeSceneRuntimeRegistry {
     const key = color ? url : `data:${url}`
     const existing = this.texturePromises.get(key)
     if (existing) return existing
-    const loading = new THREE.TextureLoader().loadAsync(url).then((texture) => {
-      if (this.disposed) {
-        texture.dispose()
-        return null
-      }
-      texture.colorSpace = color ? THREE.SRGBColorSpace : THREE.NoColorSpace
-      texture.wrapS = THREE.ClampToEdgeWrapping
-      texture.wrapT = THREE.ClampToEdgeWrapping
-      texture.needsUpdate = true
+    const lease = acquireTexture(url, color)
+    this.textureReleases.set(key, lease.release)
+    const loading = lease.promise.then((texture) => {
+      if (this.disposed || !texture || this.textureReleases.get(key) !== lease.release) return null
       this.textures.set(key, texture)
       return texture
     }).catch(() => null)
@@ -811,10 +812,8 @@ export class ThreeSceneRuntimeRegistry {
         object.material.envMapIntensity = definition.environmentIntensity
       }
     })
-    syncGroupArrays(runtime, definition, time)
-    runtime.root.updateMatrixWorld(true)
-    syncScattering(runtime.root, runtime.objects, definition, time)
-    runtime.root.updateMatrixWorld(true)
+    if(syncGroupArrays(runtime, definition, time))runtime.root.updateMatrixWorld(true)
+    if(syncScattering(runtime.root, runtime.objects, definition, time))runtime.root.updateMatrixWorld(true)
     // Bounds are only consumed by shadow fitting, not camera or object animation.
     const sceneBounds = definition.settings.shadows && definition.lights.some(light => light.castShadow)
       ? cachedSceneBounds(runtime.root) : null
@@ -825,20 +824,23 @@ export class ThreeSceneRuntimeRegistry {
       applyTransform(camera, item.transform, time)
       if (!applyCameraObjectConstraint(runtime, camera, item, time)) applyCameraPathConstraint(runtime, camera, item, definition, time)
       if (camera instanceof THREE.PerspectiveCamera) {
+        const fov=evaluateNumericProperty(item.fov,time)
+        const changed=camera.aspect!==aspect||camera.fov!==fov||camera.near!==item.near||camera.far!==item.far
         camera.aspect = aspect
-        camera.fov = evaluateNumericProperty(item.fov, time)
+        camera.fov = fov
         camera.near = item.near
         camera.far = item.far
-        camera.updateProjectionMatrix()
+        if(changed)camera.updateProjectionMatrix()
       } else if (camera instanceof THREE.OrthographicCamera) {
         const height = 6
+        const changed=camera.left!==-height*aspect||camera.right!==height*aspect||camera.top!==height||camera.bottom!==-height||camera.near!==item.near||camera.far!==item.far
         camera.left = -height * aspect
         camera.right = height * aspect
         camera.top = height
         camera.bottom = -height
         camera.near = item.near
         camera.far = item.far
-        camera.updateProjectionMatrix()
+        if(changed)camera.updateProjectionMatrix()
       }
     })
     definition.lights.forEach((item) => {
@@ -884,7 +886,8 @@ export class ThreeSceneRuntimeRegistry {
     this.disposed = true
     this.runtimes.forEach((runtime) => this.disposeRuntime(runtime))
     this.runtimes.clear()
-    this.textures.forEach((texture) => texture.dispose())
+    this.textureReleases.forEach(release => release())
+    this.textureReleases.clear()
     this.textures.clear()
     this.texturePromises.clear()
     this.environments.forEach((texture) => texture.dispose())

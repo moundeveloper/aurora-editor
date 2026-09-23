@@ -1,0 +1,24 @@
+{
+  "projectId": "31d7d3e4-cd9d-4e42-b7a3-2ebe2ba1ac3f",
+  "sceneId": "scene-crimson-citadel",
+  "cameraId": "camera-gardens",
+  "width": 960,
+  "height": 540,
+  "quality": "full",
+  "sampleStart": 0,
+  "sampleEnd": 8,
+  "sampleCount": 240,
+  "metrics": {
+    "firstSyncMs": 187.5,
+    "syncMedianMs": 1.5,
+    "syncP95Ms": 3,
+    "frameMedianMs": 3.3,
+    "frameP95Ms": 6,
+    "drawCalls": 185,
+    "triangles": 1245717,
+    "instances": 40000,
+    "instanceUploadsDuringBenchmark": 0,
+    "renderer": "ANGLE (Intel, Intel(R) UHD Graphics (0x0000A721) Direct3D11 vs_5_0 ps_5_0, D3D11)"
+  },
+  "path": "C:\\Users\\AbdelmounaimSabri\\Aurora\\renders\\31d7d3e4-cd9d-4e42-b7a3-2ebe2ba1ac3f-1790178948613-c37e234b.png"
+}

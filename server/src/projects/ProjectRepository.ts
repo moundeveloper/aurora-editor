@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import { packGeometry, unpackGeometry } from './geometryStorage.ts'
 import { mkdir, rmdir, readFile, readdir, rename, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import {
@@ -32,14 +33,17 @@ export class ProjectRepository {
   }
 
   private async readProject(path: string): Promise<SharedSerializedProject | null> {
+    let contents: string
     try {
-      const snapshot = serializedProjectSchema.parse(JSON.parse(await readFile(path, 'utf8')))
-      this.readVersions.set(snapshot, projectETag(snapshot))
-      return snapshot
+      contents = await readFile(path, 'utf8')
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null
       throw error
     }
+    const manifest = serializedProjectSchema.parse(JSON.parse(contents))
+    const snapshot = await unpackGeometry(manifest,join(this.layout.projects,'.geometry'))
+    this.readVersions.set(snapshot, projectETag(snapshot))
+    return snapshot
   }
 
   async save(snapshot: unknown, expectedVersion?: string): Promise<SharedSerializedProject> {
@@ -60,7 +64,8 @@ export class ProjectRepository {
       const current = await this.load(parsed.project.id)
       if (expected !== undefined && (current ? projectETag(current) : 'new') !== expected) throw new ProjectConflictError()
       const temporary = join(this.layout.temp, `${parsed.project.id}-${process.pid}-${Date.now()}.tmp`)
-      await writeFile(temporary, `${JSON.stringify(parsed, null, 2)}\n`, 'utf8')
+      const packed=await packGeometry(parsed,join(this.layout.projects,'.geometry'))
+      await writeFile(temporary, `${JSON.stringify(packed)}\n`, 'utf8')
       await rename(temporary, target)
       if (typeof snapshot === 'object' && snapshot) this.readVersions.set(snapshot,projectETag(parsed))
       await this.setActive(parsed.project.id)
@@ -76,7 +81,16 @@ export class ProjectRepository {
     const entries = await readdir(this.layout.projects, { withFileTypes: true })
     const projects = await Promise.all(entries
       .filter((entry) => entry.isFile() && entry.name.endsWith(PROJECT_SUFFIX))
-      .map(async (entry) => (await this.readProject(join(this.layout.projects, entry.name)))?.project ?? null))
+      .map(async (entry) => {
+        try {
+          // The project picker needs metadata, never decompressed model arrays.
+          const manifest=JSON.parse(await readFile(join(this.layout.projects,entry.name),'utf8'))
+          return editorProjectSchema.parse(manifest.project)
+        } catch(error) {
+          if((error as NodeJS.ErrnoException).code==='ENOENT')return null
+          throw error
+        }
+      }))
     return projects
       .filter((project): project is SharedEditorProject => project !== null)
       .sort((left, right) => right.updatedAt - left.updatedAt)

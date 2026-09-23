@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { scheduleSurface, cancelSurface } from '@/engine/rendering/surfaceScheduler'
+import SceneProfiler from './SceneProfiler.vue'
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { storeToRefs } from 'pinia'
 import { ImageOff, Radio, View } from '@lucide/vue'
@@ -101,7 +103,7 @@ function renderPreviewNow() {
 
 function renderPreview() {
   if (previewFrame) return
-  previewFrame = requestAnimationFrame(() => {
+  previewFrame = scheduleSurface(() => {
     previewFrame = 0
     renderPreviewNow()
   })
@@ -127,7 +129,7 @@ onMounted(async () => {
 })
 
 onBeforeUnmount(() => {
-  if (previewFrame) cancelAnimationFrame(previewFrame)
+  if (previewFrame) cancelSurface(previewFrame)
   resizeObserver?.disconnect()
   runtimeRegistry.dispose()
   scenePipeline?.dispose()
@@ -162,6 +164,7 @@ watch(() => selectedScene.value?.cameras.map((camera) => camera.id), (cameraIds)
       <MSelect :model-value="cameraChoice" class="camera-select" :options="cameraOptions" label="Preview camera" @update:model-value="selectPreviewCamera" />
       <button type="button" class="follow-cuts" :class="{ active: followCuts }" :title="followCuts ? 'Following camera cuts' : 'Follow camera cuts'" @click="toggleFollowCuts"><Radio :size="10" /></button>
       <span class="preview-spacer" />
+      <SceneProfiler />
       <span v-if="previewCamera" class="live-status" :class="{ preview: !followCuts }"><i /> {{ followCuts ? 'Cuts' : 'Preview' }}</span>
     </header>
 

@@ -1,0 +1,24 @@
+{
+  "projectId": "71f03e17-901e-4f10-aaa1-51d866c099e8",
+  "sceneId": "scene-phase-hud",
+  "cameraId": "camera-hud",
+  "width": 720,
+  "height": 1000,
+  "quality": "full",
+  "sampleStart": 0,
+  "sampleEnd": 12,
+  "sampleCount": 240,
+  "metrics": {
+    "firstSyncMs": 2.7,
+    "syncMedianMs": 0.3,
+    "syncP95Ms": 0.6,
+    "frameMedianMs": 1.1,
+    "frameP95Ms": 2.5,
+    "drawCalls": 32,
+    "triangles": 62,
+    "instances": 0,
+    "instanceUploadsDuringBenchmark": 0,
+    "renderer": "ANGLE (Intel, Intel(R) UHD Graphics (0x0000A721) Direct3D11 vs_5_0 ps_5_0, D3D11)"
+  },
+  "path": "C:\\Users\\AbdelmounaimSabri\\Aurora\\renders\\71f03e17-901e-4f10-aaa1-51d866c099e8-1790178966510-b5efa41c.png"
+}

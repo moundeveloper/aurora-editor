@@ -1,6 +1,6 @@
 import * as THREE from 'three'
 import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js'
-import { BokehPass } from 'three/addons/postprocessing/BokehPass.js'
+import { BokehPass } from './AlphaBokehPass'
 import { GTAOPass } from 'three/addons/postprocessing/GTAOPass.js'
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js'
 import { RenderPass } from 'three/addons/postprocessing/RenderPass.js'
@@ -242,7 +242,7 @@ export class AuroraSceneRenderPipeline {
       this.sampleCount = 0
     }
     if (dof && !state.bokehPass) {
-      state.bokehPass = new BokehPass(scene, camera, {})
+      state.bokehPass = new BokehPass(scene, camera)
       state.composer.insertPass(state.bokehPass, state.gtaoPass ? 2 : 1)
     } else if (!dof && state.bokehPass) {
       state.composer.removePass(state.bokehPass)

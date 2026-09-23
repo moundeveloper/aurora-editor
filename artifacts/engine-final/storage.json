@@ -1,0 +1,11 @@
+{
+  "legacyCompactJsonBytes": 14456808,
+  "manifestBytes": 179409,
+  "blobBytes": 2080943,
+  "totalBytes": 2260352,
+  "blobs": 50,
+  "saveMs": 586.5004000000001,
+  "loadMs": 385.47239999999965,
+  "listMs": 2.7291000000000167,
+  "logicalETagPreserved": true
+}

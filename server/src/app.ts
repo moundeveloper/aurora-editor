@@ -26,7 +26,7 @@ export async function createServer(root?: string): Promise<AuroraServer> {
   const app = new Hono()
     .get('/api/health', (context) => context.json({ ok: true, vault: layout.root }))
     .route('/api/assets', assetRoutes({ layout, index }))
-    .route('/api/projects', projectRoutes(projects))
+    .route('/api/projects', projectRoutes(projects,layout))
     .route('/media', mediaRoutes({ layout, index }))
     .onError((error, context) => {
       console.error('[aurora]', error)
